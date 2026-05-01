@@ -30,6 +30,7 @@ import {
 	replaceInlineAnnotationMarkers,
 	transformMarkdownOutsideFences,
 } from "./shared/annotation-scanner.js";
+import { initI18n, t } from "./i18n.js";
 
 const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
@@ -1701,12 +1702,12 @@ class MarkdownPreviewOverlay {
 	private rebuild(): void {
 		this.container.clear();
 
-		const title = `${this.theme.bold("Markdown preview")} ${this.theme.fg("dim", `(${this.pageIndex + 1}/${this.preview.pages.length})`)}`;
+		const title = `${this.theme.bold(t("preview.overlay.title", "Markdown preview"))} ${this.theme.fg("dim", `(${this.pageIndex + 1}/${this.preview.pages.length})`)}`;
 		this.container.addChild(new Text(this.theme.fg("accent", title), 0, 0));
 
 		const controls: string[] = [];
-		if (this.preview.pages.length > 1) controls.push("←/→ page");
-		controls.push(`${keyHint("tui.select.cancel", "close")}`, "r refresh", "o open browser");
+		if (this.preview.pages.length > 1) controls.push(t("preview.overlay.pageControl", "←/→ page"));
+		controls.push(`${keyHint("tui.select.cancel", t("preview.overlay.close", "close"))}`, t("preview.overlay.refresh", "r refresh"), t("preview.overlay.openBrowser", "o open browser"));
 		this.container.addChild(new Text(this.theme.fg("dim", controls.join(" • ")), 0, 0));
 
 		const page = this.currentPage();
@@ -1759,17 +1760,17 @@ class MarkdownPreviewOverlay {
 
 		if (matchesKey(data, "o") && !this.isOpeningBrowser) {
 			this.isOpeningBrowser = true;
-			this.statusLine = this.theme.fg("warning", "Opening browser preview...");
+			this.statusLine = this.theme.fg("warning", t("preview.overlay.openingBrowser", "Opening browser preview..."));
 			this.rebuild();
 			this.tui.requestRender();
 
 			void this.openInBrowser()
 				.then(() => {
-					this.statusLine = this.theme.fg("success", "Opened preview in browser.");
+					this.statusLine = this.theme.fg("success", t("preview.overlay.openedBrowser", "Opened preview in browser."));
 				})
 				.catch((error) => {
 					const message = error instanceof Error ? error.message : String(error);
-					this.statusLine = this.theme.fg("error", `Browser open failed: ${message}`);
+					this.statusLine = this.theme.fg("error", t("preview.overlay.browserOpenFailed", "Browser open failed: {message}", { message }));
 				})
 				.finally(() => {
 					this.isOpeningBrowser = false;
@@ -1781,7 +1782,7 @@ class MarkdownPreviewOverlay {
 
 		if (matchesKey(data, "r") && !this.isRefreshing) {
 			this.isRefreshing = true;
-			this.statusLine = this.theme.fg("warning", "Refreshing preview for current theme...");
+			this.statusLine = this.theme.fg("warning", t("preview.overlay.refreshing", "Refreshing preview for current theme..."));
 			this.rebuild();
 			this.tui.requestRender();
 
@@ -1790,11 +1791,11 @@ class MarkdownPreviewOverlay {
 					this.clearRenderedImages();
 					this.preview = preview;
 					this.pageIndex = Math.min(this.pageIndex, Math.max(0, preview.pages.length - 1));
-					this.statusLine = this.theme.fg("success", `Refreshed (${preview.themeMode} mode).`);
+					this.statusLine = this.theme.fg("success", t("preview.overlay.refreshed", "Refreshed ({mode} mode).", { mode: preview.themeMode }));
 				})
 				.catch((error) => {
 					const message = error instanceof Error ? error.message : String(error);
-					this.statusLine = this.theme.fg("error", `Refresh failed: ${message}`);
+					this.statusLine = this.theme.fg("error", t("preview.overlay.refreshFailed", "Refresh failed: {message}", { message }));
 				})
 				.finally(() => {
 					this.isRefreshing = false;
@@ -3615,6 +3616,7 @@ function parsePreviewArgs(args: string): { target?: PreviewTarget; pick?: boolea
 }
 
 export default function (pi: ExtensionAPI) {
+	initI18n(pi);
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
