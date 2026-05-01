@@ -30,6 +30,7 @@ import {
 	replaceInlineAnnotationMarkers,
 	transformMarkdownOutsideFences,
 } from "./shared/annotation-scanner.js";
+import { initI18n, t } from "./i18n.js";
 
 const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
@@ -1759,17 +1760,17 @@ class MarkdownPreviewOverlay {
 
 		if (matchesKey(data, "o") && !this.isOpeningBrowser) {
 			this.isOpeningBrowser = true;
-			this.statusLine = this.theme.fg("warning", "Opening browser preview...");
+			this.statusLine = this.theme.fg("warning", t("overlay.opening", "Opening browser preview..."));
 			this.rebuild();
 			this.tui.requestRender();
 
 			void this.openInBrowser()
 				.then(() => {
-					this.statusLine = this.theme.fg("success", "Opened preview in browser.");
+					this.statusLine = this.theme.fg("success", t("overlay.opened", "Opened preview in browser."));
 				})
 				.catch((error) => {
 					const message = error instanceof Error ? error.message : String(error);
-					this.statusLine = this.theme.fg("error", `Browser open failed: ${message}`);
+					this.statusLine = this.theme.fg("error", t("overlay.openFailed", `Browser open failed: ${message}`, { message }));
 				})
 				.finally(() => {
 					this.isOpeningBrowser = false;
@@ -1781,7 +1782,7 @@ class MarkdownPreviewOverlay {
 
 		if (matchesKey(data, "r") && !this.isRefreshing) {
 			this.isRefreshing = true;
-			this.statusLine = this.theme.fg("warning", "Refreshing preview for current theme...");
+			this.statusLine = this.theme.fg("warning", t("overlay.refreshing", "Refreshing preview for current theme..."));
 			this.rebuild();
 			this.tui.requestRender();
 
@@ -1790,11 +1791,11 @@ class MarkdownPreviewOverlay {
 					this.clearRenderedImages();
 					this.preview = preview;
 					this.pageIndex = Math.min(this.pageIndex, Math.max(0, preview.pages.length - 1));
-					this.statusLine = this.theme.fg("success", `Refreshed (${preview.themeMode} mode).`);
+					this.statusLine = this.theme.fg("success", t("overlay.refreshed", `Refreshed (${preview.themeMode} mode).`, { mode: preview.themeMode }));
 				})
 				.catch((error) => {
 					const message = error instanceof Error ? error.message : String(error);
-					this.statusLine = this.theme.fg("error", `Refresh failed: ${message}`);
+					this.statusLine = this.theme.fg("error", t("overlay.refreshFailed", `Refresh failed: ${message}`, { message }));
 				})
 				.finally(() => {
 					this.isRefreshing = false;
@@ -1822,7 +1823,7 @@ async function renderWithLoader(ctx: ExtensionCommandContext, markdown: string, 
 	type LoaderResult = { ok: true; preview: RenderPreviewResult } | { ok: false; error: string } | { ok: false; cancelled: true };
 
 	const result = await ctx.ui.custom<LoaderResult>((tui, theme, _kb, done) => {
-		const loader = new BorderedLoader(tui, theme, "Rendering markdown + LaTeX preview...");
+		const loader = new BorderedLoader(tui, theme, t("loader.rendering", "Rendering markdown + LaTeX preview..."));
 		let settled = false;
 		const resolve = (value: LoaderResult) => {
 			if (settled) return;
@@ -1857,21 +1858,21 @@ async function renderWithLoader(ctx: ExtensionCommandContext, markdown: string, 
 			return { preview, supportsCustomUi: false };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Preview failed: ${message}`, "error");
+			ctx.ui.notify(t("notify.previewFailed", `Preview failed: ${message}`, { message }), "error");
 			return null;
 		}
 	}
 
 	if (!result.ok) {
 		if ("cancelled" in result && result.cancelled) {
-			ctx.ui.notify("Preview cancelled.", "info");
+			ctx.ui.notify(t("notify.previewCancelled", "Preview cancelled."), "info");
 			return null;
 		}
 		if ("error" in result) {
-			ctx.ui.notify(`Preview failed: ${result.error}`, "error");
+			ctx.ui.notify(t("notify.previewFailed", `Preview failed: ${result.error}`, { message: result.error }), "error");
 			return null;
 		}
-		ctx.ui.notify("Preview failed.", "error");
+		ctx.ui.notify(t("notify.previewFailedGeneric", "Preview failed."), "error");
 		return null;
 	}
 
@@ -1885,7 +1886,7 @@ async function pickAssistantMessage(ctx: ExtensionCommandContext): Promise<strin
 	const messages = getAssistantMessages(ctx);
 
 	if (messages.length === 0) {
-		ctx.ui.notify("No assistant messages found in the current branch.", "warning");
+		ctx.ui.notify(t("notify.noAssistantMessages", "No assistant messages found in the current branch."), "warning");
 		return null;
 	}
 
@@ -1902,7 +1903,7 @@ async function pickAssistantMessage(ctx: ExtensionCommandContext): Promise<strin
 	const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-		container.addChild(new Text(theme.fg("accent", theme.bold("Select Response to Preview")), 1, 0));
+		container.addChild(new Text(theme.fg("accent", theme.bold(t("picker.title", "Select Response to Preview"))), 1, 0));
 
 		const selectList = new SelectList(items, Math.min(items.length, 10), {
 			selectedPrefix: (text) => theme.fg("accent", text),
@@ -1921,7 +1922,7 @@ async function pickAssistantMessage(ctx: ExtensionCommandContext): Promise<strin
 		selectList.onCancel = () => done(null);
 		container.addChild(selectList);
 
-		container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"), 1, 0));
+		container.addChild(new Text(theme.fg("dim", t("picker.controls", "↑↓ navigate • enter select • esc cancel")), 1, 0));
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
 		return {
@@ -1946,7 +1947,7 @@ async function pickAssistantMessage(ctx: ExtensionCommandContext): Promise<strin
 async function openPreview(ctx: ExtensionCommandContext, markdownOverride?: string, resourcePath?: string, isLatex?: boolean, fontSizePx?: number): Promise<void> {
 	const markdown = markdownOverride ?? getLastAssistantMarkdown(ctx);
 	if (!markdown) {
-		ctx.ui.notify("No assistant markdown found in the current branch.", "warning");
+		ctx.ui.notify(t("notify.noAssistantMarkdown", "No assistant markdown found in the current branch."), "warning");
 		return;
 	}
 
@@ -2669,7 +2670,7 @@ async function preprocessMermaidForPdf(markdown: string): Promise<MermaidPdfPrep
 async function exportPdf(ctx: ExtensionCommandContext, markdownOverride?: string, resourcePath?: string, isLatex?: boolean): Promise<void> {
 	const markdown = markdownOverride ?? getLastAssistantMarkdown(ctx);
 	if (!markdown) {
-		ctx.ui.notify("No assistant markdown found in the current branch.", "warning");
+		ctx.ui.notify(t("notify.noAssistantMarkdown", "No assistant markdown found in the current branch."), "warning");
 		return;
 	}
 
@@ -3615,6 +3616,7 @@ function parsePreviewArgs(args: string): { target?: PreviewTarget; pick?: boolea
 }
 
 export default function (pi: ExtensionAPI) {
+	initI18n(pi);
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
@@ -3669,10 +3671,10 @@ export default function (pi: ExtensionAPI) {
 		if (parsed.target === "browser") {
 			try {
 				await openPreviewInBrowser(ctx, markdown, resourcePath, isLatex, parsed.fontSizePx);
-				ctx.ui.notify("Opened preview in browser.", "info");
+				ctx.ui.notify(t("notify.openedBrowser", "Opened preview in browser."), "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Browser preview failed: ${message}`, "error");
+				ctx.ui.notify(t("notify.browserFailed", `Browser preview failed: ${message}`, { message }), "error");
 			}
 			return;
 		}
@@ -3680,10 +3682,10 @@ export default function (pi: ExtensionAPI) {
 		if (parsed.target === "pdf") {
 			try {
 				await exportPdf(ctx, markdown, resourcePath, isLatex);
-				ctx.ui.notify("Opened PDF preview.", "info");
+				ctx.ui.notify(t("notify.openedPdf", "Opened PDF preview."), "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`PDF export failed: ${message}`, "error");
+				ctx.ui.notify(t("notify.pdfFailed", `PDF export failed: ${message}`, { message }), "error");
 			}
 			return;
 		}
@@ -3692,12 +3694,12 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("preview", {
-		description: "Rendered markdown preview (--pick select response, --file <path> or bare path, --browser for HTML, --pdf for PDF, --terminal to force inline, --font-size <px>)",
+		description: t("cmd.preview", "Rendered markdown preview (--pick select response, --file <path> or bare path, --browser for HTML, --pdf for PDF, --terminal to force inline, --font-size <px>)"),
 		handler: run,
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open rendered markdown + LaTeX preview in the default browser (MathML + selective MathJax fallback)",
+		description: t("cmd.browser", "Open rendered markdown + LaTeX preview in the default browser (MathML + selective MathJax fallback)"),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			await run(`--browser ${args}`.trim(), ctx);
@@ -3705,7 +3707,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-pdf", {
-		description: "Export markdown to PDF via pandoc + LaTeX and open it",
+		description: t("cmd.pdf", "Export markdown to PDF via pandoc + LaTeX and open it"),
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			// Re-use the main run handler with --pdf prepended
@@ -3714,15 +3716,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-clear-cache", {
-		description: "Clear rendered preview cache (~/.pi/cache/markdown-preview)",
+		description: t("cmd.clearCache", "Clear rendered preview cache (~/.pi/cache/markdown-preview)"),
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 			try {
 				await rm(CACHE_DIR, { recursive: true, force: true });
-				ctx.ui.notify(`Cleared preview cache: ${CACHE_DIR}`, "info");
+				ctx.ui.notify(t("notify.cacheCleared", `Cleared preview cache: ${CACHE_DIR}`, { path: CACHE_DIR }), "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Failed to clear preview cache: ${message}`, "error");
+				ctx.ui.notify(t("notify.cacheClearFailed", `Failed to clear preview cache: ${message}`, { message }), "error");
 			}
 		},
 	});
