@@ -47,6 +47,33 @@ const VIEWPORT_WIDTH_PX = 1200;
 const PAGE_HEIGHT_PX = 2200;
 const MAX_RENDER_HEIGHT_PX = 66000; // PAGE_HEIGHT_PX * 30
 
+let sharedPreviewBrowser: puppeteer.Browser | undefined;
+
+async function getSharedPreviewBrowser(): Promise<puppeteer.Browser> {
+	if (sharedPreviewBrowser?.isConnected()) return sharedPreviewBrowser;
+	const executablePath = findBrowserExecutable();
+	if (!executablePath) {
+		throw new Error(
+			"No Chromium-based browser was found. Set PUPPETEER_EXECUTABLE_PATH to your Chrome/Edge/Chromium binary.",
+		);
+	}
+	const args = ["--disable-gpu", "--font-render-hinting=medium"];
+	if (process.platform === "linux") {
+		args.push("--no-sandbox", "--disable-setuid-sandbox");
+	}
+	sharedPreviewBrowser = await puppeteer.launch({ headless: true, executablePath, args });
+	sharedPreviewBrowser.once("disconnected", () => {
+		sharedPreviewBrowser = undefined;
+	});
+	return sharedPreviewBrowser;
+}
+
+export async function closeSharedPreviewBrowser(): Promise<void> {
+	const browser = sharedPreviewBrowser;
+	sharedPreviewBrowser = undefined;
+	await browser?.close().catch(() => {});
+}
+
 type ThemeMode = "dark" | "light";
 type PreviewTarget = "terminal" | "browser" | "pdf";
 
@@ -1524,26 +1551,13 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex);
 	const html = buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx);
 
-	let browser: puppeteer.Browser | undefined;
 	let browserPage: puppeteer.Page | undefined;
 	let tempHtmlPath: string | undefined;
 
 	try {
 		if (signal?.aborted) throw new Error("Preview rendering cancelled.");
 
-		const executablePath = findBrowserExecutable();
-		if (!executablePath) {
-			throw new Error(
-				"No Chromium-based browser was found. Set PUPPETEER_EXECUTABLE_PATH to your Chrome/Edge/Chromium binary.",
-			);
-		}
-
-		const args = ["--disable-gpu", "--font-render-hinting=medium"];
-		if (process.platform === "linux") {
-			args.push("--no-sandbox", "--disable-setuid-sandbox");
-		}
-
-		browser = await puppeteer.launch({ headless: true, executablePath, args });
+		const browser = await getSharedPreviewBrowser();
 		browserPage = await browser.newPage();
 
 		const loadHtml = async (height: number) => {
@@ -1648,7 +1662,6 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 	} finally {
 		if (tempHtmlPath) await unlink(tempHtmlPath).catch(() => {});
 		if (browserPage) await browserPage.close().catch(() => {});
-		if (browser) await browser.close().catch(() => {});
 	}
 }
 
@@ -1943,7 +1956,7 @@ async function pickAssistantMessage(ctx: ExtensionCommandContext): Promise<strin
 	return selected ? selected.markdown : null;
 }
 
-async function openPreview(ctx: ExtensionCommandContext, markdownOverride?: string, resourcePath?: string, isLatex?: boolean, fontSizePx?: number): Promise<void> {
+export async function openPreview(ctx: ExtensionCommandContext, markdownOverride?: string, resourcePath?: string, isLatex?: boolean, fontSizePx?: number): Promise<void> {
 	const markdown = markdownOverride ?? getLastAssistantMarkdown(ctx);
 	if (!markdown) {
 		ctx.ui.notify("No assistant markdown found in the current branch.", "warning");
@@ -3439,7 +3452,7 @@ ${annotationHelpersScript}
 </html>`;
 }
 
-async function openPreviewInBrowser(ctx: ExtensionCommandContext, markdownOverride?: string, resourcePath?: string, isLatex?: boolean, fontSizePx?: number): Promise<void> {
+export async function openPreviewInBrowser(ctx: ExtensionCommandContext, markdownOverride?: string, resourcePath?: string, isLatex?: boolean, fontSizePx?: number): Promise<void> {
 	const markdown = markdownOverride ?? getLastAssistantMarkdown(ctx);
 	if (!markdown) {
 		throw new Error("No assistant markdown found in the current branch.");
