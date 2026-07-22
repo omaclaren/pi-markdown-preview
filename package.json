@@ -1,6 +1,6 @@
 {
   "name": "pi-markdown-preview",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Rendered markdown + LaTeX preview for pi, with terminal, browser, and PDF output",
   "type": "module",
   "exports": {
@@ -37,8 +37,8 @@
     "puppeteer-core": "^24.22.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.0",
-    "@earendil-works/pi-tui": "^0.78.0",
+    "@earendil-works/pi-coding-agent": "^0.81.1",
+    "@earendil-works/pi-tui": "^0.81.1",
     "@types/node": "^24.3.0",
     "typebox": "^1.1.39",
     "typescript": "^5.7.3"

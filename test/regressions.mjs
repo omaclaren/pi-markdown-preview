@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import ts from "typescript";
 
 const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
@@ -283,5 +285,80 @@ assert.equal(
 	1,
 	"Browser annotation helper should ignore fully inline-code annotation examples without desynchronizing later parsing.",
 );
+
+const transpiledIndexPath = resolve(process.cwd(), `.pi-markdown-preview-registration-test-${process.pid}.mjs`);
+const transpiledIndex = ts.transpileModule(src, {
+	compilerOptions: {
+		module: ts.ModuleKind.ES2022,
+		target: ts.ScriptTarget.ES2022,
+	},
+	fileName: sourcePath,
+}).outputText;
+
+let extensionFactory;
+try {
+	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
+	({ default: extensionFactory } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+} finally {
+	await rm(transpiledIndexPath, { force: true });
+}
+
+function collectExtensionRegistrations() {
+	const commands = [];
+	const tools = [];
+	const events = [];
+	const pi = {
+		on(event) {
+			events.push(event);
+		},
+		registerCommand(name) {
+			commands.push(name);
+		},
+		registerTool(definition) {
+			tools.push(definition.name);
+		},
+	};
+	extensionFactory(pi);
+	return { commands, tools, events };
+}
+
+const exportToolEnvName = "PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL";
+const previousExportToolEnv = process.env[exportToolEnvName];
+try {
+	delete process.env[exportToolEnvName];
+	assert.deepEqual(
+		collectExtensionRegistrations().tools,
+		["preview_export"],
+		"preview_export should remain registered by default for backward compatibility.",
+	);
+
+	for (const disabledValue of ["0", "false", "FALSE", " no ", "off"]) {
+		process.env[exportToolEnvName] = disabledValue;
+		const registrations = collectExtensionRegistrations();
+		assert.deepEqual(
+			registrations.tools,
+			[],
+			`${exportToolEnvName}=${JSON.stringify(disabledValue)} should omit preview_export registration.`,
+		);
+		assert.deepEqual(
+			registrations.commands,
+			["preview", "preview-browser", "preview-pdf", "preview-clear-cache"],
+			"Disabling preview_export should not remove slash commands.",
+		);
+	}
+
+	process.env[exportToolEnvName] = "true";
+	assert.deepEqual(
+		collectExtensionRegistrations().tools,
+		["preview_export"],
+		`${exportToolEnvName}=true should explicitly enable preview_export registration.`,
+	);
+} finally {
+	if (previousExportToolEnv === undefined) {
+		delete process.env[exportToolEnvName];
+	} else {
+		process.env[exportToolEnvName] = previousExportToolEnv;
+	}
+}
 
 console.log("Regression checks passed.");

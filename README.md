@@ -150,6 +150,14 @@ npm run check:readme-commands
 
 ## Configuration
 
+The LLM-callable `preview_export` tool is registered by default. To omit that tool while keeping all `/preview` commands available, set this before starting pi:
+
+```bash
+export PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL=false
+```
+
+The values `0`, `false`, `no`, and `off` disable registration (case-insensitive). Unset or any other value keeps the tool enabled.
+
 Set `PANDOC_PATH` if pandoc is not on your `PATH`:
 
 ```bash

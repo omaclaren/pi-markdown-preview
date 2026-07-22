@@ -50,6 +50,13 @@ const MAX_RENDER_HEIGHT_PX = 66000; // PAGE_HEIGHT_PX * 30
 const DEFAULT_PDF_RENDER_TIMEOUT_MS = 120000;
 const MIN_PDF_RENDER_TIMEOUT_MS = 10000;
 const MAX_PDF_RENDER_TIMEOUT_MS = 600000;
+const FALSE_ENV_VALUES = new Set(["0", "false", "no", "off"]);
+
+function shouldRegisterPreviewExportTool(): boolean {
+	const configured = process.env.PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL;
+	if (configured === undefined) return true;
+	return !FALSE_ENV_VALUES.has(configured.trim().toLowerCase());
+}
 
 function stringEnum<T extends readonly string[]>(values: T, options?: { description?: string; default?: T[number] }): TUnsafe<T[number]> {
 	return Type.Unsafe({
@@ -4069,93 +4076,95 @@ export default function (pi: ExtensionAPI) {
 		await openPreview(ctx, markdown, resourcePath, isLatex, parsed.fontSizePx);
 	};
 
-	pi.registerTool<typeof previewExportSchema, PreviewExportToolDetails | undefined>({
-		name: "preview_export",
-		label: "Preview Export",
-		description: "Render Markdown/LaTeX, a local file, or the latest assistant response to PDF, HTML, or PNG artifact files. Use for remote/headless/Telegram-style sessions where slash-command previews cannot display interactively.",
-		promptSnippet: "Export rendered Markdown/LaTeX previews as PDF, HTML, or PNG artifact files",
-		promptGuidelines: [
-			"Use preview_export when the user asks to turn the latest response, provided Markdown/LaTeX, or a local Markdown/LaTeX/code file into a PDF, HTML page, or image file.",
-			"If exporting content composed in the same assistant turn, preview_export should receive that content in its markdown parameter instead of relying on last_assistant.",
-			"preview_export returns local artifact paths; use another available sending/uploading tool to deliver those files to the user when requested.",
-		],
-		parameters: previewExportSchema,
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			if (signal?.aborted) {
-				return { content: [{ type: "text", text: "Preview export cancelled." }], details: undefined };
-			}
-
-			const input = await resolvePreviewInput(ctx, params);
-			const outputPath = params.outputPath?.trim() ? resolveUserPath(ctx, params.outputPath) : undefined;
-			const warnings: string[] = [];
-			const format = params.format;
-			const style = getPreviewStyle(ctx.ui.theme);
-			const openedPaths: string[] = [];
-			let paths: string[] = [];
-			let pageCount: number | undefined;
-			let truncatedPages: boolean | undefined;
-
-			onUpdate?.({
-				content: [{ type: "text", text: `Rendering ${format.toUpperCase()} preview from ${input.sourceDescription}...` }],
-				details: undefined,
-			});
-
-			if (format === "pdf") {
-				const pdfPath = await renderPreviewPdfToFile(input.markdown, outputPath, input.resourcePath, input.isLatex, (message) => {
-					warnings.push(message);
-					onUpdate?.({ content: [{ type: "text", text: message }], details: undefined });
-				});
-				paths = [pdfPath];
-			} else if (format === "html") {
-				const htmlPath = await renderPreviewHtmlToFile(input.markdown, style, input.resourcePath, input.isLatex, params.fontSizePx, outputPath);
-				paths = [htmlPath];
-			} else {
-				const pngResult = await renderPreviewPngFiles(input.markdown, style, outputPath, input.resourcePath, input.isLatex, params.fontSizePx, signal);
-				paths = pngResult.paths;
-				pageCount = pngResult.pageCount;
-				truncatedPages = pngResult.truncatedPages;
-			}
-
-			if (params.open && paths.length > 0) {
-				const toOpen = format === "png" ? [paths[0]!] : paths;
-				for (const filePath of toOpen) {
-					await openFileInDefaultBrowser(filePath);
-					openedPaths.push(filePath);
+	if (shouldRegisterPreviewExportTool()) {
+		pi.registerTool<typeof previewExportSchema, PreviewExportToolDetails | undefined>({
+			name: "preview_export",
+			label: "Preview Export",
+			description: "Render Markdown/LaTeX, a local file, or the latest assistant response to PDF, HTML, or PNG artifact files. Use for remote/headless/Telegram-style sessions where slash-command previews cannot display interactively.",
+			promptSnippet: "Export rendered Markdown/LaTeX previews as PDF, HTML, or PNG artifact files",
+			promptGuidelines: [
+				"Use preview_export when the user asks to turn the latest response, provided Markdown/LaTeX, or a local Markdown/LaTeX/code file into a PDF, HTML page, or image file.",
+				"If exporting content composed in the same assistant turn, preview_export should receive that content in its markdown parameter instead of relying on last_assistant.",
+				"preview_export returns local artifact paths; use another available sending/uploading tool to deliver those files to the user when requested.",
+			],
+			parameters: previewExportSchema,
+			async execute(_toolCallId, params, signal, onUpdate, ctx) {
+				if (signal?.aborted) {
+					return { content: [{ type: "text", text: "Preview export cancelled." }], details: undefined };
 				}
-			}
 
-			const mimeType = format === "pdf" ? "application/pdf" : format === "html" ? "text/html" : "image/png";
-			const details: PreviewExportToolDetails = {
-				format,
-				source: input.source,
-				sourceDescription: input.sourceDescription,
-				paths,
-				mimeType,
-				opened: openedPaths.length > 0,
-				...(openedPaths.length > 0 ? { openedPaths } : {}),
-				...(pageCount !== undefined ? { pageCount } : {}),
-				...(truncatedPages !== undefined ? { truncatedPages } : {}),
-				...(warnings.length > 0 ? { warnings } : {}),
-			};
+				const input = await resolvePreviewInput(ctx, params);
+				const outputPath = params.outputPath?.trim() ? resolveUserPath(ctx, params.outputPath) : undefined;
+				const warnings: string[] = [];
+				const format = params.format;
+				const style = getPreviewStyle(ctx.ui.theme);
+				const openedPaths: string[] = [];
+				let paths: string[] = [];
+				let pageCount: number | undefined;
+				let truncatedPages: boolean | undefined;
 
-			const title = format === "png" && paths.length > 1 ? `Exported PNG preview pages (${paths.length})` : `Exported ${format.toUpperCase()} preview`;
-			const lines = [
-				`${title} from ${input.sourceDescription}.`,
-				...paths.map((filePath) => `- ${filePath}`),
-			];
-			if (openedPaths.length > 0) {
-				lines.push(`Opened ${openedPaths.length === 1 ? "artifact" : "artifacts"}: ${openedPaths.join(", ")}`);
-			}
-			if (warnings.length > 0) {
-				lines.push("Warnings:", ...warnings.map((warning) => `- ${warning}`));
-			}
+				onUpdate?.({
+					content: [{ type: "text", text: `Rendering ${format.toUpperCase()} preview from ${input.sourceDescription}...` }],
+					details: undefined,
+				});
 
-			return {
-				content: [{ type: "text", text: lines.join("\n") }],
-				details,
-			};
-		},
-	});
+				if (format === "pdf") {
+					const pdfPath = await renderPreviewPdfToFile(input.markdown, outputPath, input.resourcePath, input.isLatex, (message) => {
+						warnings.push(message);
+						onUpdate?.({ content: [{ type: "text", text: message }], details: undefined });
+					});
+					paths = [pdfPath];
+				} else if (format === "html") {
+					const htmlPath = await renderPreviewHtmlToFile(input.markdown, style, input.resourcePath, input.isLatex, params.fontSizePx, outputPath);
+					paths = [htmlPath];
+				} else {
+					const pngResult = await renderPreviewPngFiles(input.markdown, style, outputPath, input.resourcePath, input.isLatex, params.fontSizePx, signal);
+					paths = pngResult.paths;
+					pageCount = pngResult.pageCount;
+					truncatedPages = pngResult.truncatedPages;
+				}
+
+				if (params.open && paths.length > 0) {
+					const toOpen = format === "png" ? [paths[0]!] : paths;
+					for (const filePath of toOpen) {
+						await openFileInDefaultBrowser(filePath);
+						openedPaths.push(filePath);
+					}
+				}
+
+				const mimeType = format === "pdf" ? "application/pdf" : format === "html" ? "text/html" : "image/png";
+				const details: PreviewExportToolDetails = {
+					format,
+					source: input.source,
+					sourceDescription: input.sourceDescription,
+					paths,
+					mimeType,
+					opened: openedPaths.length > 0,
+					...(openedPaths.length > 0 ? { openedPaths } : {}),
+					...(pageCount !== undefined ? { pageCount } : {}),
+					...(truncatedPages !== undefined ? { truncatedPages } : {}),
+					...(warnings.length > 0 ? { warnings } : {}),
+				};
+
+				const title = format === "png" && paths.length > 1 ? `Exported PNG preview pages (${paths.length})` : `Exported ${format.toUpperCase()} preview`;
+				const lines = [
+					`${title} from ${input.sourceDescription}.`,
+					...paths.map((filePath) => `- ${filePath}`),
+				];
+				if (openedPaths.length > 0) {
+					lines.push(`Opened ${openedPaths.length === 1 ? "artifact" : "artifacts"}: ${openedPaths.join(", ")}`);
+				}
+				if (warnings.length > 0) {
+					lines.push("Warnings:", ...warnings.map((warning) => `- ${warning}`));
+				}
+
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details,
+				};
+			},
+		});
+	}
 
 	pi.registerCommand("preview", {
 		description: "Rendered markdown preview (--pick select response, --file <path> or bare path, --browser for HTML, --pdf for PDF, --terminal to force inline, --font-size <px>)",
