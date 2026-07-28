@@ -36,7 +36,17 @@ const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
-const RENDER_VERSION = "v21";
+const RENDER_VERSION = "v22";
+const MERMAID_BROWSER_VERSION = "11.16.0";
+const MERMAID_CLI_ICON_PACKS = ["@iconify-json/lucide", "@iconify-json/logos"] as const;
+const MERMAID_BROWSER_ICON_PACKS = [
+	{ name: "lucide", url: "https://unpkg.com/@iconify-json/lucide@1/icons.json" },
+	{ name: "logos", url: "https://unpkg.com/@iconify-json/logos@1/icons.json" },
+] as const;
+const PI_MERMAID_CLI_PATH = join(
+	homedir(), ".pi", "agent", "npm", "node_modules", ".bin",
+	process.platform === "win32" ? "mmdc.cmd" : "mmdc",
+);
 const DEFAULT_TERMINAL_PREVIEW_FONT_SIZE_PX = 16;
 const DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX = 15;
 const MIN_PREVIEW_FONT_SIZE_PX = 10;
@@ -1597,7 +1607,7 @@ let sharedPreviewBrowser: puppeteer.Browser | undefined;
 let sharedPreviewBrowserLaunchPromise: Promise<puppeteer.Browser> | undefined;
 let sharedPreviewBrowserLaunchToken = 0;
 
-async function launchPreviewBrowser(): Promise<puppeteer.Browser> {
+export function getPreviewBrowserLaunchOptions(): { executablePath: string; args: string[] } {
 	const executablePath = findBrowserExecutable();
 	if (!executablePath) {
 		throw new Error(
@@ -1606,11 +1616,12 @@ async function launchPreviewBrowser(): Promise<puppeteer.Browser> {
 	}
 
 	const args = ["--disable-gpu", "--font-render-hinting=medium"];
-	if (process.platform === "linux") {
-		args.push("--no-sandbox", "--disable-setuid-sandbox");
-	}
+	if (process.platform === "linux") args.push("--no-sandbox", "--disable-setuid-sandbox");
+	return { executablePath, args };
+}
 
-	return puppeteer.launch({ headless: true, executablePath, args });
+async function launchPreviewBrowser(): Promise<puppeteer.Browser> {
+	return puppeteer.launch({ headless: true, ...getPreviewBrowserLaunchOptions() });
 }
 
 async function getSharedPreviewBrowser(): Promise<puppeteer.Browser> {
@@ -2819,8 +2830,13 @@ function getMermaidPdfTheme(): "default" | "forest" | "dark" | "neutral" {
 	return "default";
 }
 
+function getMermaidCliCommand(): string {
+	return process.env.MERMAID_CLI_PATH?.trim()
+		|| (existsSync(PI_MERMAID_CLI_PATH) ? PI_MERMAID_CLI_PATH : "mmdc");
+}
+
 async function renderMermaidDiagramForPdf(source: string, outputPath: string): Promise<void> {
-	const mermaidCommand = process.env.MERMAID_CLI_PATH?.trim() || "mmdc";
+	const mermaidCommand = getMermaidCliCommand();
 	const mermaidTheme = getMermaidPdfTheme();
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-markdown-preview-mermaid-"));
 	const inputPath = join(tempDir, "diagram.mmd");
@@ -2830,7 +2846,7 @@ async function renderMermaidDiagramForPdf(source: string, outputPath: string): P
 	try {
 		await writeFile(inputPath, source, "utf-8");
 		await new Promise<void>((resolve, reject) => {
-			const args = ["-i", inputPath, "-o", outputPath, "-t", mermaidTheme, "-f"];
+			const args = ["-i", inputPath, "-o", outputPath, "-t", mermaidTheme, "-f", "--iconPacks", ...MERMAID_CLI_ICON_PACKS];
 			const child = spawn(mermaidCommand, args, { stdio: ["ignore", "ignore", "pipe"] });
 			const stderrChunks: Buffer[] = [];
 			let settled = false;
@@ -3117,6 +3133,54 @@ function buildPreviewCssVars(style: PreviewStyle, fontSizePx?: number): Record<s
 	};
 }
 
+export function buildMermaidBrowserModule(mermaidConfigJson: string, mermaidIconPacksJson: string): string {
+	return String.raw`
+    const renderMermaid = async () => {
+      const mermaidBlocks = document.querySelectorAll('pre.mermaid');
+      if (mermaidBlocks.length === 0) return;
+
+      try {
+        const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_BROWSER_VERSION}/dist/mermaid.esm.min.mjs');
+        const packs = ${mermaidIconPacksJson};
+        const pending = new Map();
+        const load = (pack) => {
+          if (!pending.has(pack.name)) {
+            pending.set(pack.name, fetch(pack.url).then((response) => {
+              if (!response.ok) throw new Error('Failed to load Mermaid icon pack ' + pack.name + ': HTTP ' + response.status);
+              return response.json();
+            }));
+          }
+          return pending.get(pack.name);
+        };
+        mermaid.registerIconPacks(packs.map((pack) => ({ name: pack.name, loader: () => load(pack) })));
+        mermaid.initialize(${mermaidConfigJson});
+        mermaidBlocks.forEach((pre) => {
+          const code = pre.querySelector('code');
+          const src = code ? code.textContent : pre.textContent;
+          const wrapper = document.createElement('div');
+          wrapper.className = 'mermaid-container';
+          const div = document.createElement('div');
+          div.className = 'mermaid';
+          div.textContent = src;
+          wrapper.appendChild(div);
+          pre.replaceWith(wrapper);
+        });
+        await mermaid.run();
+        document.querySelectorAll('.mermaid-container .icon-shape').forEach((node) => {
+          const icon = node.querySelector('svg');
+          if (!icon) return;
+          const iconColor = getComputedStyle(icon).color;
+          node.querySelectorAll('.labelBkg, .nodeLabel').forEach((label) => {
+            if (label instanceof HTMLElement) label.style.setProperty('color', iconColor, 'important');
+          });
+        });
+      } catch (error) {
+        console.error('Mermaid render failed:', error);
+      }
+    };
+  `;
+}
+
 function buildBrowserHtmlFromPandocFragment(
 	fragmentHtml: string,
 	style: PreviewStyle,
@@ -3150,6 +3214,7 @@ function buildBrowserHtmlFromPandocFragment(
 		},
 	};
 	const mermaidConfigJson = JSON.stringify(mermaidConfig).replace(/</g, "\\u003c");
+	const mermaidIconPacksJson = JSON.stringify(MERMAID_BROWSER_ICON_PACKS).replace(/</g, "\\u003c");
 	const baseTag = resourcePath ? `\n<base href="${pathToFileURL(resourcePath + "/").href}" />` : "";
 	const annotationHelpersScript = ANNOTATION_HELPERS_SOURCE.replace(/<\/script/gi, "<\\/script");
 	const annotationPlaceholdersJson = JSON.stringify(annotationPlaceholders).replace(/</g, "\\u003c");
@@ -3719,29 +3784,7 @@ ${annotationHelpersScript}
       }
     };
 
-    const renderMermaid = async () => {
-      const mermaidBlocks = document.querySelectorAll('pre.mermaid');
-      if (mermaidBlocks.length === 0) return;
-
-      try {
-        const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs');
-        mermaid.initialize(${mermaidConfigJson});
-        mermaidBlocks.forEach(pre => {
-          const code = pre.querySelector('code');
-          const src = code ? code.textContent : pre.textContent;
-          const wrapper = document.createElement('div');
-          wrapper.className = 'mermaid-container';
-          const div = document.createElement('div');
-          div.className = 'mermaid';
-          div.textContent = src;
-          wrapper.appendChild(div);
-          pre.replaceWith(wrapper);
-        });
-        await mermaid.run();
-      } catch (e) {
-        console.error('Mermaid render failed:', e);
-      }
-    };
+${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
 
     const root = document.getElementById('preview-root');
     try {

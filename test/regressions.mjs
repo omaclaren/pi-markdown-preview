@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import puppeteer from "puppeteer-core";
 import ts from "typescript";
 
 const sourcePath = resolve(process.cwd(), "index.ts");
@@ -296,12 +297,120 @@ const transpiledIndex = ts.transpileModule(src, {
 }).outputText;
 
 let extensionFactory;
+let buildMermaidBrowserModule;
+let getPreviewBrowserLaunchOptions;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildMermaidBrowserModule, getPreviewBrowserLaunchOptions } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
+
+assert.match(src, /const RENDER_VERSION = "v22";/, "Mermaid icon renderer should invalidate stale preview cache entries.");
+assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
+assert.match(src, /"--iconPacks", \.\.\.MERMAID_CLI_ICON_PACKS/, "PDF Mermaid rendering should forward both icon packs.");
+
+async function assertMermaidIconBrowserRendering(theme) {
+	const palette = theme === "dark"
+		? { background: "#0f1117", surface: "#171b24", text: "#e6edf3", line: "#9aa5b1" }
+		: { background: "#f5f7fb", surface: "#ffffff", text: "#1f2328", line: "#57606a" };
+	const fixture = [
+		"flowchart LR",
+		'  source@{ icon: "lucide:file-code-2", form: "rounded", label: "Source", pos: "b", h: 56 }',
+		'  github@{ icon: "logos:github-icon", form: "rounded", label: "GitHub", pos: "b", h: 56 }',
+		"  source -->|publish| github",
+		"  classDef unchanged fill:#f8f9fa,stroke:#868e96,stroke-width:2px",
+		"  classDef changed fill:#f3f0ff,stroke:#7950f2,stroke-width:2px",
+		"  class source unchanged",
+		"  class github changed",
+	].join("\n");
+	const mermaidConfig = {
+		startOnLoad: false,
+		theme: "base",
+		themeVariables: {
+			background: palette.background,
+			primaryColor: palette.surface,
+			primaryTextColor: palette.text,
+			secondaryColor: palette.surface,
+			secondaryTextColor: palette.text,
+			tertiaryColor: palette.surface,
+			tertiaryTextColor: palette.text,
+			textColor: palette.text,
+			lineColor: palette.line,
+			edgeLabelBackground: palette.surface,
+		},
+	};
+	const { executablePath, args } = getPreviewBrowserLaunchOptions();
+	const browser = await puppeteer.launch({ headless: true, executablePath, args });
+	try {
+		const page = await browser.newPage();
+		const consoleErrors = [];
+		page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
+		const fixtureRoot = resolve(process.cwd(), "node_modules");
+		const servedFixtures = new Set();
+		const iconFixtures = new Map([
+			["/@iconify-json/lucide@1/icons.json", { name: "lucide", path: resolve(fixtureRoot, "@iconify-json/lucide/icons.json") }],
+			["/@iconify-json/logos@1/icons.json", { name: "logos", path: resolve(fixtureRoot, "@iconify-json/logos/icons.json") }],
+		]);
+		await page.setRequestInterception(true);
+		page.on("request", async (request) => {
+			const url = new URL(request.url());
+			const mermaidFixture = url.hostname === "cdn.jsdelivr.net" && url.pathname.startsWith("/npm/mermaid@11.16.0/")
+				? resolve(fixtureRoot, "mermaid", url.pathname.slice("/npm/mermaid@11.16.0/".length))
+				: undefined;
+			const iconFixture = url.hostname === "unpkg.com" ? iconFixtures.get(url.pathname) : undefined;
+			const localPath = mermaidFixture ?? iconFixture?.path;
+			if (!localPath) {
+				if (url.hostname === "cdn.jsdelivr.net" || url.hostname === "unpkg.com") return request.abort("blockedbyclient");
+				return request.continue();
+			}
+			servedFixtures.add(mermaidFixture ? "mermaid" : iconFixture.name);
+			await request.respond({
+				body: await readFile(localPath),
+				contentType: localPath.endsWith(".json") ? "application/json" : "application/javascript",
+				headers: { "access-control-allow-origin": "*" },
+			});
+		});
+		const browserModule = buildMermaidBrowserModule(
+			JSON.stringify(mermaidConfig),
+			JSON.stringify([
+				{ name: "lucide", url: "https://unpkg.com/@iconify-json/lucide@1/icons.json" },
+				{ name: "logos", url: "https://unpkg.com/@iconify-json/logos@1/icons.json" },
+			]),
+		);
+		await page.setContent(`<!doctype html><body style="background:${palette.background};color:${palette.text}"><pre class="mermaid"><code>${fixture}</code></pre><script type="module">${browserModule}\n(async () => { try { await renderMermaid(); } finally { window.__mermaidDone = true; } })();</script></body>`, { waitUntil: "domcontentloaded" });
+		await page.waitForFunction(() => window.__mermaidDone === true, { timeout: 30000 });
+		const result = await page.evaluate(() => ({
+			iconCount: document.querySelectorAll(".icon-shape svg").length,
+			edgeColor: getComputedStyle(document.querySelector(".edgeLabel")).color,
+			bodyColor: getComputedStyle(document.body).color,
+			nodes: Array.from(document.querySelectorAll(".icon-shape")).map((node) => {
+				const label = node.querySelector(".nodeLabel");
+				const icon = node.querySelector("svg");
+				return {
+					label: label?.textContent?.trim(),
+					labelColor: getComputedStyle(label).color,
+					iconColor: getComputedStyle(icon).color,
+					hasPath: Boolean(icon?.querySelector("path")),
+				};
+			}),
+		}));
+		assert.ok(result.iconCount >= 2, `${theme} icon rendering should render icon SVGs rather than placeholders.`);
+		assert.deepEqual(result.nodes.map(({ label }) => label), ["Source", "GitHub"]);
+		assert.ok(result.nodes.every((node) => node.hasPath), `${theme} icon nodes should contain rendered SVG paths.`);
+		assert.deepEqual(servedFixtures, new Set(["mermaid", "lucide", "logos"]), `${theme} fixture rendering should not use the network.`);
+		for (const node of result.nodes) assert.equal(node.labelColor, node.iconColor, `${theme} icon label should inherit its icon color.`);
+		assert.equal(result.edgeColor, result.bodyColor, `${theme} edge labels should retain theme text color.`);
+		assert.ok(result.nodes.some((node) => node.labelColor !== result.edgeColor), `${theme} icon labels should remain semantically colored.`);
+		assert.notEqual(result.nodes[0]?.iconColor, result.nodes[1]?.iconColor, `${theme} gray and violet attribution icons should remain distinct.`);
+		assert.deepEqual(consoleErrors, [], `${theme} Mermaid rendering should not log console errors.`);
+	} finally {
+		await browser.close();
+	}
+}
+
+await assertMermaidIconBrowserRendering("dark");
+await assertMermaidIconBrowserRendering("light");
 
 function collectExtensionRegistrations() {
 	const commands = [];
