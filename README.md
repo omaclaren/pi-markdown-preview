@@ -63,7 +63,7 @@ flowchart LR
   class github changed
 ```
 
-The browser renderer loads icon-pack JSON lazily from unpkg only when a diagram references that prefix, so first render requires network access. PDF export forwards the same packs to Mermaid CLI.
+The browser renderer loads icon-pack JSON lazily from unpkg only when a diagram references that prefix, so first render requires network access. It contrast-corrects icon and shape labels against their rendered backgrounds while preserving semantic hues. PDF export forwards the same packs to Mermaid CLI.
 
 ## Install
 

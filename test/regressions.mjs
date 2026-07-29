@@ -306,9 +306,27 @@ try {
 	await rm(transpiledIndexPath, { force: true });
 }
 
-assert.match(src, /const RENDER_VERSION = "v22";/, "Mermaid icon renderer should invalidate stale preview cache entries.");
+assert.match(src, /const RENDER_VERSION = "v23";/, "Mermaid contrast renderer should invalidate stale preview cache entries.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(src, /"--iconPacks", \.\.\.MERMAID_CLI_ICON_PACKS/, "PDF Mermaid rendering should forward both icon packs.");
+
+const parseRgb = (value) => {
+	const channels = value.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+	assert.equal(channels?.length, 3, `Expected an RGB color, received ${value}`);
+	return channels;
+};
+const relativeLuminance = (color) => {
+	const linear = color.map((channel) => {
+		const value = channel / 255;
+		return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+	});
+	return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+};
+const contrastRatio = (foreground, background) => {
+	const lighter = Math.max(relativeLuminance(parseRgb(foreground)), relativeLuminance(parseRgb(background)));
+	const darker = Math.min(relativeLuminance(parseRgb(foreground)), relativeLuminance(parseRgb(background)));
+	return (lighter + 0.05) / (darker + 0.05);
+};
 
 async function assertMermaidIconBrowserRendering(theme) {
 	const palette = theme === "dark"
@@ -317,12 +335,17 @@ async function assertMermaidIconBrowserRendering(theme) {
 	const fixture = [
 		"flowchart LR",
 		'  source@{ icon: "lucide:file-code-2", form: "rounded", label: "Source", pos: "b", h: 56 }',
+		'  payload@{ shape: "doc", label: "Payload" }',
+		'  store@{ shape: "cyl", label: "Store" }',
+		'  midtone@{ shape: "rounded", label: "Midtone" }',
 		'  github@{ icon: "logos:github-icon", form: "rounded", label: "GitHub", pos: "b", h: 56 }',
-		"  source -->|publish| github",
+		"  source -->|prepare| payload -->|persist| store -->|review| midtone -->|publish| github",
 		"  classDef unchanged fill:#f8f9fa,stroke:#868e96,stroke-width:2px",
 		"  classDef changed fill:#f3f0ff,stroke:#7950f2,stroke-width:2px",
-		"  class source unchanged",
-		"  class github changed",
+		"  classDef midtone fill:#808080,stroke:#666666,stroke-width:2px",
+		"  class source,store unchanged",
+		"  class payload,github changed",
+		"  class midtone midtone",
 	].join("\n");
 	const mermaidConfig = {
 		startOnLoad: false,
@@ -384,7 +407,8 @@ async function assertMermaidIconBrowserRendering(theme) {
 			iconCount: document.querySelectorAll(".icon-shape svg").length,
 			edgeColor: getComputedStyle(document.querySelector(".edgeLabel")).color,
 			bodyColor: getComputedStyle(document.body).color,
-			nodes: Array.from(document.querySelectorAll(".icon-shape")).map((node) => {
+			bodyBackground: getComputedStyle(document.body).backgroundColor,
+			iconNodes: Array.from(document.querySelectorAll(".icon-shape")).map((node) => {
 				const label = node.querySelector(".nodeLabel");
 				const icon = node.querySelector("svg");
 				return {
@@ -394,15 +418,34 @@ async function assertMermaidIconBrowserRendering(theme) {
 					hasPath: Boolean(icon?.querySelector("path")),
 				};
 			}),
+			shapeNodes: Array.from(document.querySelectorAll(".node:not(.icon-shape)")).map((node) => {
+				const label = node.querySelector(".nodeLabel");
+				const shape = Array.from(node.querySelectorAll("rect, polygon, path, circle, ellipse")).find((candidate) => {
+					const fill = getComputedStyle(candidate).fill;
+					return fill && fill !== "none" && fill !== "rgba(0, 0, 0, 0)";
+				});
+				return {
+					label: label?.textContent?.trim(),
+					labelColor: getComputedStyle(label).color,
+					shapeFill: getComputedStyle(shape).fill,
+				};
+			}),
 		}));
 		assert.ok(result.iconCount >= 2, `${theme} icon rendering should render icon SVGs rather than placeholders.`);
-		assert.deepEqual(result.nodes.map(({ label }) => label), ["Source", "GitHub"]);
-		assert.ok(result.nodes.every((node) => node.hasPath), `${theme} icon nodes should contain rendered SVG paths.`);
+		assert.deepEqual(result.iconNodes.map(({ label }) => label), ["Source", "GitHub"]);
+		assert.ok(result.iconNodes.every((node) => node.hasPath), `${theme} icon nodes should contain rendered SVG paths.`);
+		assert.deepEqual(result.shapeNodes.map(({ label }) => label), ["Payload", "Store", "Midtone"]);
 		assert.deepEqual(servedFixtures, new Set(["mermaid", "lucide", "logos"]), `${theme} fixture rendering should not use the network.`);
-		for (const node of result.nodes) assert.equal(node.labelColor, node.iconColor, `${theme} icon label should inherit its icon color.`);
+		for (const node of result.iconNodes) {
+			assert.equal(node.labelColor, node.iconColor, `${theme} icon label should inherit its icon color.`);
+			assert.ok(contrastRatio(node.labelColor, result.bodyBackground) >= 4.5, `${theme} icon labels should meet accessible contrast.`);
+		}
+		for (const node of result.shapeNodes) {
+			assert.ok(contrastRatio(node.labelColor, node.shapeFill) >= 4.5, `${theme} shape labels should meet accessible contrast.`);
+		}
 		assert.equal(result.edgeColor, result.bodyColor, `${theme} edge labels should retain theme text color.`);
-		assert.ok(result.nodes.some((node) => node.labelColor !== result.edgeColor), `${theme} icon labels should remain semantically colored.`);
-		assert.notEqual(result.nodes[0]?.iconColor, result.nodes[1]?.iconColor, `${theme} gray and violet attribution icons should remain distinct.`);
+		assert.ok(result.iconNodes.some((node) => node.labelColor !== result.edgeColor), `${theme} icon labels should remain semantically colored.`);
+		assert.notEqual(result.iconNodes[0]?.iconColor, result.iconNodes[1]?.iconColor, `${theme} gray and violet attribution icons should remain distinct.`);
 		assert.deepEqual(consoleErrors, [], `${theme} Mermaid rendering should not log console errors.`);
 	} finally {
 		await browser.close();

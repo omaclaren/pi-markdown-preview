@@ -36,7 +36,7 @@ const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
-const RENDER_VERSION = "v22";
+const RENDER_VERSION = "v23";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const MERMAID_CLI_ICON_PACKS = ["@iconify-json/lucide", "@iconify-json/logos"] as const;
 const MERMAID_BROWSER_ICON_PACKS = [
@@ -3166,12 +3166,62 @@ export function buildMermaidBrowserModule(mermaidConfigJson: string, mermaidIcon
           pre.replaceWith(wrapper);
         });
         await mermaid.run();
+        const parseRgb = (value) => {
+          const match = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/);
+          return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+        };
+        const relativeLuminance = (color) => {
+          const linear = color.map((channel) => {
+            const value = channel / 255;
+            return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+          });
+          return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+        };
+        const contrastRatio = (foreground, background) => {
+          const lighter = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+          const darker = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+          return (lighter + 0.05) / (darker + 0.05);
+        };
+        const toRgb = (color) => 'rgb(' + color.map((channel) => Math.round(channel)).join(', ') + ')';
+        const ensureReadableColor = (foregroundCss, backgroundCss) => {
+          const foreground = parseRgb(foregroundCss);
+          const background = parseRgb(backgroundCss);
+          if (!foreground || !background || contrastRatio(foreground, background) >= 4.5) return foregroundCss;
+          const readableCandidates = [[0, 0, 0], [255, 255, 255]].flatMap((target) => {
+            for (let step = 1; step <= 20; step += 1) {
+              const amount = step / 20;
+              const color = foreground.map((channel, index) => channel + (target[index] - channel) * amount);
+              if (contrastRatio(color, background) >= 4.5) return [{ amount, color }];
+            }
+            return [];
+          });
+          readableCandidates.sort((left, right) => left.amount - right.amount);
+          if (readableCandidates.length > 0) return toRgb(readableCandidates[0].color);
+          const black = [0, 0, 0];
+          const white = [255, 255, 255];
+          return toRgb(contrastRatio(black, background) >= contrastRatio(white, background) ? black : white);
+        };
+        const pageBackground = getComputedStyle(document.body).backgroundColor;
         document.querySelectorAll('.mermaid-container .icon-shape').forEach((node) => {
           const icon = node.querySelector('svg');
           if (!icon) return;
-          const iconColor = getComputedStyle(icon).color;
+          const iconColor = ensureReadableColor(getComputedStyle(icon).color, pageBackground);
+          icon.style.setProperty('color', iconColor, 'important');
           node.querySelectorAll('.labelBkg, .nodeLabel').forEach((label) => {
             if (label instanceof HTMLElement) label.style.setProperty('color', iconColor, 'important');
+          });
+        });
+        document.querySelectorAll('.mermaid-container .node:not(.icon-shape)').forEach((node) => {
+          const shape = Array.from(node.querySelectorAll('rect, polygon, path, circle, ellipse')).find((candidate) => {
+            const fill = getComputedStyle(candidate).fill;
+            return fill && fill !== 'none' && fill !== 'rgba(0, 0, 0, 0)';
+          });
+          if (!shape) return;
+          const shapeFill = getComputedStyle(shape).fill;
+          node.querySelectorAll('.nodeLabel').forEach((label) => {
+            if (!(label instanceof HTMLElement)) return;
+            const labelColor = ensureReadableColor(getComputedStyle(label).color, shapeFill);
+            label.style.setProperty('color', labelColor, 'important');
           });
         });
       } catch (error) {
