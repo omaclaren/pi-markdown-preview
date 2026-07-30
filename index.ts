@@ -36,7 +36,7 @@ const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
-const RENDER_VERSION = "v23";
+const RENDER_VERSION = "v25";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const MERMAID_CLI_ICON_PACKS = ["@iconify-json/lucide", "@iconify-json/logos"] as const;
 const MERMAID_BROWSER_ICON_PACKS = [
@@ -135,6 +135,15 @@ interface RenderPreviewResult {
 	pages: PreviewPage[];
 	themeMode: ThemeMode;
 	truncatedPages: boolean;
+}
+interface BrowserMermaidRenderResult {
+	status: "pending" | "skipped" | "success" | "failed";
+	error?: string;
+}
+
+function throwIfMermaidRenderFailed(mermaidResult: BrowserMermaidRenderResult | null): void {
+	if (mermaidResult?.status !== "failed") return;
+	throw new Error(`Mermaid render failed: ${mermaidResult.error?.trim() || "Unknown browser error."}`);
 }
 
 interface CachedPage {
@@ -1804,8 +1813,12 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 			await waitForPageRenderReady(browserPage!);
 			await browserPage!.waitForFunction(
 				"window.__mermaidDone === true",
-				{ timeout: 15000 }
-			).catch(() => {});
+				{ timeout: 15000 },
+			);
+			const mermaidResult = await browserPage!.evaluate(() => (
+				(window as Window & { __mermaidRenderResult?: BrowserMermaidRenderResult }).__mermaidRenderResult ?? null
+			));
+			throwIfMermaidRenderFailed(mermaidResult);
 		};
 
 		// First pass: measure content height.
@@ -3135,40 +3148,86 @@ function buildPreviewCssVars(style: PreviewStyle, fontSizePx?: number): Record<s
 
 export function buildMermaidBrowserModule(mermaidConfigJson: string, mermaidIconPacksJson: string): string {
 	return String.raw`
+    const setMermaidRenderResult = (status, error) => {
+      window.__mermaidRenderResult = error ? { status, error } : { status };
+    };
+    const renderMermaidFailure = (wrappers, message) => {
+      wrappers.forEach((wrapper) => {
+        const failure = document.createElement('pre');
+        failure.className = 'mermaid-error';
+        failure.setAttribute('role', 'alert');
+        failure.style.cssText = 'margin:0;padding:12px 14px;border:1px solid var(--error,#cf222e);border-radius:8px;background:var(--panel-2,#f8fafc);color:var(--error,#cf222e);text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;';
+        failure.textContent = 'Mermaid render failed: ' + message;
+        wrapper.replaceChildren(failure);
+      });
+    };
     const renderMermaid = async () => {
       const mermaidBlocks = document.querySelectorAll('pre.mermaid');
-      if (mermaidBlocks.length === 0) return;
+      if (mermaidBlocks.length === 0) {
+        setMermaidRenderResult('skipped');
+        return;
+      }
+
+      setMermaidRenderResult('pending');
+      const wrappers = Array.from(mermaidBlocks).map((pre) => {
+        const code = pre.querySelector('code');
+        const src = code ? code.textContent : pre.textContent;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'mermaid-container';
+        const div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = src;
+        wrapper.appendChild(div);
+        pre.replaceWith(wrapper);
+        return wrapper;
+      });
 
       try {
         const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_BROWSER_VERSION}/dist/mermaid.esm.min.mjs');
         const packs = ${mermaidIconPacksJson};
         const pending = new Map();
+        let iconPackError = null;
         const load = (pack) => {
           if (!pending.has(pack.name)) {
             pending.set(pack.name, fetch(pack.url).then((response) => {
               if (!response.ok) throw new Error('Failed to load Mermaid icon pack ' + pack.name + ': HTTP ' + response.status);
               return response.json();
+            }).catch((error) => {
+              iconPackError ??= error instanceof Error ? error : new Error(String(error));
+              throw error;
             }));
           }
           return pending.get(pack.name);
         };
         mermaid.registerIconPacks(packs.map((pack) => ({ name: pack.name, loader: () => load(pack) })));
         mermaid.initialize(${mermaidConfigJson});
-        mermaidBlocks.forEach((pre) => {
-          const code = pre.querySelector('code');
-          const src = code ? code.textContent : pre.textContent;
-          const wrapper = document.createElement('div');
-          wrapper.className = 'mermaid-container';
-          const div = document.createElement('div');
-          div.className = 'mermaid';
-          div.textContent = src;
-          wrapper.appendChild(div);
-          pre.replaceWith(wrapper);
-        });
         await mermaid.run();
+        if (iconPackError) throw iconPackError;
         const parseRgb = (value) => {
           const match = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/);
           return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+        };
+        const isOpaqueColor = (value) => {
+          if (!parseRgb(value)) return false;
+          const alphaMatch = value.match(/^rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)$/);
+          return !alphaMatch || Number(alphaMatch[1]) >= 1;
+        };
+        const findOpaqueFill = (root) => {
+          if (!(root instanceof Element)) return null;
+          const shape = Array.from(root.querySelectorAll('rect, polygon, path, circle, ellipse')).find((candidate) => {
+            const fill = getComputedStyle(candidate).fill;
+            return isOpaqueColor(fill);
+          });
+          return shape ? getComputedStyle(shape).fill : null;
+        };
+        const findOpaqueBackground = (element, fallback) => {
+          let current = element instanceof Element ? element : null;
+          while (current) {
+            const background = getComputedStyle(current).backgroundColor;
+            if (current instanceof HTMLElement && isOpaqueColor(background)) return background;
+            current = current.parentElement;
+          }
+          return fallback;
         };
         const relativeLuminance = (color) => {
           const linear = color.map((channel) => {
@@ -3205,10 +3264,16 @@ export function buildMermaidBrowserModule(mermaidConfigJson: string, mermaidIcon
         document.querySelectorAll('.mermaid-container .icon-shape').forEach((node) => {
           const icon = node.querySelector('svg');
           if (!icon) return;
-          const iconColor = ensureReadableColor(getComputedStyle(icon).color, pageBackground);
+          const semanticColor = getComputedStyle(icon).color;
+          const iconSurface = findOpaqueFill(node.firstElementChild)
+            || findOpaqueBackground(icon, pageBackground);
+          const iconColor = ensureReadableColor(semanticColor, iconSurface);
           icon.style.setProperty('color', iconColor, 'important');
           node.querySelectorAll('.labelBkg, .nodeLabel').forEach((label) => {
-            if (label instanceof HTMLElement) label.style.setProperty('color', iconColor, 'important');
+            if (!(label instanceof HTMLElement)) return;
+            const labelSurface = findOpaqueBackground(label, pageBackground);
+            const labelColor = ensureReadableColor(semanticColor, labelSurface);
+            label.style.setProperty('color', labelColor, 'important');
           });
         });
         document.querySelectorAll('.mermaid-container .node:not(.icon-shape)').forEach((node) => {
@@ -3224,7 +3289,11 @@ export function buildMermaidBrowserModule(mermaidConfigJson: string, mermaidIcon
             label.style.setProperty('color', labelColor, 'important');
           });
         });
+        setMermaidRenderResult('success');
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setMermaidRenderResult('failed', message);
+        renderMermaidFailure(wrappers, message);
         console.error('Mermaid render failed:', error);
       }
     };
