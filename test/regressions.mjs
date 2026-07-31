@@ -8,6 +8,18 @@ import ts from "typescript";
 const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
 
+assert.doesNotMatch(
+	src,
+	/import\s*\{[^}]*\ballocateImageId\b[^}]*\}\s*from\s*"@earendil-works\/pi-tui"/s,
+	"allocateImageId must not be a named runtime import because compatible host shims may omit it.",
+);
+assert.ok(
+	src.includes('import * as PiTuiCompat from "@earendil-works/pi-tui";')
+		&& src.includes('typeof PiTuiCompat.allocateImageId === "function"')
+		&& src.includes("allocateImageIdIfAvailable?.()"),
+	"Kitty image IDs should be feature-detected and omitted when the host does not expose an allocator.",
+);
+
 assert.match(src, /function buildRenderCacheKey\s*\(/, "Missing buildRenderCacheKey helper.");
 assert.match(
 	src,
