@@ -1,7 +1,7 @@
 import { BorderedLoader, DynamicBorder, keyHint } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import * as PiTuiCompat from "@earendil-works/pi-tui";
 import {
-	allocateImageId,
 	Container,
 	deleteKittyImage,
 	getCapabilities,
@@ -31,6 +31,12 @@ import {
 	replaceInlineAnnotationMarkers,
 	transformMarkdownOutsideFences,
 } from "./shared/annotation-scanner.js";
+
+// Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
+// A namespace lookup avoids an ESM load failure and falls back to rendering without targeted deletion.
+const allocateImageIdIfAvailable = typeof PiTuiCompat.allocateImageId === "function"
+	? PiTuiCompat.allocateImageId
+	: undefined;
 
 const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
@@ -1916,7 +1922,8 @@ class MarkdownPreviewOverlay {
 	private isRefreshing = false;
 	private isOpeningBrowser = false;
 	private imageIdsByPage = new Map<number, number>();
-	private readonly useKittyImageDeletion = getCapabilities().images === "kitty";
+	private readonly useKittyImageDeletion = getCapabilities().images === "kitty"
+		&& allocateImageIdIfAvailable !== undefined;
 
 	constructor(
 		private tui: TUI,
@@ -1937,7 +1944,8 @@ class MarkdownPreviewOverlay {
 		if (!this.useKittyImageDeletion) return undefined;
 		const existing = this.imageIdsByPage.get(pageIndex);
 		if (existing !== undefined) return existing;
-		const created = allocateImageId();
+		const created = allocateImageIdIfAvailable?.();
+		if (created === undefined) return undefined;
 		this.imageIdsByPage.set(pageIndex, created);
 		return created;
 	}
