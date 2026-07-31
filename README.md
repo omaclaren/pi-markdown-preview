@@ -46,7 +46,24 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 - For terminal preview (`/preview` default): a Chromium-based browser executable (Chrome, Brave, Edge, Chromium). `puppeteer-core` is included as an extension dependency; no separate Puppeteer install is needed.
 - For terminal inline display: a terminal with image support (Ghostty, Kitty, iTerm2, WezTerm)
 - For PDF export (optional): a LaTeX engine, e.g. [TeX Live](https://tug.org/texlive/) (`brew install --cask mactex` on macOS, `apt install texlive` on Linux)
-- For Mermaid-in-PDF support (optional): Mermaid CLI (`npm install -g @mermaid-js/mermaid-cli`) and a Chromium browser accessible to Mermaid CLI
+- For Mermaid-in-PDF support (optional): Mermaid CLI (`npm install -g @mermaid-js/mermaid-cli`) and a Chromium browser accessible to Mermaid CLI. PDF icon nodes require Mermaid CLI 11.6+.
+
+### Mermaid icons
+
+Mermaid flowcharts support optional `lucide:*` and `logos:*` icons. Keep each icon metadata declaration on one source line:
+
+```mermaid
+flowchart LR
+  source@{ icon: "lucide:file-code-2", form: "rounded", label: "Source", pos: "b", h: 56 }
+  github@{ icon: "logos:github-icon", form: "rounded", label: "GitHub", pos: "b", h: 56 }
+  source -->|publish| github
+  classDef unchanged fill:#f8f9fa,stroke:#868e96,stroke-width:2px
+  classDef changed fill:#f3f0ff,stroke:#7950f2,stroke-width:2px
+  class source unchanged
+  class github changed
+```
+
+The browser renderer loads icon-pack JSON lazily from unpkg only when a diagram references that prefix, so first render requires network access. It contrast-corrects icon and shape labels against their rendered backgrounds while preserving semantic hues. PDF export forwards the same packs to Mermaid CLI 11.6+ only when a supported icon is present.
 
 ## Install
 

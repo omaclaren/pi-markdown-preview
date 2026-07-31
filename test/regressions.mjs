@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import puppeteer from "puppeteer-core";
 import ts from "typescript";
 
 const sourcePath = resolve(process.cwd(), "index.ts");
@@ -299,22 +300,318 @@ assert.equal(
 );
 
 const transpiledIndexPath = resolve(process.cwd(), `.pi-markdown-preview-registration-test-${process.pid}.mjs`);
-const transpiledIndex = ts.transpileModule(src, {
+const transpiledIndexOutput = ts.transpileModule(src, {
 	compilerOptions: {
 		module: ts.ModuleKind.ES2022,
 		target: ts.ScriptTarget.ES2022,
 	},
 	fileName: sourcePath,
 }).outputText;
+const transpiledIndexWithFailureGuard = transpiledIndexOutput.replace(
+	"function throwIfMermaidRenderFailed(mermaidResult) {",
+	"export function throwIfMermaidRenderFailed(mermaidResult) {",
+);
+assert.notEqual(transpiledIndexWithFailureGuard, transpiledIndexOutput, "Regression harness should expose the production Mermaid failure guard only in transpiled test output.");
+const transpiledIndex = transpiledIndexWithFailureGuard.replace(
+	"function usesSupportedMermaidIconPack(source) {",
+	"export function usesSupportedMermaidIconPack(source) {",
+);
+assert.notEqual(transpiledIndex, transpiledIndexWithFailureGuard, "Regression harness should expose the production Mermaid icon-pack detector only in transpiled test output.");
 
 let extensionFactory;
+let buildMermaidBrowserModule;
+let getPreviewBrowserLaunchOptions;
+let throwIfMermaidRenderFailed;
+let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildMermaidBrowserModule, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
 
+assert.match(src, /const RENDER_VERSION = "v25";/, "Observable Mermaid failures should advance beyond the Slice 1 cache epoch.");
+assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
+assert.match(
+	src,
+	/if \(usesSupportedMermaidIconPack\(source\)\) \{\s*args\.push\("--iconPacks", \.\.\.MERMAID_CLI_ICON_PACKS\);\s*\}/,
+	"PDF Mermaid rendering should forward icon packs only when a supported icon is present.",
+);
+assert.equal(usesSupportedMermaidIconPack("flowchart LR\n  source --> target"), false, "Ordinary Mermaid diagrams should remain compatible with older Mermaid CLI versions.");
+assert.equal(usesSupportedMermaidIconPack('source@{ icon: "lucide:file-code-2", label: "Source" }'), true, "Lucide icon metadata should enable CLI icon packs.");
+assert.equal(usesSupportedMermaidIconPack('github@{ label: "GitHub", icon: "logos:github-icon" }'), true, "Logos icon metadata should enable CLI icon packs.");
+assert.equal(usesSupportedMermaidIconPack('custom@{ icon: "custom:thing", label: "Custom" }'), false, "Unregistered icon prefixes should not enable unrelated CLI packs.");
+assert.ok(src.includes("const mermaidResult = await browserPage!.evaluate"), "Puppeteer rendering should read structured Mermaid status.");
+assert.ok(src.includes("throwIfMermaidRenderFailed(mermaidResult);"), "Puppeteer rendering should invoke the production Mermaid failure guard.");
+assert.doesNotMatch(
+	src,
+	/window\.__mermaidDone === true"[\s\S]{0,100}\.catch\(\(\) => \{\}\)/,
+	"Puppeteer rendering should not discard Mermaid readiness timeouts.",
+);
+
+const parseRgb = (value) => {
+	const channels = value.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+	assert.equal(channels?.length, 3, `Expected an RGB color, received ${value}`);
+	return channels;
+};
+const relativeLuminance = (color) => {
+	const linear = color.map((channel) => {
+		const value = channel / 255;
+		return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+	});
+	return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+};
+const contrastRatio = (foreground, background) => {
+	const lighter = Math.max(relativeLuminance(parseRgb(foreground)), relativeLuminance(parseRgb(background)));
+	const darker = Math.min(relativeLuminance(parseRgb(foreground)), relativeLuminance(parseRgb(background)));
+	return (lighter + 0.05) / (darker + 0.05);
+};
+
+const mermaidIconFixture = [
+	"flowchart LR",
+	'  source@{ icon: "lucide:file-code-2", form: "rounded", label: "Source", pos: "b", h: 56 }',
+	'  payload@{ shape: "doc", label: "Payload" }',
+	'  store@{ shape: "cyl", label: "Store" }',
+	'  midtone@{ shape: "rounded", label: "Midtone" }',
+	'  github@{ icon: "logos:github-icon", form: "rounded", label: "GitHub", pos: "b", h: 56 }',
+	"  source -->|prepare| payload -->|persist| store -->|review| midtone -->|publish| github",
+	"  classDef unchanged fill:#f8f9fa,stroke:#868e96,stroke-width:2px",
+	"  classDef changed fill:#f3f0ff,stroke:#7950f2,stroke-width:2px",
+	"  classDef midtone fill:#808080,stroke:#666666,stroke-width:2px",
+	"  class source,store unchanged",
+	"  class payload,github changed",
+	"  class midtone midtone",
+].join("\n");
+
+async function renderMermaidBrowserFixture(theme, fixture, options = {}) {
+	const palette = theme === "dark"
+		? { background: "#0f1117", surface: "#171b24", text: "#e6edf3", line: "#9aa5b1" }
+		: { background: "#f5f7fb", surface: "#ffffff", text: "#1f2328", line: "#57606a" };
+	const mermaidConfig = {
+		startOnLoad: false,
+		theme: "base",
+		themeVariables: {
+			background: palette.background,
+			primaryColor: palette.surface,
+			primaryTextColor: palette.text,
+			secondaryColor: palette.surface,
+			secondaryTextColor: palette.text,
+			tertiaryColor: palette.surface,
+			tertiaryTextColor: palette.text,
+			textColor: palette.text,
+			lineColor: palette.line,
+			edgeLabelBackground: palette.surface,
+		},
+	};
+	const { executablePath, args } = getPreviewBrowserLaunchOptions();
+	const browser = await puppeteer.launch({ headless: true, executablePath, args });
+	try {
+		const page = await browser.newPage();
+		const consoleErrors = [];
+		page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
+		const fixtureRoot = resolve(process.cwd(), "node_modules");
+		const servedFixtures = new Set();
+		const iconFixtures = new Map([
+			["/@iconify-json/lucide@1/icons.json", { name: "lucide", path: resolve(fixtureRoot, "@iconify-json/lucide/icons.json") }],
+			["/@iconify-json/logos@1/icons.json", { name: "logos", path: resolve(fixtureRoot, "@iconify-json/logos/icons.json") }],
+		]);
+		await page.setRequestInterception(true);
+		page.on("request", async (request) => {
+			const url = new URL(request.url());
+			const mermaidFixture = url.hostname === "cdn.jsdelivr.net" && url.pathname.startsWith("/npm/mermaid@11.16.0/")
+				? resolve(fixtureRoot, "mermaid", url.pathname.slice("/npm/mermaid@11.16.0/".length))
+				: undefined;
+			const iconFixture = url.hostname === "unpkg.com" ? iconFixtures.get(url.pathname) : undefined;
+			if (iconFixture && options.failIconPack === iconFixture.name) {
+				servedFixtures.add(`failed:${iconFixture.name}`);
+				return request.respond({
+					status: 503,
+					body: JSON.stringify({ error: "fixture unavailable" }),
+					contentType: "application/json",
+					headers: { "access-control-allow-origin": "*" },
+				});
+			}
+			const localPath = mermaidFixture ?? iconFixture?.path;
+			if (!localPath) {
+				if (url.hostname === "cdn.jsdelivr.net" || url.hostname === "unpkg.com") return request.abort("blockedbyclient");
+				return request.continue();
+			}
+			servedFixtures.add(mermaidFixture ? "mermaid" : iconFixture.name);
+			await request.respond({
+				body: await readFile(localPath),
+				contentType: localPath.endsWith(".json") ? "application/json" : "application/javascript",
+				headers: { "access-control-allow-origin": "*" },
+			});
+		});
+		const browserModule = buildMermaidBrowserModule(
+			JSON.stringify(mermaidConfig),
+			JSON.stringify([
+				{ name: "lucide", url: "https://unpkg.com/@iconify-json/lucide@1/icons.json" },
+				{ name: "logos", url: "https://unpkg.com/@iconify-json/logos@1/icons.json" },
+			]),
+		);
+		await page.setContent(`<!doctype html><body style="background:${palette.background};color:${palette.text}"><div id="preview-root" style="background:${palette.surface}"><pre class="mermaid"><code>${fixture}</code></pre></div><script type="module">${browserModule}\n(async () => { try { await renderMermaid(); } finally { window.__mermaidDone = true; } })();</script></body>`, { waitUntil: "domcontentloaded" });
+		await page.waitForFunction(() => window.__mermaidDone === true, { timeout: 30000 });
+		const result = await page.evaluate(() => {
+			const isOpaqueColor = (value) => {
+				const match = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/);
+				if (!match) return false;
+				const alphaMatch = value.match(/^rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)$/);
+				return !alphaMatch || Number(alphaMatch[1]) >= 1;
+			};
+			const findOpaqueFill = (root) => {
+				if (!(root instanceof Element)) return "";
+				const shape = Array.from(root.querySelectorAll("rect, polygon, path, circle, ellipse")).find((candidate) => (
+					isOpaqueColor(getComputedStyle(candidate).fill)
+				));
+				return shape ? getComputedStyle(shape).fill : "";
+			};
+			const findOpaqueBackground = (element) => {
+				let current = element instanceof Element ? element : null;
+				while (current) {
+					const background = getComputedStyle(current).backgroundColor;
+					if (current instanceof HTMLElement && isOpaqueColor(background)) return background;
+					current = current.parentElement;
+				}
+				return getComputedStyle(document.body).backgroundColor;
+			};
+			const edgeLabel = document.querySelector(".edgeLabel");
+			const failure = document.querySelector(".mermaid-error");
+			return {
+				mermaidRenderResult: window.__mermaidRenderResult ?? null,
+				failurePanel: failure ? { role: failure.getAttribute("role"), text: failure.textContent?.trim() } : null,
+				iconCount: document.querySelectorAll(".icon-shape svg").length,
+				edgeColor: edgeLabel ? getComputedStyle(edgeLabel).color : "",
+				bodyColor: getComputedStyle(document.body).color,
+				bodyBackground: getComputedStyle(document.body).backgroundColor,
+				previewRootBackground: getComputedStyle(document.querySelector("#preview-root")).backgroundColor,
+				iconNodes: Array.from(document.querySelectorAll(".icon-shape")).map((node) => {
+					const label = node.querySelector(".nodeLabel");
+					const icon = node.querySelector("svg");
+					return {
+						label: label?.textContent?.trim(),
+						labelColor: label ? getComputedStyle(label).color : "",
+						labelSurface: findOpaqueBackground(label),
+						iconColor: icon ? getComputedStyle(icon).color : "",
+						iconSurfaceFill: findOpaqueFill(node.firstElementChild),
+						hasPath: Boolean(icon?.querySelector("path")),
+					};
+				}),
+				shapeNodes: Array.from(document.querySelectorAll(".node:not(.icon-shape)")).map((node) => {
+					const label = node.querySelector(".nodeLabel");
+					const shape = Array.from(node.querySelectorAll("rect, polygon, path, circle, ellipse")).find((candidate) => {
+						const fill = getComputedStyle(candidate).fill;
+						return fill && fill !== "none" && fill !== "rgba(0, 0, 0, 0)";
+					});
+					return {
+						label: label?.textContent?.trim(),
+						labelColor: label ? getComputedStyle(label).color : "",
+						shapeFill: shape ? getComputedStyle(shape).fill : "",
+					};
+				}),
+			};
+		});
+		return { result, consoleErrors, servedFixtures };
+	} finally {
+		await browser.close();
+	}
+}
+
+async function assertMermaidIconBrowserRendering(theme) {
+	const { result, consoleErrors, servedFixtures } = await renderMermaidBrowserFixture(theme, mermaidIconFixture);
+	assert.deepEqual(result.mermaidRenderResult, { status: "success" }, `${theme} Mermaid fixture should report successful rendering.`);
+	assert.equal(result.failurePanel, null, `${theme} successful Mermaid rendering should not show a failure panel.`);
+	assert.ok(result.iconCount >= 2, `${theme} icon rendering should render icon SVGs rather than placeholders.`);
+	assert.deepEqual(result.iconNodes.map(({ label }) => label), ["Source", "GitHub"]);
+	assert.ok(result.iconNodes.every((node) => node.hasPath), `${theme} icon nodes should contain rendered SVG paths.`);
+	assert.deepEqual(result.shapeNodes.map(({ label }) => label), ["Payload", "Store", "Midtone"]);
+	assert.deepEqual(servedFixtures, new Set(["mermaid", "lucide", "logos"]), `${theme} fixture rendering should not use the network.`);
+	for (const node of result.iconNodes) {
+		assert.ok(contrastRatio(node.iconColor, node.iconSurfaceFill) >= 4.5, `${theme} icon glyphs should meet accessible contrast against their rendered shapes.`);
+		assert.ok(contrastRatio(node.labelColor, node.labelSurface) >= 4.5, `${theme} icon labels should meet accessible contrast against their rendered backgrounds.`);
+	}
+	for (const node of result.shapeNodes) {
+		assert.ok(contrastRatio(node.labelColor, node.shapeFill) >= 4.5, `${theme} shape labels should meet accessible contrast.`);
+	}
+	assert.ok(result.iconNodes.every((node) => node.iconSurfaceFill !== result.bodyBackground), `${theme} icon fixture shapes should differ from the page background.`);
+	assert.notEqual(result.previewRootBackground, result.bodyBackground, `${theme} preview card surface should differ from the page background.`);
+	assert.ok(result.iconNodes.every((node) => node.labelSurface === result.previewRootBackground), `${theme} icon labels should resolve the preview card as their nearest opaque background.`);
+	assert.equal(result.edgeColor, result.bodyColor, `${theme} edge labels should retain theme text color.`);
+	assert.ok(result.iconNodes.every((node) => node.labelColor !== result.edgeColor), `${theme} icon labels should remain semantically colored.`);
+	assert.notEqual(result.iconNodes[0]?.iconColor, result.iconNodes[1]?.iconColor, `${theme} gray and violet attribution icons should remain distinct.`);
+	assert.deepEqual(consoleErrors, [], `${theme} Mermaid rendering should not log console errors.`);
+	return result;
+}
+
+const darkMermaidResult = await assertMermaidIconBrowserRendering("dark");
+const lightMermaidResult = await assertMermaidIconBrowserRendering("light");
+assert.ok(
+	[...darkMermaidResult.iconNodes, ...lightMermaidResult.iconNodes].some((node) => node.iconColor !== node.labelColor),
+	"Surface-aware rendering should allow an icon glyph and label to use different compliant colors.",
+);
+
+async function assertMermaidFailurePropagation() {
+	const fixture = [
+		"flowchart LR",
+		'  source@{ icon: "lucide:file-code-2", form: "rounded", label: "Source", pos: "b", h: 56 }',
+	].join("\n");
+	const { result, consoleErrors, servedFixtures } = await renderMermaidBrowserFixture("dark", fixture, { failIconPack: "lucide" });
+	assert.equal(result.mermaidRenderResult?.status, "failed", "Failed icon-pack loading should produce failed Mermaid status.");
+	assert.match(result.mermaidRenderResult?.error ?? "", /Failed to load Mermaid icon pack lucide: HTTP 503/);
+	assert.equal(result.failurePanel?.role, "alert", "Failed Mermaid rendering should expose an alert panel.");
+	assert.match(result.failurePanel?.text ?? "", /Mermaid render failed: Failed to load Mermaid icon pack lucide: HTTP 503/);
+	assert.deepEqual(servedFixtures, new Set(["mermaid", "failed:lucide"]), "Failure fixture should remain network-isolated.");
+	assert.ok(consoleErrors.some((message) => message.includes("Mermaid render failed:")), "Failed Mermaid rendering should log a browser diagnostic.");
+	assert.throws(
+		() => throwIfMermaidRenderFailed(result.mermaidRenderResult),
+		/Mermaid render failed: Failed to load Mermaid icon pack lucide: HTTP 503/,
+		"The production Puppeteer failure guard should reject serialized failed Mermaid status.",
+	);
+}
+
+await assertMermaidFailurePropagation();
+
+function extractReadmeMermaidIconFixture(readmeSource) {
+	const heading = /^### Mermaid icons\s*$/m.exec(readmeSource);
+	assert.ok(heading, "README should contain a Mermaid icons section.");
+	const remainder = readmeSource.slice(heading.index + heading[0].length);
+	const nextHeading = /^#{1,3}\s+\S/m.exec(remainder);
+	const section = nextHeading ? remainder.slice(0, nextHeading.index) : remainder;
+	const fence = /```mermaid[^\n]*\r?\n([\s\S]*?)\r?\n```/.exec(section);
+	assert.ok(fence?.[1]?.trim(), "README Mermaid icons section should contain a non-empty Mermaid fence.");
+	return fence[1].trim();
+}
+
+const readmeSource = await readFile(new URL("../README.md", import.meta.url), "utf8");
+assert.match(readmeSource, /PDF icon nodes require Mermaid CLI 11\.6\+\./, "README should document the Mermaid CLI version required for PDF icons.");
+const readmeMermaidIconFixture = extractReadmeMermaidIconFixture(readmeSource);
+const readmeIconMetadataLines = readmeMermaidIconFixture.split("\n").filter((line) => line.includes(" icon: "));
+assert.equal(readmeIconMetadataLines.length, 2, "README Mermaid example should document both supported icon packs.");
+for (const line of readmeIconMetadataLines) {
+	assert.match(
+		line,
+		/@\{[^{}\r\n]*icon:\s*"(?:lucide|logos):[^"]+"[^{}\r\n]*\}\s*$/,
+		"README icon metadata declarations should remain on one source line.",
+	);
+}
+
+async function assertReadmeMermaidIconRendering(theme) {
+	const { result, consoleErrors, servedFixtures } = await renderMermaidBrowserFixture(theme, readmeMermaidIconFixture);
+	assert.deepEqual(result.mermaidRenderResult, { status: "success" }, `${theme} README Mermaid example should render successfully.`);
+	assert.equal(result.failurePanel, null, `${theme} README Mermaid example should not show a failure panel.`);
+	assert.equal(result.iconCount, 2, `${theme} README Mermaid example should render both documented icons.`);
+	assert.deepEqual(result.iconNodes.map(({ label }) => label), ["Source", "GitHub"]);
+	assert.ok(result.iconNodes.every((node) => node.hasPath), `${theme} README Mermaid icons should contain SVG paths.`);
+	assert.deepEqual(servedFixtures, new Set(["mermaid", "lucide", "logos"]), `${theme} README Mermaid example should remain network-isolated.`);
+	for (const node of result.iconNodes) {
+		assert.ok(contrastRatio(node.iconColor, node.iconSurfaceFill) >= 4.5, `${theme} README icon glyphs should meet accessible contrast.`);
+		assert.ok(contrastRatio(node.labelColor, node.labelSurface) >= 4.5, `${theme} README icon labels should meet accessible contrast.`);
+	}
+	assert.deepEqual(consoleErrors, [], `${theme} README Mermaid example should not log console errors.`);
+}
+
+await assertReadmeMermaidIconRendering("dark");
+await assertReadmeMermaidIconRendering("light");
 function collectExtensionRegistrations() {
 	const commands = [];
 	const tools = [];

@@ -39,7 +39,10 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.81.1",
     "@earendil-works/pi-tui": "^0.81.1",
+    "@iconify-json/logos": "1.2.11",
+    "@iconify-json/lucide": "1.2.120",
     "@types/node": "^24.3.0",
+    "mermaid": "11.16.0",
     "typebox": "^1.1.39",
     "typescript": "^5.7.3"
   }
