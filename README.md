@@ -27,7 +27,7 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 
 ## Features
 
-- **Terminal preview (default)** — renders markdown as PNG images displayed inline (Kitty, iTerm2, Ghostty, WezTerm). Long responses are automatically split across navigable pages.
+- **Terminal preview (default)** — renders markdown as PNG images displayed inline (Kitty, iTerm2, Ghostty, WezTerm). Long responses are split across navigable pages at block boundaries when possible, with a fixed-height fallback for oversized content.
 - **Browser preview** — opens rendered HTML in your default browser as a single continuous scrollable document
 - **PDF export** — exports markdown to PDF via pandoc + LaTeX and opens it in your default PDF viewer
 - **LLM-callable artifact export** — lets pi render the latest response, supplied Markdown/LaTeX, or a local file to PDF, HTML, or PNG files for remote/headless workflows such as Telegram delivery

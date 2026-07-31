@@ -42,6 +42,11 @@ assert.match(
 	/const cacheKey = buildRenderCacheKey\(`\$\{style\.cacheKey\}\|fontSize=\$\{previewFontSizePx\}\|scale=\$\{deviceScaleFactor\}`,[\s\S]*?resourcePath,[\s\S]*?isLatex\)/,
 	"renderPreview should scope cache by style/resourcePath/isLatex/fontSize/deviceScaleFactor.",
 );
+assert.ok(
+	src.includes("truncatedPages: cached.truncatedPages === true")
+		&& src.includes("truncatedPages: index === 0 ? truncatedPages : undefined"),
+	"Preview caches should preserve maximum-height truncation warnings.",
+);
 
 assert.match(
 	src,
@@ -307,30 +312,40 @@ const transpiledIndexOutput = ts.transpileModule(src, {
 	},
 	fileName: sourcePath,
 }).outputText;
-const transpiledIndexWithFailureGuard = transpiledIndexOutput.replace(
-	"function throwIfMermaidRenderFailed(mermaidResult) {",
-	"export function throwIfMermaidRenderFailed(mermaidResult) {",
-);
-assert.notEqual(transpiledIndexWithFailureGuard, transpiledIndexOutput, "Regression harness should expose the production Mermaid failure guard only in transpiled test output.");
-const transpiledIndex = transpiledIndexWithFailureGuard.replace(
-	"function usesSupportedMermaidIconPack(source) {",
-	"export function usesSupportedMermaidIconPack(source) {",
-);
-assert.notEqual(transpiledIndex, transpiledIndexWithFailureGuard, "Regression harness should expose the production Mermaid icon-pack detector only in transpiled test output.");
+function exposeTranspiledFunction(transpiledSource, functionName) {
+	for (const prefix of ["async function", "function"]) {
+		const marker = `${prefix} ${functionName}(`;
+		if (!transpiledSource.includes(marker)) continue;
+		return transpiledSource.replace(marker, `export ${marker}`);
+	}
+	assert.fail(`Regression harness could not expose ${functionName}.`);
+}
+
+let transpiledIndex = transpiledIndexOutput;
+for (const functionName of [
+	"throwIfMermaidRenderFailed",
+	"usesSupportedMermaidIconPack",
+	"buildBlockAwarePageClips",
+	"collectPreviewPageLayout",
+]) {
+	transpiledIndex = exposeTranspiledFunction(transpiledIndex, functionName);
+}
 
 let extensionFactory;
+let buildBlockAwarePageClips;
 let buildMermaidBrowserModule;
+let collectPreviewPageLayout;
 let getPreviewBrowserLaunchOptions;
 let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildMermaidBrowserModule, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
 
-assert.match(src, /const RENDER_VERSION = "v25";/, "Observable Mermaid failures should advance beyond the Slice 1 cache epoch.");
+assert.match(src, /const RENDER_VERSION = "v26";/, "Block-aware pagination should invalidate fixed-slice preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(
 	src,
@@ -341,6 +356,86 @@ assert.equal(usesSupportedMermaidIconPack("flowchart LR\n  source --> target"), 
 assert.equal(usesSupportedMermaidIconPack('source@{ icon: "lucide:file-code-2", label: "Source" }'), true, "Lucide icon metadata should enable CLI icon packs.");
 assert.equal(usesSupportedMermaidIconPack('github@{ label: "GitHub", icon: "logos:github-icon" }'), true, "Logos icon metadata should enable CLI icon packs.");
 assert.equal(usesSupportedMermaidIconPack('custom@{ icon: "custom:thing", label: "Custom" }'), false, "Unregistered icon prefixes should not enable unrelated CLI packs.");
+
+assert.deepEqual(
+	buildBlockAwarePageClips(2500, [880, 1700], [], 1000, 10),
+	[
+		{ y: 0, height: 880 },
+		{ y: 880, height: 820 },
+		{ y: 1700, height: 800 },
+	],
+	"Pagination should move cuts to nearby block boundaries without losing pixels.",
+);
+assert.deepEqual(
+	buildBlockAwarePageClips(2500, [], [], 1000, 10),
+	[
+		{ y: 0, height: 1000 },
+		{ y: 1000, height: 1000 },
+		{ y: 2000, height: 500 },
+	],
+	"Pagination should retain fixed-height fallback cuts when no suitable boundary exists.",
+);
+assert.deepEqual(
+	buildBlockAwarePageClips(
+		5000,
+		[700, 2600, 3400, 4200, 5000],
+		[
+			{ top: 700, bottom: 2600 },
+			{ top: 800, bottom: 2600 },
+			{ top: 2600, bottom: 3400 },
+			{ top: 3400, bottom: 4200 },
+			{ top: 4200, bottom: 5000 },
+		],
+		2200,
+		30,
+	),
+	[
+		{ y: 0, height: 700 },
+		{ y: 700, height: 1900 },
+		{ y: 2600, height: 1600 },
+		{ y: 4200, height: 800 },
+	],
+	"Pagination should keep fitting blocks and heading groups intact even when that creates a short page.",
+);
+assert.deepEqual(
+	buildBlockAwarePageClips(2100, [100], [{ top: 100, bottom: 1100 }], 1000, 10),
+	[
+		{ y: 0, height: 1000 },
+		{ y: 1000, height: 1000 },
+		{ y: 2000, height: 100 },
+	],
+	"Protected blocks should not create pathologically short pages.",
+);
+assert.deepEqual(
+	buildBlockAwarePageClips(3000, [650, 1300, 1950, 2600], [{ top: 650, bottom: 1100 }], 1000, 3),
+	[
+		{ y: 0, height: 1000 },
+		{ y: 1000, height: 1000 },
+		{ y: 2000, height: 1000 },
+	],
+	"Block-aware cuts should not exceed the configured maximum page count.",
+);
+assert.deepEqual(buildBlockAwarePageClips(900, [400], [{ top: 400, bottom: 700 }], 1000, 10), [{ y: 0, height: 900 }], "Single-page previews should remain unsplit.");
+
+async function assertPreviewPageLayoutCollection() {
+	const { executablePath, args } = getPreviewBrowserLaunchOptions();
+	const browser = await puppeteer.launch({ headless: true, executablePath, args });
+	try {
+		const page = await browser.newPage();
+		await page.setViewport({ width: 1200, height: 5200 });
+		await page.setContent(`<!doctype html><style>*{box-sizing:border-box}html,body{margin:0}#preview-root>*{margin:0;padding:0}li{display:block;height:800px}</style><div id="preview-root"><p style="height:700px">Intro</p><h2 style="height:100px">Code</h2><pre style="height:1800px">block</pre><ul style="height:2400px"><li>One</li><li>Two</li><li>Three</li></ul></div>`);
+		const layout = await collectPreviewPageLayout(page);
+		assert.deepEqual(layout.breakCandidates, [700, 2600, 3400, 4200, 5000], "DOM pagination should collect top-level and oversized-list boundaries.");
+		assert.ok(layout.protectedRanges.some((range) => range.top === 700 && range.bottom === 2600), "A heading and its following block should form one protected range.");
+		assert.ok(layout.protectedRanges.some((range) => range.top === 3400 && range.bottom === 4200), "Oversized lists should protect individual fitting items.");
+		assert.ok(!layout.breakCandidates.includes(800), "The collector should not offer an orphaning cut between a heading and its following block.");
+	} finally {
+		await browser.close();
+	}
+}
+
+await assertPreviewPageLayoutCollection();
+
 assert.ok(src.includes("const mermaidResult = await browserPage!.evaluate"), "Puppeteer rendering should read structured Mermaid status.");
 assert.ok(src.includes("throwIfMermaidRenderFailed(mermaidResult);"), "Puppeteer rendering should invoke the production Mermaid failure guard.");
 assert.doesNotMatch(

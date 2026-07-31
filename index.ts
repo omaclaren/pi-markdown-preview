@@ -42,7 +42,7 @@ const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
-const RENDER_VERSION = "v25";
+const RENDER_VERSION = "v26";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const MERMAID_CLI_ICON_PACKS = ["@iconify-json/lucide", "@iconify-json/logos"] as const;
 const MERMAID_BROWSER_ICON_PACKS = [
@@ -62,7 +62,10 @@ const MIN_TERMINAL_DEVICE_SCALE_FACTOR = 1;
 const MAX_TERMINAL_DEVICE_SCALE_FACTOR = 2.5;
 const VIEWPORT_WIDTH_PX = 1200;
 const PAGE_HEIGHT_PX = 2200;
-const MAX_RENDER_HEIGHT_PX = 66000; // PAGE_HEIGHT_PX * 30
+const MAX_PREVIEW_PAGES = 30;
+const MIN_BLOCK_AWARE_PAGE_FILL_RATIO = 0.65;
+const MIN_PROTECTED_PAGE_FILL_RATIO = 0.2;
+const MAX_RENDER_HEIGHT_PX = PAGE_HEIGHT_PX * MAX_PREVIEW_PAGES;
 const DEFAULT_PDF_RENDER_TIMEOUT_MS = 120000;
 const MIN_PDF_RENDER_TIMEOUT_MS = 10000;
 const MAX_PDF_RENDER_TIMEOUT_MS = 600000;
@@ -152,10 +155,26 @@ function throwIfMermaidRenderFailed(mermaidResult: BrowserMermaidRenderResult | 
 	throw new Error(`Mermaid render failed: ${mermaidResult.error?.trim() || "Unknown browser error."}`);
 }
 
+interface PreviewPageClip {
+	y: number;
+	height: number;
+}
+
+interface PreviewProtectedRange {
+	top: number;
+	bottom: number;
+}
+
+interface PreviewPageLayout {
+	breakCandidates: number[];
+	protectedRanges: PreviewProtectedRange[];
+}
+
 interface CachedPage {
 	buffer: Buffer;
 	truncatedHeight: boolean;
 	pageCount?: number;
+	truncatedPages?: boolean;
 }
 
 interface RenderWithLoaderResult {
@@ -1711,12 +1730,14 @@ async function readCachedPage(markdownPage: string, styleKey: string): Promise<C
 		const buffer = await readFile(pngPath);
 		let truncatedHeight = false;
 		let pageCount: number | undefined;
+		let truncatedPages = false;
 		if (existsSync(metaPath)) {
-			const meta = JSON.parse(await readFile(metaPath, "utf-8")) as { truncatedHeight?: boolean; pageCount?: number };
+			const meta = JSON.parse(await readFile(metaPath, "utf-8")) as { truncatedHeight?: boolean; pageCount?: number; truncatedPages?: boolean };
 			truncatedHeight = meta.truncatedHeight === true;
 			pageCount = meta.pageCount;
+			truncatedPages = meta.truncatedPages === true;
 		}
-		return { buffer, truncatedHeight, pageCount };
+		return { buffer, truncatedHeight, pageCount, truncatedPages };
 	} catch {
 		return undefined;
 	}
@@ -1728,6 +1749,7 @@ async function writeCachedPage(markdownPage: string, styleKey: string, page: Cac
 	await writeFile(pngPath, page.buffer);
 	const meta: Record<string, unknown> = { truncatedHeight: page.truncatedHeight };
 	if (page.pageCount != null) meta.pageCount = page.pageCount;
+	if (page.truncatedPages != null) meta.truncatedPages = page.truncatedPages;
 	await writeFile(metaPath, JSON.stringify(meta), "utf-8");
 }
 
@@ -1737,6 +1759,123 @@ async function waitForPageRenderReady(page: puppeteer.Page): Promise<void> {
 			await (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready;
 		}
 	});
+}
+
+function buildBlockAwarePageClips(
+	renderHeight: number,
+	breakCandidates: readonly number[],
+	protectedRanges: readonly PreviewProtectedRange[] = [],
+	pageHeight = PAGE_HEIGHT_PX,
+	maxPages = MAX_PREVIEW_PAGES,
+): PreviewPageClip[] {
+	const normalizedRenderHeight = Math.max(1, Math.ceil(renderHeight));
+	const normalizedPageHeight = Math.max(1, Math.floor(pageHeight));
+	const normalizedMaxPages = Math.max(1, Math.floor(maxPages));
+	if (normalizedRenderHeight <= normalizedPageHeight || normalizedMaxPages === 1) {
+		return [{ y: 0, height: normalizedRenderHeight }];
+	}
+
+	const candidates = [...new Set(
+		breakCandidates
+			.filter((candidate) => Number.isFinite(candidate))
+			.map((candidate) => Math.round(candidate))
+			.filter((candidate) => candidate > 0 && candidate < normalizedRenderHeight),
+	)].sort((left, right) => left - right);
+	const ranges = protectedRanges
+		.filter((range) => Number.isFinite(range.top) && Number.isFinite(range.bottom))
+		.map((range) => ({
+			top: Math.max(0, Math.floor(range.top)),
+			bottom: Math.min(normalizedRenderHeight, Math.ceil(range.bottom)),
+		}))
+		.filter((range) => range.bottom > range.top && range.bottom - range.top <= normalizedPageHeight)
+		.sort((left, right) => left.top - right.top || right.bottom - left.bottom);
+	const minimumPreferredHeight = Math.ceil(normalizedPageHeight * MIN_BLOCK_AWARE_PAGE_FILL_RATIO);
+	const minimumProtectedHeight = Math.ceil(normalizedPageHeight * MIN_PROTECTED_PAGE_FILL_RATIO);
+	const clips: PreviewPageClip[] = [];
+	let y = 0;
+
+	while (normalizedRenderHeight - y > normalizedPageHeight && clips.length < normalizedMaxPages - 1) {
+		const target = y + normalizedPageHeight;
+		const remainingPageSlots = normalizedMaxPages - clips.length - 1;
+		const minimumCutToFitRemainingPages = normalizedRenderHeight - remainingPageSlots * normalizedPageHeight;
+		const containingRange = ranges.find((range) => (
+			range.top >= y + minimumProtectedHeight
+			&& range.top >= minimumCutToFitRemainingPages
+			&& range.top < target
+			&& range.bottom > target
+		));
+		let cut = containingRange?.top ?? target;
+
+		if (!containingRange) {
+			const earliestPreferredCut = Math.max(y + minimumPreferredHeight, minimumCutToFitRemainingPages);
+			for (const candidate of candidates) {
+				if (candidate < earliestPreferredCut) continue;
+				if (candidate > target) break;
+				cut = candidate;
+			}
+		}
+
+		clips.push({ y, height: cut - y });
+		y = cut;
+	}
+
+	clips.push({ y, height: normalizedRenderHeight - y });
+	return clips;
+}
+
+async function collectPreviewPageLayout(page: puppeteer.Page): Promise<PreviewPageLayout> {
+	return page.evaluate((pageHeight) => {
+		const root = document.getElementById("preview-root");
+		if (!root) return { breakCandidates: [], protectedRanges: [] };
+
+		const candidates = new Set<number>();
+		const protectedRanges: PreviewProtectedRange[] = [];
+		const addTop = (value: number) => candidates.add(Math.floor(value));
+		const addBottom = (value: number) => candidates.add(Math.ceil(value));
+		const protect = (topValue: number, bottomValue: number) => {
+			const top = Math.floor(topValue);
+			const bottom = Math.ceil(bottomValue);
+			if (bottom > top && bottom - top <= pageHeight) protectedRanges.push({ top, bottom });
+		};
+		const isHeading = (element: Element | undefined) => Boolean(element && /^H[1-6]$/.test(element.tagName));
+		const children = Array.from(root.children);
+
+		children.forEach((child, index) => {
+			const rect = child.getBoundingClientRect();
+			const previous = index > 0 ? children[index - 1] : undefined;
+			const next = index + 1 < children.length ? children[index + 1] : undefined;
+
+			if (!isHeading(previous)) addTop(rect.top);
+			if (!isHeading(child)) {
+				addBottom(rect.bottom);
+				protect(rect.top, rect.bottom);
+			} else if (next) {
+				const nextRect = next.getBoundingClientRect();
+				protect(rect.top, nextRect.bottom);
+			}
+
+			if (rect.height <= pageHeight) return;
+			let nestedSelector: string | undefined;
+			if (child.matches("ul, ol")) nestedSelector = ":scope > li";
+			else if (child.matches("table")) nestedSelector = "tr";
+			else if (child.matches("blockquote, dl")) nestedSelector = ":scope > *";
+			if (!nestedSelector) return;
+
+			for (const nestedBlock of child.querySelectorAll(nestedSelector)) {
+				const nestedRect = nestedBlock.getBoundingClientRect();
+				addTop(nestedRect.top);
+				protect(nestedRect.top, nestedRect.bottom);
+			}
+		});
+
+		const deduplicatedRanges = new Map(
+			protectedRanges.map((range) => [`${range.top}:${range.bottom}`, range]),
+		);
+		return {
+			breakCandidates: [...candidates].filter((candidate) => candidate > 0).sort((left, right) => left - right),
+			protectedRanges: [...deduplicatedRanges.values()].sort((left, right) => left.top - right.top || right.bottom - left.bottom),
+		};
+	}, PAGE_HEIGHT_PX);
 }
 
 function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean): {
@@ -1787,7 +1926,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 				total: pageCount,
 			});
 		}
-		return { pages, themeMode: style.themeMode, truncatedPages: false };
+		return { pages, themeMode: style.themeMode, truncatedPages: cached.truncatedPages === true };
 	}
 
 	await mkdir(CACHE_DIR, { recursive: true });
@@ -1847,64 +1986,50 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 			await loadHtml(renderHeight);
 		}
 
-		// Take full screenshot and slice into pages.
-		const fullScreenshot = (await browserPage.screenshot({ type: "png" })) as Buffer;
+		const pageLayout = renderHeight > PAGE_HEIGHT_PX
+			? await collectPreviewPageLayout(browserPage)
+			: { breakCandidates: [], protectedRanges: [] };
+		const pageClips = buildBlockAwarePageClips(
+			renderHeight,
+			pageLayout.breakCandidates,
+			pageLayout.protectedRanges,
+		);
 
 		if (tempHtmlPath) await unlink(tempHtmlPath).catch(() => {});
 		tempHtmlPath = undefined;
 
-		// Import sharp-like slicing via puppeteer clip regions, or slice the
-		// full PNG by re-screenshotting with clip.  Since we already have the
-		// full page loaded, clip is simplest.
-		const pageCount = Math.max(1, Math.ceil(renderHeight / PAGE_HEIGHT_PX));
+		const pageCount = pageClips.length;
 		const pages: PreviewPage[] = [];
 
-		if (pageCount === 1) {
-			// Single page — use the full screenshot directly.
-			pages.push({
-				base64Png: fullScreenshot.toString("base64"),
-				truncatedHeight: false,
-				index: 0,
-				total: 1,
-			});
-			await writeCachedPage(normalizedMarkdown, cacheKey, {
-				buffer: fullScreenshot,
-				truncatedHeight: false,
-				pageCount: 1,
-			}).catch(() => {});
-		} else {
-			// Multiple pages — use clip regions.
-			for (let i = 0; i < pageCount; i++) {
-				if (signal?.aborted) throw new Error("Preview rendering cancelled.");
+		for (const [index, clip] of pageClips.entries()) {
+			if (signal?.aborted) throw new Error("Preview rendering cancelled.");
 
-				const y = i * PAGE_HEIGHT_PX;
-				const height = Math.min(PAGE_HEIGHT_PX, renderHeight - y);
-
-				const pageScreenshot = (await browserPage.screenshot({
-					type: "png",
+			const pageScreenshot = (await browserPage.screenshot({
+				type: "png",
+				...(pageCount > 1 ? {
 					clip: {
 						x: 0,
-						y,
+						y: clip.y,
 						width: VIEWPORT_WIDTH_PX,
-						height,
+						height: clip.height,
 					},
-				})) as Buffer;
+				} : {}),
+			})) as Buffer;
 
-				pages.push({
-					base64Png: pageScreenshot.toString("base64"),
-					truncatedHeight: false,
-					index: i,
-					total: pageCount,
-				});
+			pages.push({
+				base64Png: pageScreenshot.toString("base64"),
+				truncatedHeight: false,
+				index,
+				total: pageCount,
+			});
 
-				// Cache each page slice.
-				const pageKey = i === 0 ? normalizedMarkdown : `${normalizedMarkdown}\u0000page${i}`;
-				await writeCachedPage(pageKey, cacheKey, {
-					buffer: pageScreenshot,
-					truncatedHeight: false,
-					pageCount: i === 0 ? pageCount : undefined,
-				}).catch(() => {});
-			}
+			const pageKey = index === 0 ? normalizedMarkdown : `${normalizedMarkdown}\u0000page${index}`;
+			await writeCachedPage(pageKey, cacheKey, {
+				buffer: pageScreenshot,
+				truncatedHeight: false,
+				pageCount: index === 0 ? pageCount : undefined,
+				truncatedPages: index === 0 ? truncatedPages : undefined,
+			}).catch(() => {});
 		}
 
 		return { pages, themeMode: style.themeMode, truncatedPages };
