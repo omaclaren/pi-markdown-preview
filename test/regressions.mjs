@@ -307,26 +307,40 @@ const transpiledIndexOutput = ts.transpileModule(src, {
 	},
 	fileName: sourcePath,
 }).outputText;
-const transpiledIndex = transpiledIndexOutput.replace(
+const transpiledIndexWithFailureGuard = transpiledIndexOutput.replace(
 	"function throwIfMermaidRenderFailed(mermaidResult) {",
 	"export function throwIfMermaidRenderFailed(mermaidResult) {",
 );
-assert.notEqual(transpiledIndex, transpiledIndexOutput, "Regression harness should expose the production Mermaid failure guard only in transpiled test output.");
+assert.notEqual(transpiledIndexWithFailureGuard, transpiledIndexOutput, "Regression harness should expose the production Mermaid failure guard only in transpiled test output.");
+const transpiledIndex = transpiledIndexWithFailureGuard.replace(
+	"function usesSupportedMermaidIconPack(source) {",
+	"export function usesSupportedMermaidIconPack(source) {",
+);
+assert.notEqual(transpiledIndex, transpiledIndexWithFailureGuard, "Regression harness should expose the production Mermaid icon-pack detector only in transpiled test output.");
 
 let extensionFactory;
 let buildMermaidBrowserModule;
 let getPreviewBrowserLaunchOptions;
 let throwIfMermaidRenderFailed;
+let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildMermaidBrowserModule, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildMermaidBrowserModule, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
 
 assert.match(src, /const RENDER_VERSION = "v25";/, "Observable Mermaid failures should advance beyond the Slice 1 cache epoch.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
-assert.match(src, /"--iconPacks", \.\.\.MERMAID_CLI_ICON_PACKS/, "PDF Mermaid rendering should forward both icon packs.");
+assert.match(
+	src,
+	/if \(usesSupportedMermaidIconPack\(source\)\) \{\s*args\.push\("--iconPacks", \.\.\.MERMAID_CLI_ICON_PACKS\);\s*\}/,
+	"PDF Mermaid rendering should forward icon packs only when a supported icon is present.",
+);
+assert.equal(usesSupportedMermaidIconPack("flowchart LR\n  source --> target"), false, "Ordinary Mermaid diagrams should remain compatible with older Mermaid CLI versions.");
+assert.equal(usesSupportedMermaidIconPack('source@{ icon: "lucide:file-code-2", label: "Source" }'), true, "Lucide icon metadata should enable CLI icon packs.");
+assert.equal(usesSupportedMermaidIconPack('github@{ label: "GitHub", icon: "logos:github-icon" }'), true, "Logos icon metadata should enable CLI icon packs.");
+assert.equal(usesSupportedMermaidIconPack('custom@{ icon: "custom:thing", label: "Custom" }'), false, "Unregistered icon prefixes should not enable unrelated CLI packs.");
 assert.ok(src.includes("const mermaidResult = await browserPage!.evaluate"), "Puppeteer rendering should read structured Mermaid status.");
 assert.ok(src.includes("throwIfMermaidRenderFailed(mermaidResult);"), "Puppeteer rendering should invoke the production Mermaid failure guard.");
 assert.doesNotMatch(
@@ -569,6 +583,7 @@ function extractReadmeMermaidIconFixture(readmeSource) {
 }
 
 const readmeSource = await readFile(new URL("../README.md", import.meta.url), "utf8");
+assert.match(readmeSource, /PDF icon nodes require Mermaid CLI 11\.6\+\./, "README should document the Mermaid CLI version required for PDF icons.");
 const readmeMermaidIconFixture = extractReadmeMermaidIconFixture(readmeSource);
 const readmeIconMetadataLines = readmeMermaidIconFixture.split("\n").filter((line) => line.includes(" icon: "));
 assert.equal(readmeIconMetadataLines.length, 2, "README Mermaid example should document both supported icon packs.");

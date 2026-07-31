@@ -2856,6 +2856,10 @@ function getMermaidCliCommand(): string {
 		|| (existsSync(PI_MERMAID_CLI_PATH) ? PI_MERMAID_CLI_PATH : "mmdc");
 }
 
+function usesSupportedMermaidIconPack(source: string): boolean {
+	return /@\{[^\r\n}]*\bicon\s*:\s*["'](?:lucide|logos):/.test(source);
+}
+
 async function renderMermaidDiagramForPdf(source: string, outputPath: string): Promise<void> {
 	const mermaidCommand = getMermaidCliCommand();
 	const mermaidTheme = getMermaidPdfTheme();
@@ -2867,7 +2871,10 @@ async function renderMermaidDiagramForPdf(source: string, outputPath: string): P
 	try {
 		await writeFile(inputPath, source, "utf-8");
 		await new Promise<void>((resolve, reject) => {
-			const args = ["-i", inputPath, "-o", outputPath, "-t", mermaidTheme, "-f", "--iconPacks", ...MERMAID_CLI_ICON_PACKS];
+			const args = ["-i", inputPath, "-o", outputPath, "-t", mermaidTheme, "-f"];
+			if (usesSupportedMermaidIconPack(source)) {
+				args.push("--iconPacks", ...MERMAID_CLI_ICON_PACKS);
+			}
 			const child = spawn(mermaidCommand, args, { stdio: ["ignore", "ignore", "pipe"] });
 			const stderrChunks: Buffer[] = [];
 			let settled = false;
