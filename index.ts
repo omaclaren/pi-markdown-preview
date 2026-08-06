@@ -78,12 +78,13 @@ function shouldRegisterPreviewExportTool(): boolean {
 }
 
 function stringEnum<T extends readonly string[]>(values: T, options?: { description?: string; default?: T[number] }): TUnsafe<T[number]> {
-	return Type.Unsafe({
-		type: "string",
+	// Keep the literal-union static type while returning a composable string schema.
+	// Some compatible hosts cannot wrap Type.Unsafe schemas with Type.Optional.
+	return Type.String({
 		enum: values,
 		...(options?.description ? { description: options.description } : {}),
 		...(options?.default ? { default: options.default } : {}),
-	});
+	}) as unknown as TUnsafe<T[number]>;
 }
 
 type ThemeMode = "dark" | "light";

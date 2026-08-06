@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
+import { Check } from "typebox/value";
 
 const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
@@ -19,6 +20,11 @@ assert.ok(
 		&& src.includes('typeof PiTuiCompat.allocateImageId === "function"')
 		&& src.includes("allocateImageIdIfAvailable?.()"),
 	"Kitty image IDs should be feature-detected and omitted when the host does not expose an allocator.",
+);
+const stringEnumSource = src.slice(src.indexOf("function stringEnum"), src.indexOf("type ThemeMode"));
+assert.ok(
+	stringEnumSource.includes("return Type.String({") && !stringEnumSource.includes("return Type.Unsafe({"),
+	"String enums should remain composable with Type.Optional in compatible host schema implementations.",
 );
 
 assert.match(src, /function buildRenderCacheKey\s*\(/, "Missing buildRenderCacheKey helper.");
@@ -709,7 +715,7 @@ await assertReadmeMermaidIconRendering("dark");
 await assertReadmeMermaidIconRendering("light");
 function collectExtensionRegistrations() {
 	const commands = [];
-	const tools = [];
+	const toolDefinitions = [];
 	const events = [];
 	const pi = {
 		on(event) {
@@ -719,22 +725,35 @@ function collectExtensionRegistrations() {
 			commands.push(name);
 		},
 		registerTool(definition) {
-			tools.push(definition.name);
+			toolDefinitions.push(definition);
 		},
 	};
 	extensionFactory(pi);
-	return { commands, tools, events };
+	return { commands, tools: toolDefinitions.map((definition) => definition.name), toolDefinitions, events };
 }
 
 const exportToolEnvName = "PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL";
 const previousExportToolEnv = process.env[exportToolEnvName];
 try {
 	delete process.env[exportToolEnvName];
+	const defaultRegistrations = collectExtensionRegistrations();
 	assert.deepEqual(
-		collectExtensionRegistrations().tools,
+		defaultRegistrations.tools,
 		["preview_export"],
 		"preview_export should remain registered by default for backward compatibility.",
 	);
+	const previewExportParameters = defaultRegistrations.toolDefinitions[0].parameters;
+	assert.deepEqual(previewExportParameters.required, ["format"], "Only preview_export format should be required.");
+	assert.deepEqual(previewExportParameters.properties.format.enum, ["pdf", "html", "png"], "preview_export format should retain its enum values.");
+	assert.deepEqual(previewExportParameters.properties.source.enum, ["last_assistant", "file", "markdown"], "Optional preview_export source should retain its enum values.");
+	assert.deepEqual(previewExportParameters.properties.inputFormat.enum, ["markdown", "latex"], "Optional preview_export input format should retain its enum values.");
+	assert.equal(previewExportParameters.properties.source.type, "string", "Optional enum properties should remain string schemas.");
+	assert.equal(Check(previewExportParameters, { format: "pdf" }), true, "preview_export should accept required parameters without optional fields.");
+	assert.equal(Check(previewExportParameters, { format: "png", source: "file", path: "report.md", inputFormat: "markdown" }), true, "preview_export should accept valid optional enum values.");
+	assert.equal(Check(previewExportParameters, { format: "docx" }), false, "preview_export should reject invalid format values.");
+	assert.equal(Check(previewExportParameters, { format: "pdf", source: "other" }), false, "preview_export should reject invalid optional enum values.");
+	assert.equal(Check(previewExportParameters, { source: "file" }), false, "preview_export should continue requiring format.");
+	assert.equal(Check(previewExportParameters, { format: "pdf", unexpected: true }), false, "preview_export should continue rejecting additional properties.");
 
 	for (const disabledValue of ["0", "false", "FALSE", " no ", "off"]) {
 		process.env[exportToolEnvName] = disabledValue;
