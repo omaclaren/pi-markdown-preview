@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
@@ -333,6 +333,8 @@ for (const functionName of [
 	"usesSupportedMermaidIconPack",
 	"buildBlockAwarePageClips",
 	"collectPreviewPageLayout",
+	"findBrowserExecutable",
+	"getBrowserCandidates",
 ]) {
 	transpiledIndex = exposeTranspiledFunction(transpiledIndex, functionName);
 }
@@ -341,12 +343,14 @@ let extensionFactory;
 let buildBlockAwarePageClips;
 let buildMermaidBrowserModule;
 let collectPreviewPageLayout;
+let findBrowserExecutable;
+let getBrowserCandidates;
 let getPreviewBrowserLaunchOptions;
 let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, findBrowserExecutable, getBrowserCandidates, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
@@ -362,6 +366,44 @@ assert.equal(usesSupportedMermaidIconPack("flowchart LR\n  source --> target"), 
 assert.equal(usesSupportedMermaidIconPack('source@{ icon: "lucide:file-code-2", label: "Source" }'), true, "Lucide icon metadata should enable CLI icon packs.");
 assert.equal(usesSupportedMermaidIconPack('github@{ label: "GitHub", icon: "logos:github-icon" }'), true, "Logos icon metadata should enable CLI icon packs.");
 assert.equal(usesSupportedMermaidIconPack('custom@{ icon: "custom:thing", label: "Custom" }'), false, "Unregistered icon prefixes should not enable unrelated CLI packs.");
+
+const edgeX86Path = win32Path.join("C:/Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe");
+const defaultWindowsBrowserCandidates = getBrowserCandidates("win32", {});
+assert.ok(
+	defaultWindowsBrowserCandidates.includes(edgeX86Path),
+	"Windows browser discovery should include Edge under Program Files (x86).",
+);
+const customWindowsEnv = {
+	ProgramW6432: "D:/Program Files",
+	PROGRAMFILES: "D:/Program Files",
+	"PROGRAMFILES(X86)": "D:/Program Files (x86)",
+	LOCALAPPDATA: "E:/Users/Ryan/AppData/Local",
+};
+const customWindowsBrowserCandidates = getBrowserCandidates("win32", customWindowsEnv);
+const customEdgeX86Path = win32Path.join(customWindowsEnv["PROGRAMFILES(X86)"], "Microsoft", "Edge", "Application", "msedge.exe");
+const perUserEdgePath = win32Path.join(customWindowsEnv.LOCALAPPDATA, "Microsoft", "Edge", "Application", "msedge.exe");
+assert.ok(customWindowsBrowserCandidates.includes(customEdgeX86Path), "Windows discovery should honor the PROGRAMFILES(X86) environment root.");
+assert.ok(customWindowsBrowserCandidates.includes(perUserEdgePath), "Windows discovery should include per-user Edge installations under LOCALAPPDATA.");
+assert.equal(
+	customWindowsBrowserCandidates.filter((candidate) => candidate === win32Path.join(customWindowsEnv.PROGRAMFILES, "Google", "Chrome", "Application", "chrome.exe")).length,
+	1,
+	"Equivalent Windows program-file roots should not create duplicate browser candidates.",
+);
+assert.equal(
+	findBrowserExecutable("win32", {}, (candidate) => candidate.toLowerCase() === edgeX86Path.toLowerCase()),
+	edgeX86Path,
+	"Windows discovery should select Edge from Program Files (x86) when it is the installed candidate.",
+);
+const explicitBrowserPath = "Z:\\Portable\\Chromium\\chrome.exe";
+assert.equal(
+	findBrowserExecutable(
+		"win32",
+		{ ...customWindowsEnv, PUPPETEER_EXECUTABLE_PATH: explicitBrowserPath },
+		(candidate) => candidate === explicitBrowserPath || candidate === customEdgeX86Path,
+	),
+	explicitBrowserPath,
+	"PUPPETEER_EXECUTABLE_PATH should remain higher priority than discovered Windows installations.",
+);
 
 assert.deepEqual(
 	buildBlockAwarePageClips(2500, [880, 1700], [], 1000, 10),

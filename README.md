@@ -193,6 +193,8 @@ Set `PUPPETEER_EXECUTABLE_PATH` to override Chromium detection for terminal prev
 export PUPPETEER_EXECUTABLE_PATH=/path/to/chromium
 ```
 
+On Windows, standard system and per-user Chrome, Edge, Brave, and Chromium installations are detected from `ProgramW6432`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, and `LOCALAPPDATA`, with the common `C:` locations as fallbacks.
+
 Terminal preview uses the known-good fixed screenshot path: 1200px Chromium viewport at device scale `2`. Set `PI_MARKDOWN_PREVIEW_DEVICE_SCALE_FACTOR` only if you want to experiment with screenshot density manually (default: `2`; range: `1`–`2.5`):
 
 ```bash

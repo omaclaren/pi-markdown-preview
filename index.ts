@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, extname, join, resolve as resolvePath, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import { Type, type TUnsafe } from "typebox";
@@ -1601,8 +1601,46 @@ function hasMarkdownDiffFence(markdown: string): boolean {
 	return false;
 }
 
-function getBrowserCandidates(): string[] {
-	if (process.platform === "darwin") {
+function deduplicateWindowsPaths(paths: Array<string | undefined>): string[] {
+	const candidates: string[] = [];
+	const seen = new Set<string>();
+	for (const candidate of paths) {
+		if (!candidate?.trim()) continue;
+		const normalized = win32Path.normalize(candidate.trim());
+		const key = normalized.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		candidates.push(normalized);
+	}
+	return candidates;
+}
+
+function getWindowsBrowserCandidates(env: NodeJS.ProcessEnv): string[] {
+	const systemRoots = deduplicateWindowsPaths([
+		env.ProgramW6432,
+		env.PROGRAMFILES,
+		env["PROGRAMFILES(X86)"],
+		"C:/Program Files",
+		"C:/Program Files (x86)",
+	]);
+	const browserRelativePaths = [
+		["Google", "Chrome", "Application", "chrome.exe"],
+		["Microsoft", "Edge", "Application", "msedge.exe"],
+		["BraveSoftware", "Brave-Browser", "Application", "brave.exe"],
+		["Chromium", "Application", "chrome.exe"],
+	];
+	const systemCandidates = browserRelativePaths.flatMap((relativePath) => (
+		systemRoots.map((root) => win32Path.join(root, ...relativePath))
+	));
+	const localRoot = env.LOCALAPPDATA?.trim();
+	const userCandidates = localRoot
+		? browserRelativePaths.map((relativePath) => win32Path.join(localRoot, ...relativePath))
+		: [];
+	return deduplicateWindowsPaths([...systemCandidates, ...userCandidates]);
+}
+
+function getBrowserCandidates(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
+	if (platform === "darwin") {
 		return [
 			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -1612,13 +1650,8 @@ function getBrowserCandidates(): string[] {
 		];
 	}
 
-	if (process.platform === "win32") {
-		return [
-			"C:/Program Files/Google/Chrome/Application/chrome.exe",
-			"C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-			"C:/Program Files/Microsoft/Edge/Application/msedge.exe",
-			"C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe",
-		];
+	if (platform === "win32") {
+		return getWindowsBrowserCandidates(env);
 	}
 
 	return [
@@ -1630,12 +1663,16 @@ function getBrowserCandidates(): string[] {
 	];
 }
 
-function findBrowserExecutable(): string | undefined {
-	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || process.env.BROWSER;
-	if (envPath && existsSync(envPath)) {
+function findBrowserExecutable(
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
+	pathExists: (path: string) => boolean = existsSync,
+): string | undefined {
+	const envPath = env.PUPPETEER_EXECUTABLE_PATH || env.CHROME_PATH || env.BROWSER;
+	if (envPath && pathExists(envPath)) {
 		return envPath;
 	}
-	return getBrowserCandidates().find((candidate) => existsSync(candidate));
+	return getBrowserCandidates(platform, env).find((candidate) => pathExists(candidate));
 }
 
 let sharedPreviewBrowser: puppeteer.Browser | undefined;
