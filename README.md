@@ -215,7 +215,9 @@ export MERMAID_PDF_THEME=default
 
 ## Cache
 
-Rendered previews are cached at `~/.pi/cache/markdown-preview/`. Clear with:
+Rendered previews are cached at `~/.pi/cache/markdown-preview/` by default.
+When `PI_CODING_AGENT_DIR` is set, the cache is stored at `$PI_CODING_AGENT_DIR/cache/markdown-preview/` instead.
+Clear it with:
 
 ```bash
 /preview-clear-cache
@@ -224,7 +226,7 @@ Rendered previews are cached at `~/.pi/cache/markdown-preview/`. Clear with:
 Or manually:
 
 ```bash
-rm -rf ~/.pi/cache/markdown-preview/
+rm -rf "${PI_CODING_AGENT_DIR:-$HOME/.pi}/cache/markdown-preview/"
 ```
 
 ## License

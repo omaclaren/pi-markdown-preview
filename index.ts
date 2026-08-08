@@ -38,7 +38,42 @@ const allocateImageIdIfAvailable = typeof PiTuiCompat.allocateImageId === "funct
 	? PiTuiCompat.allocateImageId
 	: undefined;
 
-const CACHE_DIR = join(homedir(), ".pi", "cache", "markdown-preview");
+function resolvePiAgentDir(
+	environment: NodeJS.ProcessEnv = process.env,
+	homeDirectory = homedir(),
+): string {
+	const configured = environment.PI_CODING_AGENT_DIR;
+	if (!configured) return join(homeDirectory, ".pi", "agent");
+	if (configured === "~") return homeDirectory;
+	if (configured.startsWith("~/") || configured.startsWith("~\\")) {
+		return join(homeDirectory, configured.slice(2));
+	}
+	return configured;
+}
+
+function getPreviewCacheDir(
+	environment: NodeJS.ProcessEnv = process.env,
+	homeDirectory = homedir(),
+): string {
+	if (!environment.PI_CODING_AGENT_DIR) {
+		// Keep the established default while containing custom Pi state under its explicit agent directory.
+		return join(homeDirectory, ".pi", "cache", "markdown-preview");
+	}
+	return join(resolvePiAgentDir(environment, homeDirectory), "cache", "markdown-preview");
+}
+
+function getPiManagedMermaidCliPath(
+	environment: NodeJS.ProcessEnv = process.env,
+	homeDirectory = homedir(),
+): string {
+	return join(
+		resolvePiAgentDir(environment, homeDirectory),
+		"npm", "node_modules", ".bin",
+		process.platform === "win32" ? "mmdc.cmd" : "mmdc",
+	);
+}
+
+const CACHE_DIR = getPreviewCacheDir();
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
@@ -49,10 +84,7 @@ const MERMAID_BROWSER_ICON_PACKS = [
 	{ name: "lucide", url: "https://unpkg.com/@iconify-json/lucide@1/icons.json" },
 	{ name: "logos", url: "https://unpkg.com/@iconify-json/logos@1/icons.json" },
 ] as const;
-const PI_MERMAID_CLI_PATH = join(
-	homedir(), ".pi", "agent", "npm", "node_modules", ".bin",
-	process.platform === "win32" ? "mmdc.cmd" : "mmdc",
-);
+const PI_MERMAID_CLI_PATH = getPiManagedMermaidCliPath();
 const DEFAULT_TERMINAL_PREVIEW_FONT_SIZE_PX = 16;
 const DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX = 15;
 const MIN_PREVIEW_FONT_SIZE_PX = 10;
@@ -4529,7 +4561,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-clear-cache", {
-		description: "Clear rendered preview cache (~/.pi/cache/markdown-preview)",
+		description: `Clear rendered preview cache (${CACHE_DIR})`,
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 			try {
