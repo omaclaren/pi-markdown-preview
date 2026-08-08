@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
-import { resolve, win32 as win32Path } from "node:path";
+import { join, resolve, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
@@ -335,6 +335,9 @@ for (const functionName of [
 	"collectPreviewPageLayout",
 	"findBrowserExecutable",
 	"getBrowserCandidates",
+	"getPiManagedMermaidCliPath",
+	"getPreviewCacheDir",
+	"resolvePiAgentDir",
 ]) {
 	transpiledIndex = exposeTranspiledFunction(transpiledIndex, functionName);
 }
@@ -345,15 +348,57 @@ let buildMermaidBrowserModule;
 let collectPreviewPageLayout;
 let findBrowserExecutable;
 let getBrowserCandidates;
+let getPiManagedMermaidCliPath;
 let getPreviewBrowserLaunchOptions;
+let getPreviewCacheDir;
+let resolvePiAgentDir;
 let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, findBrowserExecutable, getBrowserCandidates, getPreviewBrowserLaunchOptions, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, findBrowserExecutable, getBrowserCandidates, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
+
+const testHomeDirectory = join(process.cwd(), ".pi-markdown-preview-test-home");
+const customPiAgentDir = join(testHomeDirectory, ".local", "share", "pi");
+assert.equal(
+	resolvePiAgentDir({}, testHomeDirectory),
+	join(testHomeDirectory, ".pi", "agent"),
+	"Pi agent directory resolution should preserve the standard default.",
+);
+assert.equal(
+	getPreviewCacheDir({}, testHomeDirectory),
+	join(testHomeDirectory, ".pi", "cache", "markdown-preview"),
+	"Preview caching should preserve the standard default location.",
+);
+assert.equal(
+	resolvePiAgentDir({ PI_CODING_AGENT_DIR: customPiAgentDir }, testHomeDirectory),
+	customPiAgentDir,
+	"Pi agent directory resolution should honor PI_CODING_AGENT_DIR.",
+);
+assert.equal(
+	getPreviewCacheDir({ PI_CODING_AGENT_DIR: customPiAgentDir }, testHomeDirectory),
+	join(customPiAgentDir, "cache", "markdown-preview"),
+	"Preview caching should stay under a custom Pi agent directory.",
+);
+assert.equal(
+	getPreviewCacheDir({ PI_CODING_AGENT_DIR: "~/custom-pi" }, testHomeDirectory),
+	join(testHomeDirectory, "custom-pi", "cache", "markdown-preview"),
+	"Preview caching should expand a home-relative Pi agent directory.",
+);
+const mermaidCliExecutable = process.platform === "win32" ? "mmdc.cmd" : "mmdc";
+assert.equal(
+	getPiManagedMermaidCliPath({}, testHomeDirectory),
+	join(testHomeDirectory, ".pi", "agent", "npm", "node_modules", ".bin", mermaidCliExecutable),
+	"Managed Mermaid CLI discovery should preserve the standard Pi agent directory.",
+);
+assert.equal(
+	getPiManagedMermaidCliPath({ PI_CODING_AGENT_DIR: customPiAgentDir }, testHomeDirectory),
+	join(customPiAgentDir, "npm", "node_modules", ".bin", mermaidCliExecutable),
+	"Managed Mermaid CLI discovery should stay under a custom Pi agent directory.",
+);
 
 assert.match(src, /const RENDER_VERSION = "v26";/, "Block-aware pagination should invalidate fixed-slice preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
