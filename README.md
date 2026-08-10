@@ -90,7 +90,7 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 | `/preview --pick` | Select from all assistant responses |
 | `/preview <path/to/file>` | Preview a Markdown, LaTeX, diff, or code file |
 | `/preview --file <path/to/file>` | Preview a file (explicit flag) |
-| `/preview --browser` (`-b`) | Open preview in default browser |
+| `/preview --browser` (`-b`) | Open preview in cmux when available, otherwise the system browser |
 | `/preview --font-size 14` | Preview with a custom terminal/browser font size in px (defaults: terminal 16, browser 15) |
 | `/preview-browser` | Shortcut for a one-shot browser preview |
 | `/preview-browser <path/to/file>` | Open a file preview in browser |
@@ -106,6 +106,10 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 Local images are supported. File previews resolve relative image paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, relative images remain restricted beneath the preview resource directory, while exact absolute image paths and `file:` URLs referenced by retained previews are rewritten to opaque authenticated routes. Watch mode never exposes a general filesystem route and serves only allowlisted image types.
 
 The short response-watch forms are `/preview-browser -w` and `/preview -b -w`. Use `/preview-browser -w ./report.md` or `/preview -b -w --file ./report.md` to watch a file.
+
+When pi is running inside cmux, browser previews automatically open as a focused cmux browser split in the caller’s workspace. If cmux is unavailable or declines the request, the normal system-browser opener is used instead.
+
+The watch server removes its bootstrap token from the address bar after setting a browser-specific session cookie. Consequently, copying the cleaned address-bar URL into another browser is intentionally rejected. Use the watch toolbar’s **Copy link** control to request a fresh authenticated URL; it copies directly when browser permissions allow and otherwise selects the URL for manual copying.
 
 Response watch mode is deliberately completion-level rather than token-streaming: it performs one canonical Pandoc render after each settled agent run, and only for a new or changed latest assistant response. File watch mode debounces source-file changes, hashes the file contents, and renders only genuine changes; temporary read/render failures leave the last good preview visible. Linked asset changes alone do not trigger a render. Both modes use a token-protected server bound to `127.0.0.1` and stop with `/preview-browser --stop` or when the session shuts down. One-shot browser previews remain unchanged and do not start this server.
 

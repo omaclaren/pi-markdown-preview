@@ -354,6 +354,7 @@ for (const functionName of [
 	"findBrowserExecutable",
 	"getBrowserCandidates",
 	"getBrowserOpenTarget",
+	"getCmuxBrowserOpenCommand",
 	"getLastAssistantResponse",
 	"getPiManagedMermaidCliPath",
 	"getPreviewCacheDir",
@@ -373,6 +374,7 @@ let getAssistantResponseKey;
 let findBrowserExecutable;
 let getBrowserCandidates;
 let getBrowserOpenTarget;
+let getCmuxBrowserOpenCommand;
 let getLastAssistantResponse;
 let getPiManagedMermaidCliPath;
 let getPreviewBrowserLaunchOptions;
@@ -384,7 +386,7 @@ let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
@@ -431,6 +433,18 @@ assert.equal(
 assert.equal(getBrowserOpenTarget("https://127.0.0.1:4321/?token=test"), "https://127.0.0.1:4321/?token=test", "Browser opening should preserve HTTP URLs used by watch mode.");
 const browserOpenFixturePath = join(testHomeDirectory, "preview.html");
 assert.equal(getBrowserOpenTarget(browserOpenFixturePath), pathToFileURL(browserOpenFixturePath).href, "Browser opening should continue converting local paths to file URLs.");
+assert.deepEqual(
+	getCmuxBrowserOpenCommand("http://127.0.0.1:4321/?token=test", {
+		CMUX_WORKSPACE_ID: "workspace-id",
+		CMUX_BUNDLED_CLI_PATH: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+	}),
+	{
+		command: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+		args: ["browser", "open", "http://127.0.0.1:4321/?token=test", "--workspace", "workspace-id", "--focus", "true"],
+	},
+	"Browser previews launched inside cmux should open a focused browser split in the caller workspace.",
+);
+assert.equal(getCmuxBrowserOpenCommand("https://example.com", {}), undefined, "Browser previews outside cmux should retain the system-browser opener.");
 
 const parsedBrowserWatch = parsePreviewArgs("--browser --watch --font-size 14");
 assert.equal(parsedBrowserWatch.target, "browser");
@@ -526,6 +540,7 @@ async function assertBrowserWatchServer() {
 	assert.match(preparedHtml, />2 of 3</, "Watch HTML should identify the selected response within bounded history.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-previous"[^>]*href="\/?\?revision=5"/, "Watch HTML should link to the previous rendered response.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-next"[^>]*href="\/?\?revision=9"/, "Watch HTML should link to the next rendered response.");
+	assert.match(preparedHtml, /id="pi-markdown-preview-watch-copy-link"/, "Watch HTML should offer an explicit way to copy an authenticated link for another browser.");
 	await assert.rejects(
 		createBrowserWatchServer(initialHtml, resourceRoot, { historyLimit: 0 }),
 		/positive integer/,
@@ -540,6 +555,8 @@ async function assertBrowserWatchServer() {
 
 		const unauthorized = await fetch(watchUrl.origin);
 		assert.equal(unauthorized.status, 403, "Browser watch routes should reject requests without a token or session cookie.");
+		const unauthorizedShare = await fetch(new URL("/__pi_markdown_preview_share__?revision=1", watchUrl.origin));
+		assert.equal(unauthorizedShare.status, 403, "Transferable watch links should only be issued to an authenticated preview session.");
 
 		const initialResponse = await fetch(server.url);
 		assert.equal(initialResponse.status, 200);
@@ -554,6 +571,17 @@ async function assertBrowserWatchServer() {
 		assert.match(initialBody, /Initial response/);
 		assert.match(initialBody, /<script nonce="[^"]+">/, "Trusted preview scripts should carry the CSP nonce.");
 		assert.doesNotMatch(initialBody, new RegExp(watchUrl.searchParams.get("token")), "The watch token should not be embedded in the served HTML.");
+		assert.match(initialBody, /id="pi-markdown-preview-watch-copy-link"/, "Authenticated watch pages should expose the transferable-link control.");
+		const shareResponse = await fetch(new URL("/__pi_markdown_preview_share__?revision=1", watchUrl.origin), { headers: { cookie } });
+		assert.equal(shareResponse.status, 200);
+		const transferableWatchUrl = new URL(await shareResponse.text());
+		assert.equal(transferableWatchUrl.origin, watchUrl.origin);
+		assert.equal(transferableWatchUrl.searchParams.get("token"), watchUrl.searchParams.get("token"));
+		assert.equal(transferableWatchUrl.searchParams.get("revision"), "1");
+		const transferredBootstrap = await fetch(transferableWatchUrl);
+		assert.equal(transferredBootstrap.status, 200, "A copied watch link should bootstrap an independent browser without sharing cookies.");
+		assert.match(transferredBootstrap.headers.get("set-cookie") ?? "", /^pi_markdown_preview_watch_\d+=/);
+		await transferredBootstrap.body?.cancel();
 		assert.doesNotMatch(initialBody, new RegExp(absoluteImagePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "Absolute filesystem paths should not be exposed as browser resource URLs.");
 		const absoluteImageRoute = /id="absolute-image" src="([^"]+)"/.exec(initialBody)?.[1];
 		const fileUrlImageRoute = /id="file-url-image" src="([^"]+)"/.exec(initialBody)?.[1];

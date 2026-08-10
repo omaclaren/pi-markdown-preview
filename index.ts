@@ -105,6 +105,7 @@ const DEFAULT_PDF_RENDER_TIMEOUT_MS = 120000;
 const MIN_PDF_RENDER_TIMEOUT_MS = 10000;
 const MAX_PDF_RENDER_TIMEOUT_MS = 600000;
 const FALSE_ENV_VALUES = new Set(["0", "false", "no", "off"]);
+const CMUX_BROWSER_OPEN_TIMEOUT_MS = 5000;
 
 function shouldRegisterPreviewExportTool(): boolean {
 	const configured = process.env.PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL;
@@ -2480,8 +2481,50 @@ function getBrowserOpenTarget(pathOrUrl: string): string {
 	return /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : pathToFileURL(pathOrUrl).href;
 }
 
-async function openFileInDefaultBrowser(pathOrUrl: string): Promise<void> {
+function getCmuxBrowserOpenCommand(
+	target: string,
+	env: NodeJS.ProcessEnv = process.env,
+): { command: string; args: string[] } | undefined {
+	const workspaceId = String(env.CMUX_WORKSPACE_ID ?? "").trim();
+	const termProgram = String(env.TERM_PROGRAM ?? "").trim().toLowerCase();
+	const term = String(env.TERM ?? "").trim().toLowerCase();
+	const bundleId = String(env.CMUX_BUNDLE_ID ?? "").trim().toLowerCase();
+	const detected = Boolean(workspaceId || termProgram === "cmux" || term.includes("cmux") || bundleId.includes("cmux"));
+	if (!detected) return undefined;
+
+	const command = String(env.CMUX_BUNDLED_CLI_PATH ?? "").trim() || "cmux";
+	const args = ["browser", "open", target];
+	if (workspaceId) args.push("--workspace", workspaceId);
+	args.push("--focus", "true");
+	return { command, args };
+}
+
+async function tryOpenBrowserPreviewInCmux(target: string): Promise<boolean> {
+	const openCommand = getCmuxBrowserOpenCommand(target);
+	if (!openCommand) return false;
+
+	return await new Promise<boolean>((resolve) => {
+		let settled = false;
+		const child = spawn(openCommand.command, openCommand.args, { stdio: "ignore" });
+		const finish = (opened: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			resolve(opened);
+		};
+		const timeout = setTimeout(() => {
+			child.kill();
+			finish(false);
+		}, CMUX_BROWSER_OPEN_TIMEOUT_MS);
+		timeout.unref?.();
+		child.once("error", () => finish(false));
+		child.once("close", (code) => finish(code === 0));
+	});
+}
+
+async function openFileInDefaultBrowser(pathOrUrl: string, preferCmuxBrowser = false): Promise<void> {
 	const target = getBrowserOpenTarget(pathOrUrl);
+	if (preferCmuxBrowser && await tryOpenBrowserPreviewInCmux(target)) return;
 	const openCommand =
 		process.platform === "darwin"
 			? { command: "open", args: [target] }
@@ -4222,7 +4265,7 @@ export async function openPreviewInBrowser(ctx: ExtensionCommandContext, markdow
 
 	const style = getPreviewStyle(ctx.ui.theme);
 	const htmlPath = await renderPreviewHtmlToFile(markdown, style, resourcePath, isLatex, fontSizePx);
-	await openFileInDefaultBrowser(htmlPath);
+	await openFileInDefaultBrowser(htmlPath, true);
 }
 
 function buildPagedPngOutputPaths(basePath: string, pageCount: number): string[] {
@@ -4666,7 +4709,7 @@ export default function (pi: ExtensionAPI) {
 			activeWatch.fontSizePx = previewFontSizePx;
 			if (fontChanged) await refreshBrowserResponseWatch(ctx, true);
 			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
-			await openFileInDefaultBrowser(activeWatch.server.url);
+			await openFileInDefaultBrowser(activeWatch.server.url, true);
 			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
 			hasShownBrowserWatchHint = true;
 			ctx.ui.notify("Browser preview watch is already running; opened it again. Stop with /preview-browser --stop.", "info");
@@ -4709,7 +4752,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		browserWatch = newWatch;
 		try {
-			await openFileInDefaultBrowser(server.url);
+			await openFileInDefaultBrowser(server.url, true);
 		} catch (error) {
 			if (browserWatch === newWatch) await stopBrowserWatch();
 			throw error;
@@ -4740,7 +4783,7 @@ export default function (pi: ExtensionAPI) {
 			activeWatch.fontSizePx = previewFontSizePx;
 			await refreshBrowserFileWatch(ctx, fontChanged);
 			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
-			await openFileInDefaultBrowser(activeWatch.server.url);
+			await openFileInDefaultBrowser(activeWatch.server.url, true);
 			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
 			hasShownBrowserWatchHint = true;
 			ctx.ui.notify(`Browser file watch is already running for ${filePath}; opened it again. Stop with /preview-browser --stop.`, "info");
@@ -4788,7 +4831,7 @@ export default function (pi: ExtensionAPI) {
 			watchFile(filePath, { interval: BROWSER_FILE_WATCH_INTERVAL_MS }, listener);
 			await refreshBrowserFileWatch(ctx);
 			if (browserWatch !== newWatch || browserWatchOperationGeneration !== operationGeneration) return;
-			await openFileInDefaultBrowser(server.url);
+			await openFileInDefaultBrowser(server.url, true);
 		} catch (error) {
 			if (browserWatch === newWatch) await stopBrowserWatch();
 			throw error;

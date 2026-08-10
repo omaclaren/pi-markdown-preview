@@ -6,6 +6,7 @@ import { extname, isAbsolute, posix as posixPath, relative, resolve, win32 as wi
 import { fileURLToPath } from "node:url";
 
 const EVENTS_PATH = "/__pi_markdown_preview_events__";
+const SHARE_PATH = "/__pi_markdown_preview_share__";
 const RESOURCE_PREFIX = "/__pi_markdown_preview_resource__/";
 const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
@@ -176,6 +177,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   z-index: 2147483647;
 }
 #pi-markdown-preview-watch-nav a,
+#pi-markdown-preview-watch-nav button,
 #pi-markdown-preview-watch-nav span {
   border-radius: 999px;
   color: inherit;
@@ -183,14 +185,50 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   text-decoration: none;
   white-space: nowrap;
 }
-#pi-markdown-preview-watch-nav a:hover { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
-#pi-markdown-preview-watch-nav a[aria-disabled="true"] { opacity: 0.38; pointer-events: none; }
+#pi-markdown-preview-watch-nav button {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+#pi-markdown-preview-watch-nav a:hover,
+#pi-markdown-preview-watch-nav button:hover { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
+#pi-markdown-preview-watch-nav a[aria-disabled="true"],
+#pi-markdown-preview-watch-nav button:disabled { opacity: 0.38; pointer-events: none; }
 #pi-markdown-preview-watch-latest.pi-markdown-preview-watch-new { color: var(--accent, LinkText); }
 #pi-markdown-preview-watch-count { color: var(--muted, GrayText); font-variant-numeric: tabular-nums; }
+#pi-markdown-preview-watch-share-panel {
+  align-items: center;
+  background: var(--card, Canvas);
+  border: 1px solid var(--panel-border, ButtonBorder);
+  border-radius: 10px;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.24);
+  display: flex;
+  gap: 0.35rem;
+  max-width: calc(100vw - 1.2rem);
+  padding: 0.5rem;
+  position: fixed;
+  right: 0.6rem;
+  top: 3.25rem;
+  width: min(620px, calc(100vw - 1.2rem));
+}
+#pi-markdown-preview-watch-share-panel[hidden] { display: none; }
+#pi-markdown-preview-watch-share-panel input {
+  background: var(--panel-2, Field);
+  border: 1px solid var(--panel-border, ButtonBorder);
+  border-radius: 6px;
+  color: inherit;
+  flex: 1;
+  font: 500 12px/1.3 ui-monospace, monospace;
+  min-width: 8rem;
+  padding: 0.4rem 0.5rem;
+}
 @media (max-width: 640px) {
   #pi-markdown-preview-watch-nav { bottom: 0.5rem; left: 0.5rem; right: auto; top: auto; }
   #pi-markdown-preview-watch-nav a,
+  #pi-markdown-preview-watch-nav button,
   #pi-markdown-preview-watch-nav span { padding-inline: 0.38rem; }
+  #pi-markdown-preview-watch-share-panel { bottom: 3.25rem; left: 0.5rem; right: auto; top: auto; }
 }
 @media print { #pi-markdown-preview-watch-nav { display: none; } }
 </style>`;
@@ -203,6 +241,12 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1} of ${revisions.length}`}</span>
   <a id="pi-markdown-preview-watch-next" data-watch-control="next" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
   <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
+  <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser">Copy link</button>
+  <div id="pi-markdown-preview-watch-share-panel" data-watch-control="share-panel" role="dialog" aria-label="Transferable preview link" hidden>
+    <span>Copy this link:</span>
+    <input data-watch-control="share-input" aria-label="Authenticated preview link" readonly />
+    <button data-watch-control="share-close" type="button">Close</button>
+  </div>
 </nav>`;
 
 	const watchScript = `<script>
@@ -217,7 +261,63 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const countLabel = navigation?.querySelector('[data-watch-control="count"]');
   const nextLink = navigation?.querySelector('[data-watch-control="next"]');
   const latestLink = navigation?.querySelector('[data-watch-control="latest"]');
+  const copyLinkButton = navigation?.querySelector('[data-watch-control="copy-link"]');
+  const sharePanel = navigation?.querySelector('[data-watch-control="share-panel"]');
+  const shareInput = navigation?.querySelector('[data-watch-control="share-input"]');
+  const shareCloseButton = navigation?.querySelector('[data-watch-control="share-close"]');
   const revisionUrl = (value) => '/?revision=' + encodeURIComponent(value);
+  const copyWithFallback = (value) => {
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    return copied;
+  };
+  const showTransferableLink = (value) => {
+    if (!sharePanel || !shareInput) return;
+    shareInput.value = value;
+    sharePanel.hidden = false;
+    shareInput.focus();
+    shareInput.select();
+  };
+  shareCloseButton?.addEventListener('click', () => {
+    if (sharePanel) sharePanel.hidden = true;
+    if (shareInput) shareInput.value = '';
+  });
+  copyLinkButton?.addEventListener('click', async () => {
+    copyLinkButton.disabled = true;
+    try {
+      const response = await fetch(${JSON.stringify(SHARE_PATH)} + '?revision=' + encodeURIComponent(revision));
+      if (!response.ok) throw new Error('Could not create a transferable preview link');
+      const transferableUrl = new URL(await response.text());
+      transferableUrl.hash = window.location.hash;
+      let copied = false;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(transferableUrl.href);
+          copied = true;
+        } catch {}
+      }
+      if (!copied) copied = copyWithFallback(transferableUrl.href);
+      if (copied) copyLinkButton.textContent = 'Copied';
+      else {
+        showTransferableLink(transferableUrl.href);
+        copyLinkButton.textContent = 'Select link';
+      }
+    } catch {
+      copyLinkButton.textContent = 'Copy failed';
+    } finally {
+      window.setTimeout(() => {
+        copyLinkButton.textContent = 'Copy link';
+        copyLinkButton.disabled = false;
+      }, 1400);
+    }
+  });
   const canonicalUrl = revisionUrl(revision) + window.location.hash;
   if (window.location.pathname + window.location.search + window.location.hash !== canonicalUrl) {
     history.replaceState(null, '', canonicalUrl);
@@ -422,6 +522,23 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 
 		if (!hasWatchCookie(req)) {
 			respondText(res, 403, "Invalid or expired preview watch token.");
+			return;
+		}
+
+		if (requestUrl.pathname === SHARE_PATH) {
+			const requestedRevision = Number(requestUrl.searchParams.get("revision"));
+			const selectedRevision = Number.isInteger(requestedRevision)
+				&& documents.some((document) => document.revision === requestedRevision)
+				? requestedRevision
+				: documents[documents.length - 1].revision;
+			const transferableUrl = new URL(`http://127.0.0.1:${port}/`);
+			transferableUrl.searchParams.set("token", token);
+			transferableUrl.searchParams.set("revision", String(selectedRevision));
+			res.writeHead(200, {
+				...NON_HTML_SECURITY_HEADERS,
+				"Content-Type": "text/plain; charset=utf-8",
+			});
+			res.end(method === "HEAD" ? undefined : transferableUrl.href);
 			return;
 		}
 
