@@ -1,6 +1,6 @@
 {
   "name": "pi-markdown-preview",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Rendered markdown + LaTeX preview for pi, with terminal, browser, and PDF output",
   "type": "module",
   "exports": {
