@@ -31,6 +31,7 @@ import {
 	replaceInlineAnnotationMarkers,
 	transformMarkdownOutsideFences,
 } from "./shared/annotation-scanner.js";
+import { createBrowserWatchServer } from "./shared/browser-watch-server.js";
 
 // Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
 // A namespace lookup avoids an ESM load failure and falls back to rendering without targeted deletion.
@@ -876,6 +877,32 @@ interface AssistantMessage {
 	index: number;
 	markdown: string;
 	preview: string;
+	responseKey: string;
+}
+
+interface AssistantResponseSnapshot {
+	markdown: string;
+	responseKey: string;
+}
+
+function extractAssistantMarkdownContent(content: unknown): string | undefined {
+	if (!Array.isArray(content)) return undefined;
+	const textBlocks = content.filter((block): block is { type: "text"; text: string } => {
+		if (!block || typeof block !== "object" || !("type" in block) || block.type !== "text" || !("text" in block)) return false;
+		return typeof block.text === "string" && !!block.text.trim();
+	});
+	return textBlocks.length > 0 ? textBlocks.map((block) => block.text).join("\n\n") : undefined;
+}
+
+function getAssistantResponseKey(message: unknown, fallback: string): string {
+	if (!message || typeof message !== "object") return fallback;
+	if ("responseId" in message && typeof message.responseId === "string" && message.responseId) {
+		return `response:${message.responseId}`;
+	}
+	if ("timestamp" in message && (typeof message.timestamp === "number" || typeof message.timestamp === "string")) {
+		return `response-time:${message.timestamp}`;
+	}
+	return fallback;
 }
 
 function getAssistantMessages(ctx: ExtensionContext): AssistantMessage[] {
@@ -889,22 +916,28 @@ function getAssistantMessages(ctx: ExtensionContext): AssistantMessage[] {
 		const msg = entry.message;
 		if (!("role" in msg) || msg.role !== "assistant") continue;
 
-		const textBlocks = msg.content.filter((c): c is { type: "text"; text: string } => c.type === "text" && !!c.text.trim());
-		if (textBlocks.length === 0) continue;
-
-		const markdown = textBlocks.map((c) => c.text).join("\n\n");
+		const markdown = extractAssistantMarkdownContent(msg.content);
+		if (!markdown) continue;
 		const firstLine = markdown.split("\n").find((l) => l.trim().length > 0) ?? "";
 		const preview = firstLine.replace(/^#+\s*/, "").slice(0, 80);
-		messages.push({ index: messageIndex, markdown, preview });
+		const entryFallback = typeof entry.id === "string" && entry.id ? `session:${entry.id}` : `session-index:${messageIndex}`;
+		const responseKey = getAssistantResponseKey(msg, entryFallback);
+		messages.push({ index: messageIndex, markdown, preview, responseKey });
 		messageIndex++;
 	}
 
 	return messages;
 }
 
-function getLastAssistantMarkdown(ctx: ExtensionContext): string | undefined {
+function getLastAssistantResponse(ctx: ExtensionContext): AssistantResponseSnapshot | undefined {
 	const messages = getAssistantMessages(ctx);
-	return messages.length > 0 ? messages[messages.length - 1]!.markdown : undefined;
+	if (messages.length === 0) return undefined;
+	const latest = messages[messages.length - 1]!;
+	return { markdown: latest.markdown, responseKey: latest.responseKey };
+}
+
+function getLastAssistantMarkdown(ctx: ExtensionContext): string | undefined {
+	return getLastAssistantResponse(ctx)?.markdown;
 }
 
 function resolveUserPath(ctx: ExtensionContext, rawPath: string): string {
@@ -2445,8 +2478,12 @@ export async function openPreview(ctx: ExtensionCommandContext, markdownOverride
 	);
 }
 
-async function openFileInDefaultBrowser(filePath: string): Promise<void> {
-	const target = pathToFileURL(filePath).href;
+function getBrowserOpenTarget(pathOrUrl: string): string {
+	return /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : pathToFileURL(pathOrUrl).href;
+}
+
+async function openFileInDefaultBrowser(pathOrUrl: string): Promise<void> {
+	const target = getBrowserOpenTarget(pathOrUrl);
 	const openCommand =
 		process.platform === "darwin"
 			? { command: "open", args: [target] }
@@ -4133,6 +4170,23 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
 </html>`;
 }
 
+async function renderPreviewHtmlDocument(
+	markdown: string,
+	style: PreviewStyle,
+	resourcePath?: string,
+	isLatex?: boolean,
+	fontSizePx?: number,
+): Promise<{ html: string; normalizedMarkdown: string; fontSizePx: number }> {
+	const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+	const { normalizedMarkdown, pandocMarkdown, annotationPlaceholders } = prepareBrowserPreviewMarkdown(markdown, isLatex);
+	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex);
+	return {
+		html: buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx),
+		normalizedMarkdown,
+		fontSizePx: previewFontSizePx,
+	};
+}
+
 async function renderPreviewHtmlToFile(
 	markdown: string,
 	style: PreviewStyle,
@@ -4141,10 +4195,7 @@ async function renderPreviewHtmlToFile(
 	fontSizePx?: number,
 	outputPath?: string,
 ): Promise<string> {
-	const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
-	const { normalizedMarkdown, pandocMarkdown, annotationPlaceholders } = prepareBrowserPreviewMarkdown(markdown, isLatex);
-	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex);
-	const html = buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx);
+	const rendered = await renderPreviewHtmlDocument(markdown, style, resourcePath, isLatex, fontSizePx);
 	const hash = createHash("sha256")
 		.update(RENDER_VERSION)
 		.update("\u0000")
@@ -4152,16 +4203,16 @@ async function renderPreviewHtmlToFile(
 		.update("\u0000")
 		.update(style.cacheKey)
 		.update("\u0000")
-		.update(`fontSize=${previewFontSizePx}`)
+		.update(`fontSize=${rendered.fontSizePx}`)
 		.update("\u0000")
 		.update(buildRenderCacheKey("html", resourcePath, isLatex))
 		.update("\u0000")
-		.update(normalizedMarkdown)
+		.update(rendered.normalizedMarkdown)
 		.digest("hex");
 	const htmlPath = outputPath ?? join(CACHE_DIR, `${hash}.html`);
 
 	await mkdir(dirname(htmlPath), { recursive: true });
-	await writeFile(htmlPath, html, "utf-8");
+	await writeFile(htmlPath, rendered.html, "utf-8");
 	return htmlPath;
 }
 
@@ -4265,13 +4316,26 @@ function parsePreviewFontSize(raw: string): { value?: number; error?: string } {
 	return { value: normalizePreviewFontSizePx(value) };
 }
 
-function parsePreviewArgs(args: string): { target?: PreviewTarget; pick?: boolean; file?: string; fontSizePx?: number; help?: boolean; error?: string } {
+interface ParsedPreviewArgs {
+	target?: PreviewTarget;
+	pick?: boolean;
+	file?: string;
+	fontSizePx?: number;
+	watch?: boolean;
+	stop?: boolean;
+	help?: boolean;
+	error?: string;
+}
+
+function parsePreviewArgs(args: string): ParsedPreviewArgs {
 	const tokens = tokenizeArgs(args);
 	let target: PreviewTarget = "terminal";
 	let explicitTarget = false;
 	let pick = false;
 	let file: string | undefined;
 	let fontSizePx: number | undefined;
+	let watch = false;
+	let stop = false;
 
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i]!;
@@ -4282,6 +4346,16 @@ function parsePreviewArgs(args: string): { target?: PreviewTarget; pick?: boolea
 
 		if (token === "--pick" || token === "pick" || token === "-p") {
 			pick = true;
+			continue;
+		}
+
+		if (token === "--watch" || token === "-w") {
+			watch = true;
+			continue;
+		}
+
+		if (token === "--stop") {
+			stop = true;
 			continue;
 		}
 
@@ -4317,6 +4391,7 @@ function parsePreviewArgs(args: string): { target?: PreviewTarget; pick?: boolea
 
 		if (
 			token === "--browser" ||
+			token === "-b" ||
 			token === "browser" ||
 			token === "--external" ||
 			token === "external" ||
@@ -4359,29 +4434,243 @@ function parsePreviewArgs(args: string): { target?: PreviewTarget; pick?: boolea
 			continue;
 		}
 
-		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser] [--pdf] [--terminal] [--font-size <px>]` };
+		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w|--stop]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
 	if (file && pick) {
 		return { error: "Cannot use --pick and --file together." };
 	}
+	if (watch && stop) {
+		return { error: "Cannot use --watch and --stop together." };
+	}
+	if ((watch || stop) && target !== "browser") {
+		return { error: `${watch ? "--watch" : "--stop"} is only available for browser previews.` };
+	}
+	if (watch && (file || pick)) {
+		return { error: "Browser watch follows completed assistant responses and cannot be combined with --file or --pick." };
+	}
+	if (stop && (file || pick || fontSizePx !== undefined)) {
+		return { error: "--stop cannot be combined with a file, --pick, or --font-size." };
+	}
 
-	return { target, pick, file, fontSizePx };
+	return { target, pick, file, fontSizePx, watch, stop };
 }
 
 export default function (pi: ExtensionAPI) {
+	type BrowserWatchServer = Awaited<ReturnType<typeof createBrowserWatchServer>>;
+	interface BrowserWatchState {
+		server: BrowserWatchServer;
+		resourcePath: string;
+		fontSizePx: number;
+		lastRenderKey: string;
+		lastResponseKey?: string;
+		pendingRenderKey?: string;
+		renderGeneration: number;
+	}
+
+	let browserWatch: BrowserWatchState | undefined;
+	let browserWatchOperationGeneration = 0;
+	let agentEndFallbackSequence = 0;
+	let agentEndFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+	let hasShownBrowserWatchHint = false;
+
+	const getBrowserWatchRenderKey = (response: AssistantResponseSnapshot, style: PreviewStyle, resourcePath: string, fontSizePx: number): string =>
+		createHash("sha256")
+			.update(RENDER_VERSION)
+			.update("\u0000browser-watch\u0000")
+			.update(response.responseKey)
+			.update("\u0000")
+			.update(style.cacheKey)
+			.update("\u0000")
+			.update(resourcePath)
+			.update("\u0000")
+			.update(String(fontSizePx))
+			.update("\u0000")
+			.update(response.markdown)
+			.digest("hex");
+
+	const stopBrowserWatch = async (): Promise<boolean> => {
+		browserWatchOperationGeneration += 1;
+		const activeWatch = browserWatch;
+		if (!activeWatch) return false;
+		browserWatch = undefined;
+		if (agentEndFallbackTimer) {
+			clearTimeout(agentEndFallbackTimer);
+			agentEndFallbackTimer = undefined;
+		}
+		await activeWatch.server.close();
+		return true;
+	};
+
+	const refreshBrowserWatch = async (ctx: ExtensionContext, force = false, responseOverride?: AssistantResponseSnapshot): Promise<boolean> => {
+		const activeWatch = browserWatch;
+		if (!activeWatch) return false;
+
+		const response = responseOverride ?? getLastAssistantResponse(ctx);
+		if (!response) return false;
+		const style = getPreviewStyle(ctx.ui.theme);
+		const renderKey = getBrowserWatchRenderKey(response, style, activeWatch.resourcePath, activeWatch.fontSizePx);
+		if (!force && (renderKey === activeWatch.lastRenderKey || renderKey === activeWatch.pendingRenderKey)) return false;
+
+		activeWatch.pendingRenderKey = renderKey;
+		const renderGeneration = ++activeWatch.renderGeneration;
+		try {
+			const rendered = await renderPreviewHtmlDocument(response.markdown, style, activeWatch.resourcePath, false, activeWatch.fontSizePx);
+			if (browserWatch !== activeWatch || activeWatch.renderGeneration !== renderGeneration) return false;
+			activeWatch.server.updateDocument(rendered.html, {
+				appendToHistory: response.responseKey !== activeWatch.lastResponseKey,
+			});
+			activeWatch.lastRenderKey = renderKey;
+			activeWatch.lastResponseKey = response.responseKey;
+			return true;
+		} catch (error) {
+			if (browserWatch === activeWatch) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Browser preview watch refresh failed: ${message}`, "warning");
+			}
+			return false;
+		} finally {
+			if (activeWatch.pendingRenderKey === renderKey) activeWatch.pendingRenderKey = undefined;
+		}
+	};
+
+	const startBrowserWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number): Promise<void> => {
+		const operationGeneration = ++browserWatchOperationGeneration;
+		const previewFontSizePx = browserWatch && fontSizePx === undefined
+			? browserWatch.fontSizePx
+			: normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+		if (browserWatch) {
+			const activeWatch = browserWatch;
+			const fontChanged = activeWatch.fontSizePx !== previewFontSizePx;
+			activeWatch.fontSizePx = previewFontSizePx;
+			if (fontChanged) await refreshBrowserWatch(ctx, true);
+			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
+			await openFileInDefaultBrowser(activeWatch.server.url);
+			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
+			hasShownBrowserWatchHint = true;
+			ctx.ui.notify("Browser preview watch is already running; opened it again. Stop with /preview-browser --stop.", "info");
+			return;
+		}
+
+		const resourcePath = ctx.cwd;
+		const style = getPreviewStyle(ctx.ui.theme);
+		const response = getLastAssistantResponse(ctx);
+		let html: string;
+		let renderKey: string;
+		if (response) {
+			const rendered = await renderPreviewHtmlDocument(response.markdown, style, resourcePath, false, previewFontSizePx);
+			html = rendered.html;
+			renderKey = getBrowserWatchRenderKey(response, style, resourcePath, previewFontSizePx);
+		} else {
+			html = buildBrowserHtmlFromPandocFragment(
+				"<p>Waiting for the next completed assistant response…</p>",
+				style,
+				resourcePath,
+				[],
+				previewFontSizePx,
+			);
+			renderKey = getBrowserWatchRenderKey({ markdown: "", responseKey: "waiting" }, style, resourcePath, previewFontSizePx);
+		}
+
+		if (browserWatchOperationGeneration !== operationGeneration) return;
+		const server = await createBrowserWatchServer(html, resourcePath, { initialDocumentIsResponse: !!response });
+		if (browserWatchOperationGeneration !== operationGeneration) {
+			await server.close();
+			return;
+		}
+		const newWatch: BrowserWatchState = {
+			server,
+			resourcePath,
+			fontSizePx: previewFontSizePx,
+			lastRenderKey: renderKey,
+			lastResponseKey: response?.responseKey,
+			renderGeneration: 0,
+		};
+		browserWatch = newWatch;
+		try {
+			await openFileInDefaultBrowser(server.url);
+		} catch (error) {
+			if (browserWatch === newWatch) await stopBrowserWatch();
+			throw error;
+		}
+		if (browserWatch !== newWatch || browserWatchOperationGeneration !== operationGeneration) return;
+		hasShownBrowserWatchHint = true;
+		ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop.", "info");
+	};
+
+	// Standard Pi emits agent_settled after retries and queued continuations.
+	// Compatible hosts without that newer event still emit agent_end, so use a
+	// short idle-check fallback there; agent_settled cancels it in standard Pi.
+	pi.on("agent_end", (event, ctx) => {
+		if (!browserWatch || ("willContinue" in event && event.willContinue === true)) return;
+		if (agentEndFallbackTimer) clearTimeout(agentEndFallbackTimer);
+		let fallbackResponse: AssistantResponseSnapshot | undefined;
+		const fallbackSequence = ++agentEndFallbackSequence;
+		for (let index = event.messages.length - 1; index >= 0; index--) {
+			const message = event.messages[index]!;
+			if (message.role !== "assistant") continue;
+			const markdown = extractAssistantMarkdownContent(message.content);
+			if (!markdown) continue;
+			const responseKey = getAssistantResponseKey(message, `agent-fallback:${fallbackSequence}:${index}`);
+			fallbackResponse = { markdown, responseKey };
+			break;
+		}
+		const refreshWhenCompatibleHostIsIdle = (attempt: number) => {
+			agentEndFallbackTimer = setTimeout(() => {
+				agentEndFallbackTimer = undefined;
+				if (!browserWatch) return;
+				if (typeof ctx.isIdle === "function" && !ctx.isIdle()) {
+					if (attempt < 200) refreshWhenCompatibleHostIsIdle(attempt + 1);
+					return;
+				}
+				void refreshBrowserWatch(ctx, false, fallbackResponse);
+			}, attempt === 0 ? 0 : 50);
+		};
+		refreshWhenCompatibleHostIsIdle(0);
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		if (agentEndFallbackTimer) {
+			clearTimeout(agentEndFallbackTimer);
+			agentEndFallbackTimer = undefined;
+		}
+		void refreshBrowserWatch(ctx);
+	});
+
 	pi.on("session_shutdown", async () => {
-		await closeSharedPreviewBrowser();
+		hasShownBrowserWatchHint = false;
+		await Promise.all([stopBrowserWatch(), closeSharedPreviewBrowser()]);
 	});
 
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w|--stop]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
 			ctx.ui.notify(parsed.error ?? "Invalid preview arguments.", "error");
+			return;
+		}
+
+		if (parsed.stop) {
+			try {
+				const stopped = await stopBrowserWatch();
+				ctx.ui.notify(stopped ? "Stopped browser preview watch." : "Browser preview watch is not running.", "info");
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Failed to stop browser preview watch: ${message}`, "error");
+			}
+			return;
+		}
+
+		if (parsed.watch) {
+			try {
+				await startBrowserWatch(ctx, parsed.fontSizePx);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Browser preview watch failed: ${message}`, "error");
+			}
 			return;
 		}
 
@@ -4425,7 +4714,11 @@ export default function (pi: ExtensionAPI) {
 		if (parsed.target === "browser") {
 			try {
 				await openPreviewInBrowser(ctx, markdown, resourcePath, isLatex, parsed.fontSizePx);
-				ctx.ui.notify("Opened preview in browser.", "info");
+				const watchHint = hasShownBrowserWatchHint
+					? ""
+					: " Tip: /preview-browser --watch keeps a preview updated after each completed response.";
+				hasShownBrowserWatchHint = true;
+				ctx.ui.notify(`Opened preview in browser.${watchHint}`, "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Browser preview failed: ${message}`, "error");
@@ -4539,14 +4832,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("preview", {
-		description: "Rendered markdown preview (--pick select response, --file <path> or bare path, --browser for HTML, --pdf for PDF, --terminal to force inline, --font-size <px>)",
+		description: "Rendered markdown preview (--pick select response, --file <path> or bare path, --browser/-b for HTML, --watch/-w to auto-refresh, --pdf for PDF, --terminal to force inline, --font-size <px>)",
 		handler: run,
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open rendered markdown + LaTeX preview in the default browser (MathML + selective MathJax fallback)",
+		description: "Open browser preview (--watch/-w auto-refreshes after completed responses; --stop stops watching)",
 		handler: async (args, ctx) => {
-			await ctx.waitForIdle();
 			await run(`--browser ${args}`.trim(), ctx);
 		},
 	});
@@ -4554,7 +4846,6 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("preview-pdf", {
 		description: "Export markdown to PDF via pandoc + LaTeX and open it",
 		handler: async (args, ctx) => {
-			await ctx.waitForIdle();
 			// Re-use the main run handler with --pdf prepended
 			await run(`--pdf ${args}`.trim(), ctx);
 		},

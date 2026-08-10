@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
 import { Check } from "typebox/value";
+import {
+	createBrowserWatchServer,
+	getBrowserWatchAbsoluteImagePath,
+	prepareBrowserWatchHtml,
+	resolveBrowserWatchResource,
+	rewriteBrowserWatchAbsoluteImageSources,
+} from "../shared/browser-watch-server.js";
 
 const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
@@ -333,10 +341,15 @@ for (const functionName of [
 	"usesSupportedMermaidIconPack",
 	"buildBlockAwarePageClips",
 	"collectPreviewPageLayout",
+	"extractAssistantMarkdownContent",
+	"getAssistantResponseKey",
 	"findBrowserExecutable",
 	"getBrowserCandidates",
+	"getBrowserOpenTarget",
+	"getLastAssistantResponse",
 	"getPiManagedMermaidCliPath",
 	"getPreviewCacheDir",
+	"parsePreviewArgs",
 	"resolvePiAgentDir",
 ]) {
 	transpiledIndex = exposeTranspiledFunction(transpiledIndex, functionName);
@@ -346,17 +359,22 @@ let extensionFactory;
 let buildBlockAwarePageClips;
 let buildMermaidBrowserModule;
 let collectPreviewPageLayout;
+let extractAssistantMarkdownContent;
+let getAssistantResponseKey;
 let findBrowserExecutable;
 let getBrowserCandidates;
+let getBrowserOpenTarget;
+let getLastAssistantResponse;
 let getPiManagedMermaidCliPath;
 let getPreviewBrowserLaunchOptions;
 let getPreviewCacheDir;
+let parsePreviewArgs;
 let resolvePiAgentDir;
 let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, findBrowserExecutable, getBrowserCandidates, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
@@ -399,6 +417,206 @@ assert.equal(
 	join(customPiAgentDir, "npm", "node_modules", ".bin", mermaidCliExecutable),
 	"Managed Mermaid CLI discovery should stay under a custom Pi agent directory.",
 );
+
+assert.equal(getBrowserOpenTarget("https://127.0.0.1:4321/?token=test"), "https://127.0.0.1:4321/?token=test", "Browser opening should preserve HTTP URLs used by watch mode.");
+const browserOpenFixturePath = join(testHomeDirectory, "preview.html");
+assert.equal(getBrowserOpenTarget(browserOpenFixturePath), pathToFileURL(browserOpenFixturePath).href, "Browser opening should continue converting local paths to file URLs.");
+
+const parsedBrowserWatch = parsePreviewArgs("--browser --watch --font-size 14");
+assert.equal(parsedBrowserWatch.target, "browser");
+assert.equal(parsedBrowserWatch.watch, true);
+assert.equal(parsedBrowserWatch.fontSizePx, 14);
+const parsedShortBrowserWatch = parsePreviewArgs("-b -w");
+assert.equal(parsedShortBrowserWatch.target, "browser", "-b should select the browser target.");
+assert.equal(parsedShortBrowserWatch.watch, true, "-w should enable browser watch mode.");
+assert.equal(parsePreviewArgs("--browser --stop").stop, true, "Browser watch should support an explicit stop operation.");
+assert.equal(parsePreviewArgs("watch").file, "watch", "Bare watch should remain a valid file path rather than becoming a new alias.");
+assert.equal(parsePreviewArgs("w").file, "w", "Bare w should remain a valid file path rather than becoming a short flag.");
+assert.match(parsePreviewArgs("-w").error ?? "", /only available for browser previews/, "Short watch mode should still require the browser target.");
+assert.match(parsePreviewArgs("--browser -w --file report.md").error ?? "", /cannot be combined/, "Short watch mode should reject file inputs.");
+assert.match(parsePreviewArgs("-b -w --stop").error ?? "", /Cannot use --watch and --stop together/, "Short watch and stop operations should be mutually exclusive.");
+assert.equal(
+	extractAssistantMarkdownContent([
+		{ type: "thinking", thinking: "private" },
+		{ type: "text", text: "First block" },
+		{ type: "toolCall", id: "tool-1", name: "read", arguments: {} },
+		{ type: "text", text: "Second block" },
+	]),
+	"First block\n\nSecond block",
+	"Browser watch should retain only visible assistant text when reconciling compatible-host agent_end messages.",
+);
+assert.equal(extractAssistantMarkdownContent([{ type: "thinking", thinking: "private" }]), undefined, "Browser watch should not expose thinking-only content.");
+assert.equal(getAssistantResponseKey({ responseId: "provider-response", timestamp: 10 }, "fallback"), "response:provider-response");
+assert.equal(getAssistantResponseKey({ timestamp: 10 }, "fallback"), "response-time:10", "Session and compatible-host events should derive the same response identity from timestamps.");
+assert.equal(getAssistantResponseKey({}, "fallback"), "fallback");
+assert.equal(getBrowserWatchAbsoluteImagePath("/private/tmp/a%20b.png", "darwin"), "/private/tmp/a b.png");
+assert.equal(getBrowserWatchAbsoluteImagePath("file:///private/tmp/a%20b.png", "linux"), "/private/tmp/a b.png");
+assert.equal(getBrowserWatchAbsoluteImagePath("C:\\Users\\Oliver\\plot.png", "win32"), "C:\\Users\\Oliver\\plot.png");
+assert.equal(getBrowserWatchAbsoluteImagePath("file:///C:/Users/Oliver/My%20Plot.png", "win32"), "C:\\Users\\Oliver\\My Plot.png");
+assert.equal(getBrowserWatchAbsoluteImagePath("https://example.com/plot.png", "darwin"), undefined);
+assert.equal(getBrowserWatchAbsoluteImagePath("//example.com/plot.png", "darwin"), undefined);
+assert.equal(getBrowserWatchAbsoluteImagePath("images/plot.png", "darwin"), undefined);
+assert.equal(getBrowserWatchAbsoluteImagePath("\\\\server\\share\\plot.png", "win32"), undefined, "Watch mode should not turn UNC image references into network filesystem reads.");
+const rewrittenAbsoluteImages = [];
+const rewrittenAbsoluteImageHtml = rewriteBrowserWatchAbsoluteImageSources(
+	'<p><img src="/private/tmp/a%20b.png" /><img src="images/plot.png" /><img src="https://example.com/plot.png" /><img src="/private/tmp/notes.txt" /></p>',
+	(absolutePath, contentType) => {
+		rewrittenAbsoluteImages.push({ absolutePath, contentType });
+		return "/authenticated-image/one";
+	},
+	"darwin",
+);
+assert.deepEqual(rewrittenAbsoluteImages, [{ absolutePath: "/private/tmp/a b.png", contentType: "image/png" }]);
+assert.match(rewrittenAbsoluteImageHtml, /src="\/authenticated-image\/one"/);
+assert.match(rewrittenAbsoluteImageHtml, /src="images\/plot\.png"/);
+assert.match(rewrittenAbsoluteImageHtml, /src="https:\/\/example\.com\/plot\.png"/);
+assert.match(rewrittenAbsoluteImageHtml, /src="\/private\/tmp\/notes\.txt"/, "Unsupported absolute file types should not gain an authenticated route.");
+assert.deepEqual(
+	getLastAssistantResponse({
+		sessionManager: {
+			getBranch: () => [
+				{ type: "message", id: "response-one", message: { role: "assistant", content: [{ type: "text", text: "Repeated response" }] } },
+				{ type: "message", id: "response-two", message: { role: "assistant", content: [{ type: "text", text: "Repeated response" }] } },
+			],
+		},
+	}),
+	{ markdown: "Repeated response", responseKey: "session:response-two" },
+	"Watch history should distinguish separate assistant messages even when their rendered Markdown is identical.",
+);
+
+async function assertBrowserWatchServer() {
+	const parent = await mkdtemp(join(tmpdir(), "pi-markdown-preview-watch-"));
+	const resourceRoot = join(parent, "resources");
+	await mkdir(resourceRoot);
+	await writeFile(join(resourceRoot, "pixel.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+	await writeFile(join(resourceRoot, "notes.txt"), "not a browser preview asset");
+	await writeFile(join(parent, "outside.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+	const absoluteImagePath = join(parent, "outside.png");
+	const initialHtml = `<!doctype html><html><head><base href="file:///tmp/old/" /></head><body><p>Initial response</p><img id="absolute-image" src="${absoluteImagePath}" /><img id="file-url-image" src="${pathToFileURL(absoluteImagePath).href}" /></body></html>`;
+	const preparedHtml = prepareBrowserWatchHtml(initialHtml, { revision: 7, revisions: [5, 7, 9] });
+	assert.doesNotMatch(preparedHtml, /<base\s/i, "Watch HTML should remove the file base so anchors remain in-page and relative resources use the authenticated local server.");
+	assert.match(preparedHtml, /EventSource/, "Watch HTML should subscribe for completion notifications.");
+	assert.match(preparedHtml, /const revision = "7";/, "Watch HTML should identify its rendered revision.");
+	assert.match(preparedHtml, />2 of 3</, "Watch HTML should identify the selected response within bounded history.");
+	assert.match(preparedHtml, /id="pi-markdown-preview-watch-previous"[^>]*href="\/?\?revision=5"/, "Watch HTML should link to the previous rendered response.");
+	assert.match(preparedHtml, /id="pi-markdown-preview-watch-next"[^>]*href="\/?\?revision=9"/, "Watch HTML should link to the next rendered response.");
+	await assert.rejects(
+		createBrowserWatchServer(initialHtml, resourceRoot, { historyLimit: 0 }),
+		/positive integer/,
+		"Browser watch should reject an invalid history bound.",
+	);
+
+	const server = await createBrowserWatchServer(initialHtml, resourceRoot);
+	try {
+		const watchUrl = new URL(server.url);
+		assert.equal(watchUrl.hostname, "127.0.0.1", "Browser watch must bind to loopback only.");
+		assert.ok(watchUrl.searchParams.get("token"), "Browser watch URL should carry an unguessable bootstrap token.");
+
+		const unauthorized = await fetch(watchUrl.origin);
+		assert.equal(unauthorized.status, 403, "Browser watch routes should reject requests without a token or session cookie.");
+
+		const initialResponse = await fetch(server.url);
+		assert.equal(initialResponse.status, 200);
+		const contentSecurityPolicy = initialResponse.headers.get("content-security-policy") ?? "";
+		assert.match(contentSecurityPolicy, /default-src 'none'/, "Browser watch pages should send a restrictive CSP.");
+		assert.match(contentSecurityPolicy, /script-src 'nonce-[^']+' 'strict-dynamic'/, "Browser watch scripts should require a per-response nonce.");
+		assert.doesNotMatch(contentSecurityPolicy, /script-src[^;]*'unsafe-inline'/, "Browser watch pages should block assistant-authored javascript links.");
+		const setCookie = initialResponse.headers.get("set-cookie") ?? "";
+		assert.match(setCookie, /^pi_markdown_preview_watch_\d+=/, "The bootstrap response should establish a port-specific watch cookie.");
+		const cookie = setCookie.split(";", 1)[0];
+		const initialBody = await initialResponse.text();
+		assert.match(initialBody, /Initial response/);
+		assert.match(initialBody, /<script nonce="[^"]+">/, "Trusted preview scripts should carry the CSP nonce.");
+		assert.doesNotMatch(initialBody, new RegExp(watchUrl.searchParams.get("token")), "The watch token should not be embedded in the served HTML.");
+		assert.doesNotMatch(initialBody, new RegExp(absoluteImagePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "Absolute filesystem paths should not be exposed as browser resource URLs.");
+		const absoluteImageRoute = /id="absolute-image" src="([^"]+)"/.exec(initialBody)?.[1];
+		const fileUrlImageRoute = /id="file-url-image" src="([^"]+)"/.exec(initialBody)?.[1];
+		assert.match(absoluteImageRoute ?? "", /^\/__pi_markdown_preview_absolute_image__\/[a-f\d]{64}$/);
+		assert.equal(fileUrlImageRoute, absoluteImageRoute, "Equivalent absolute paths and file URLs should share one authenticated image route.");
+		const unauthorizedAbsoluteImage = await fetch(new URL(absoluteImageRoute, watchUrl.origin));
+		assert.equal(unauthorizedAbsoluteImage.status, 403, "Absolute image routes should require the watch session cookie.");
+		const absoluteImageResponse = await fetch(new URL(absoluteImageRoute, watchUrl.origin), { headers: { cookie } });
+		assert.equal(absoluteImageResponse.status, 200, "An exact absolute image referenced by retained watch HTML should be served.");
+		assert.equal(absoluteImageResponse.headers.get("content-type"), "image/png");
+		assert.deepEqual(new Uint8Array(await absoluteImageResponse.arrayBuffer()), new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+		const unknownAbsoluteImage = await fetch(new URL(`/__pi_markdown_preview_absolute_image__/${"0".repeat(64)}`, watchUrl.origin), { headers: { cookie } });
+		assert.equal(unknownAbsoluteImage.status, 404, "Authenticated clients should not be able to guess arbitrary absolute image paths.");
+
+		const resourceResponse = await fetch(new URL("/pixel.png", watchUrl.origin), { headers: { cookie } });
+		assert.equal(resourceResponse.status, 200, "Authenticated watch pages should load relative local images.");
+		assert.equal(resourceResponse.headers.get("content-type"), "image/png");
+		assert.deepEqual(new Uint8Array(await resourceResponse.arrayBuffer()), new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+
+		const unsupportedResource = await fetch(new URL("/__pi_markdown_preview_resource__/notes.txt", watchUrl.origin), { headers: { cookie } });
+		assert.equal(unsupportedResource.status, 415, "The local resource route should not expose arbitrary files.");
+		assert.equal(await resolveBrowserWatchResource(resourceRoot, "../outside.png"), undefined, "The local resource resolver should reject paths outside the preview working directory.");
+
+		server.updateDocument('<!doctype html><html><head></head><body><p>Updated response</p></body></html>');
+		assert.equal(server.revision, 2);
+		assert.deepEqual(server.revisions, [1, 2]);
+		assert.equal(server.historySize, 2);
+		const eventResponse = await fetch(new URL("/__pi_markdown_preview_events__?revision=1&latest=1", watchUrl.origin), { headers: { cookie } });
+		assert.equal(eventResponse.status, 200);
+		const reader = eventResponse.body.getReader();
+		try {
+			let eventText = "";
+			for (let chunkIndex = 0; chunkIndex < 3 && !eventText.includes("event: reload"); chunkIndex++) {
+				const eventChunk = await reader.read();
+				eventText += Buffer.from(eventChunk.value ?? []).toString("utf8");
+				if (eventChunk.done) break;
+			}
+			assert.match(eventText, /event: reload/, "A stale browser revision should receive one reload event.");
+			assert.match(eventText, /"revision":2,"revisions":\[1,2\]/, "Revision events should include the bounded navigation history.");
+		} finally {
+			await reader.cancel();
+		}
+
+		const historicalResponse = await fetch(new URL("/?revision=1", watchUrl.origin), { headers: { cookie } });
+		const historicalBody = await historicalResponse.text();
+		assert.match(historicalBody, /Initial response/, "Historical revision URLs should retain earlier rendered responses.");
+		assert.match(historicalBody, />1 of 2</, "Historical pages should expose their position in watch history.");
+		const updatedResponse = await fetch(watchUrl.origin, { headers: { cookie } });
+		assert.equal(updatedResponse.status, 200);
+		assert.match(await updatedResponse.text(), /Updated response/, "The root watch URL should serve the latest canonical document.");
+
+		server.updateDocument('<!doctype html><html><head></head><body><p>Restyled response</p></body></html>', { appendToHistory: false });
+		assert.equal(server.revision, 3);
+		assert.deepEqual(server.revisions, [1, 3], "Replacing the current rendering should not create a duplicate response entry.");
+		const replacedRevisionResponse = await fetch(new URL("/?revision=2", watchUrl.origin), { headers: { cookie } });
+		const replacedRevisionBody = await replacedRevisionResponse.text();
+		assert.match(replacedRevisionBody, /Restyled response/, "An obsolete rendering revision should resolve to its nearest retained response.");
+		assert.match(replacedRevisionBody, /const revision = "3";/, "Obsolete URLs should canonicalize to the retained replacement revision.");
+
+		for (let index = 0; index < 20; index++) {
+			server.updateDocument(`<!doctype html><html><head></head><body><p>History response ${index}</p></body></html>`);
+		}
+		assert.equal(server.historySize, 20, "Browser watch should retain at most 20 rendered responses by default.");
+		assert.equal(server.revisions.length, 20);
+		const evictedRevisionResponse = await fetch(new URL("/?revision=1", watchUrl.origin), { headers: { cookie } });
+		const evictedRevisionBody = await evictedRevisionResponse.text();
+		assert.match(evictedRevisionBody, /History response 0/, "Evicted revision URLs should resolve to the oldest retained response.");
+		assert.match(evictedRevisionBody, /const revision = "4";/, "Evicted revision URLs should be canonicalized to the oldest retained revision.");
+		const evictedAbsoluteImage = await fetch(new URL(absoluteImageRoute, watchUrl.origin), { headers: { cookie } });
+		assert.equal(evictedAbsoluteImage.status, 404, "Absolute image access should expire when its last referencing response leaves watch history.");
+
+		const waitingServer = await createBrowserWatchServer(initialHtml, resourceRoot, { initialDocumentIsResponse: false });
+		try {
+			const waitingBody = await (await fetch(waitingServer.url)).text();
+			assert.match(waitingBody, /pi-markdown-preview-watch-count[^>]*[^>]*>Waiting</, "The pre-response waiting page should not present itself as response history.");
+			waitingServer.updateDocument('<!doctype html><html><head></head><body><p>First completed response</p></body></html>');
+			assert.deepEqual(waitingServer.revisions, [2], "The first completed response should replace, rather than follow, the waiting page.");
+			assert.equal(waitingServer.historySize, 1);
+		} finally {
+			await waitingServer.close();
+		}
+	} finally {
+		await server.close();
+		await rm(parent, { recursive: true, force: true });
+	}
+}
+
+await assertBrowserWatchServer();
 
 assert.match(src, /const RENDER_VERSION = "v26";/, "Block-aware pagination should invalidate fixed-slice preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
@@ -528,6 +746,73 @@ async function assertPreviewPageLayoutCollection() {
 }
 
 await assertPreviewPageLayoutCollection();
+
+async function assertBrowserWatchReload() {
+	const resourceRoot = await mkdtemp(join(tmpdir(), "pi-markdown-preview-watch-browser-"));
+	const pixelBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+	const absoluteImagePath = `${resourceRoot}-absolute.png`;
+	await writeFile(join(resourceRoot, "pixel.png"), pixelBytes);
+	await writeFile(absoluteImagePath, pixelBytes);
+	const server = await createBrowserWatchServer(
+		'<!doctype html><html><head></head><body><p>Initial watch document</p><script>window.previewTrustedScriptRan = true;</script></body></html>',
+		resourceRoot,
+	);
+	const { executablePath, args } = getPreviewBrowserLaunchOptions();
+	const browser = await puppeteer.launch({ headless: true, executablePath, args });
+	try {
+		const page = await browser.newPage();
+		await page.goto(server.url, { waitUntil: "domcontentloaded" });
+		await page.waitForFunction(() => window.location.search === "?revision=1");
+		assert.equal(await page.evaluate(() => window.previewTrustedScriptRan), true, "Nonce-bearing preview scripts should run under the watch CSP.");
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "1 of 1");
+
+		server.updateDocument('<!doctype html><html><head></head><body><p>Second watch document</p></body></html>');
+		await page.waitForFunction(() => window.location.search === "?revision=2" && document.body.textContent?.includes("Second watch document"));
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "2 of 2");
+
+		await page.goBack({ waitUntil: "domcontentloaded" });
+		await page.waitForFunction(() => window.location.search === "?revision=1" && document.body.textContent?.includes("Initial watch document"));
+		await page.goForward({ waitUntil: "domcontentloaded" });
+		await page.waitForFunction(() => window.location.search === "?revision=2" && document.body.textContent?.includes("Second watch document"));
+		await page.goBack({ waitUntil: "domcontentloaded" });
+		await page.waitForFunction(() => window.location.search === "?revision=1" && document.body.textContent?.includes("Initial watch document"));
+
+		server.updateDocument('<!doctype html><html><head></head><body><p>Third watch document</p></body></html>');
+		await page.waitForFunction(() => document.getElementById("pi-markdown-preview-watch-latest")?.textContent === "Latest (new)");
+		assert.equal(await page.evaluate(() => window.location.search), "?revision=1", "A historical response should not auto-follow a newly rendered response.");
+		assert.match(await page.$eval("body", (element) => element.textContent ?? ""), /Initial watch document/);
+
+		await page.click("#pi-markdown-preview-watch-next");
+		await page.waitForFunction(() => window.location.search === "?revision=2" && document.body.textContent?.includes("Second watch document"));
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "2 of 3");
+		await page.click("#pi-markdown-preview-watch-latest");
+		await page.waitForFunction(() => window.location.search === "?revision=3" && document.body.textContent?.includes("Third watch document"));
+
+		server.updateDocument(`<!doctype html><html><head></head><body><h1 id="updated">Updated watch document</h1><a id="jump" href="#updated">Jump</a><a id="unsafe" href="javascript:window.previewUnsafeLinkRan = true">Unsafe</a><img id="relative-pixel" src="pixel.png" /><img id="absolute-pixel" src="${absoluteImagePath}" /></body></html>`);
+		await page.waitForFunction(() => window.location.search === "?revision=4" && document.body.textContent?.includes("Updated watch document"));
+		await page.waitForFunction(() => {
+			const images = [...document.querySelectorAll("img")];
+			return images.length === 2 && images.every((image) => image.complete && image.naturalWidth > 0);
+		});
+		assert.match(
+			await page.$eval("#absolute-pixel", (image) => image.getAttribute("src") ?? ""),
+			/^\/__pi_markdown_preview_absolute_image__\/[a-f\d]{64}$/,
+			"Browser watch should rewrite an explicit absolute image to its authenticated route.",
+		);
+		await page.click("#jump");
+		assert.equal(await page.evaluate(() => window.location.hash), "#updated", "Removing the file base should preserve in-page fragment links.");
+		await page.click("#unsafe");
+		await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+		assert.notEqual(await page.evaluate(() => window.previewUnsafeLinkRan), true, "The watch CSP should block javascript links from rendered Markdown.");
+	} finally {
+		await browser.close();
+		await server.close();
+		await rm(resourceRoot, { recursive: true, force: true });
+		await rm(absoluteImagePath, { force: true });
+	}
+}
+
+await assertBrowserWatchReload();
 
 assert.ok(src.includes("const mermaidResult = await browserPage!.evaluate"), "Puppeteer rendering should read structured Mermaid status.");
 assert.ok(src.includes("throwIfMermaidRenderFailed(mermaidResult);"), "Puppeteer rendering should invoke the production Mermaid failure guard.");
@@ -802,21 +1087,23 @@ await assertReadmeMermaidIconRendering("dark");
 await assertReadmeMermaidIconRendering("light");
 function collectExtensionRegistrations() {
 	const commands = [];
+	const commandDefinitions = new Map();
 	const toolDefinitions = [];
 	const events = [];
 	const pi = {
 		on(event) {
 			events.push(event);
 		},
-		registerCommand(name) {
+		registerCommand(name, definition) {
 			commands.push(name);
+			commandDefinitions.set(name, definition);
 		},
 		registerTool(definition) {
 			toolDefinitions.push(definition);
 		},
 	};
 	extensionFactory(pi);
-	return { commands, tools: toolDefinitions.map((definition) => definition.name), toolDefinitions, events };
+	return { commands, commandDefinitions, tools: toolDefinitions.map((definition) => definition.name), toolDefinitions, events };
 }
 
 const exportToolEnvName = "PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL";
@@ -824,6 +1111,8 @@ const previousExportToolEnv = process.env[exportToolEnvName];
 try {
 	delete process.env[exportToolEnvName];
 	const defaultRegistrations = collectExtensionRegistrations();
+	assert.deepEqual(defaultRegistrations.events, ["agent_end", "agent_settled", "session_shutdown"], "Browser watch should prefer agent_settled, retain an agent_end fallback for compatible hosts, and clean up on session shutdown.");
+	assert.match(defaultRegistrations.commandDefinitions.get("preview-browser").description, /--watch\/-w auto-refreshes after completed responses/, "The browser command description should advertise both watch aliases.");
 	assert.deepEqual(
 		defaultRegistrations.tools,
 		["preview_export"],

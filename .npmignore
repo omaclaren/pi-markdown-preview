@@ -4,3 +4,4 @@ node_modules/
 .gitignore
 package-lock.json
 attachments/
+docs/preview-browser-watch-plan.md

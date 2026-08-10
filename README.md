@@ -28,7 +28,7 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 ## Features
 
 - **Terminal preview (default)** — renders markdown as PNG images displayed inline (Kitty, iTerm2, Ghostty, WezTerm). Long responses are split across navigable pages at block boundaries when possible, with a fixed-height fallback for oversized content.
-- **Browser preview** — opens rendered HTML in your default browser as a single continuous scrollable document
+- **Browser preview** — opens rendered HTML in your default browser as a single continuous scrollable document, with optional completion-level auto-refresh and response navigation via `--watch` (`-w`)
 - **PDF export** — exports markdown to PDF via pandoc + LaTeX and opens it in your default PDF viewer
 - **LLM-callable artifact export** — lets pi render the latest response, supplied Markdown/LaTeX, or a local file to PDF, HTML, or PNG files for remote/headless workflows such as Telegram delivery
 - **Mermaid diagrams** — renders ` ```mermaid` code blocks as SVG diagrams in terminal/browser previews, and as high-quality vector diagrams in PDF export when Mermaid CLI is available
@@ -91,17 +91,25 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 | `/preview --pick` | Select from all assistant responses |
 | `/preview <path/to/file>` | Preview a Markdown, LaTeX, diff, or code file |
 | `/preview --file <path/to/file>` | Preview a file (explicit flag) |
-| `/preview --browser` | Open preview in default browser |
+| `/preview --browser` (`-b`) | Open preview in default browser |
 | `/preview --font-size 14` | Preview with a custom terminal/browser font size in px (defaults: terminal 16, browser 15) |
-| `/preview-browser` | Shortcut for browser preview |
+| `/preview-browser` | Shortcut for a one-shot browser preview |
 | `/preview-browser <path/to/file>` | Open a file preview in browser |
+| `/preview-browser --watch` (`-w`) | Keep a browser preview updated after each completed assistant response |
+| `/preview-browser --stop` | Stop the browser preview watcher |
 | `/preview --pdf` | Export to PDF and open |
 | `/preview-pdf` | Shortcut for `--pdf` |
 | `/preview --pdf <path/to/file>` | Export a file to PDF |
 | `/preview-clear-cache` | Clear rendered preview cache |
 | `/preview --pick --browser` | Pick a response, open in browser |
 
-Local images are supported. File previews resolve relative image paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs also work.
+Local images are supported. File previews resolve relative image paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, relative images remain restricted beneath pi’s current working directory, while exact absolute image paths and `file:` URLs referenced by retained responses are rewritten to opaque authenticated routes. Watch mode never exposes a general filesystem route and serves only allowlisted image types.
+
+The short forms are `/preview-browser -w` and `/preview -b -w`.
+
+Browser watch mode is deliberately completion-level rather than token-streaming: it performs one canonical Pandoc render after each settled agent run, and only for a new or changed latest assistant response. It starts a token-protected server bound to `127.0.0.1`, follows assistant responses from the current session, and stops with `/preview-browser --stop` or when the session shuts down. One-shot browser previews remain unchanged and do not start this server.
+
+Watch history begins with the response visible when it starts and retains the latest 20 responses rendered while it is running. Use the browser’s Back/Forward buttons or the **Previous**, **Next**, and **Latest** controls to move between them. Auto-follow continues while the latest response is open; when viewing an older response, the page stays put and marks **Latest (new)** as new responses arrive. Use `/preview --pick --browser` for responses from before the watcher started.
 
 ### LLM-callable artifact export
 
@@ -141,7 +149,8 @@ import {
 Additional accepted argument aliases:
 - Pick: `-p`, `pick`
 - File: `-f`
-- Browser target: `browser`, `--external`, `external`, `--browser-native`, `native`
+- Browser target: `-b`, `browser`, `--external`, `external`, `--browser-native`, `native`
+- Browser watch: `--watch`, `-w` (assistant responses only), `--stop`
 - PDF target: `pdf`
 - Terminal target: `terminal`, `--terminal` (usually unnecessary because terminal is the default)
 - Font size: `--font-size <px>`, `--font-size=<px>`, `--font-size-px <px>`, `--fs <px>` (10–24 px; terminal/browser previews; defaults: terminal 16, browser 15)
