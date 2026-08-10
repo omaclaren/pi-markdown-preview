@@ -1,14 +1,16 @@
 # Auto-refreshing browser preview (`--watch`)
 
-Status: implementation scope revised to completion-level updates.
+Status: implemented as completion-level response and file updates.
 
 ## Implemented scope
 
-The minimal watch mode keeps one browser preview open and refreshes it after a completed agent run. It performs one canonical Pandoc render only when the latest assistant response changed. `/preview-browser` remains a one-shot preview; `/preview-browser --watch` (or `-w`) starts or reopens the watcher, and `/preview-browser --stop` stops it. The main command also accepts `/preview --browser --watch` and its short form `/preview -b -w`. The watcher is session-scoped and shuts down during `session_shutdown`.
+The minimal watch mode keeps one browser preview open and follows either completed assistant responses or one file. Response mode performs one canonical Pandoc render only when the latest assistant response changed. File mode accepts `/preview-browser --watch <path>` (or `-w <path>`), debounces filesystem changes, hashes content, and retains the last good preview through temporary failures. `/preview-browser` remains a one-shot preview, and `/preview-browser --stop` stops the single active watcher without requiring a source argument. The main command also accepts `/preview --browser --watch` and its short form `/preview -b -w`. The watcher is session-scoped and shuts down during `session_shutdown`.
 
-The implementation intentionally does not render token-by-token, track tool activity, maintain a live Markdown state machine, or introduce a second Markdown renderer. A token-protected server binds only to `127.0.0.1`; SSE carries only revision notifications, while the browser fetches complete HTML documents. Relative preview resources are restricted to allowlisted image types beneath pi's current working directory. Exact absolute image paths and `file:` URLs found in retained response HTML are rewritten to opaque authenticated routes; no general absolute-filesystem route is exposed, and each route expires with the last history entry that references it.
+The implementation intentionally does not render token-by-token, track tool activity, maintain a live Markdown state machine, or introduce a second Markdown renderer. A token-protected server binds only to `127.0.0.1`; SSE carries only revision notifications, while the browser fetches complete HTML documents. Relative preview resources are restricted to allowlisted image types beneath the active resource directory (pi's current working directory for responses, or the watched file's directory). Exact absolute image paths and `file:` URLs found in retained preview HTML are rewritten to opaque authenticated routes; no general absolute-filesystem route is exposed, and each route expires with the last history entry that references it.
 
-The server retains a bounded in-memory history of the latest 20 responses rendered while the watcher is active. Revision URLs support browser Back/Forward navigation and a small **Previous / Next / Latest** control. A page auto-follows only while it is on the latest revision; historical pages remain stable and mark **Latest (new)** when another response arrives. The waiting page shown before the first response is not added to history, and `/preview --pick --browser` remains the route to responses from before the watcher started.
+The server retains a bounded in-memory history of the latest 20 completed responses or successfully rendered file versions. Revision URLs support browser Back/Forward navigation and a small **Previous / Next / Latest** control. A page auto-follows only while it is on the latest revision; historical pages remain stable and mark **Latest (new)** when another response or file version arrives. The waiting page shown before the first response is not added to history, and `/preview --pick --browser` remains the route to responses from before a response watcher started.
+
+Only one watcher can run in a pi session. Repeating the same source reopens it; attempting to start a different file or switch between file and response modes reports the active watcher and requires `/preview-browser --stop` first. Multiple named watchers and combined file/response mode remain deferred until there is real demand.
 
 ## Deferred streaming idea
 
@@ -26,7 +28,7 @@ The existing static behaviour should remain unchanged. A likely interface is:
 
 Starting watch mode while Pi is idle should show the latest assistant response, then wait for the next response. If the command can be invoked during a stream, the next cumulative `message_update` should catch the page up. The watcher should remain active until the tab closes, the user stops it, or the Pi session shuts down.
 
-Watch mode is specifically for assistant responses. Initially, combinations such as `--watch --file`, `--watch --pick`, `--watch --pdf`, and `--watch --terminal` should be rejected rather than given ambiguous meanings.
+This deferred streaming proposal is specifically for assistant responses. The implemented completion-level watcher now accepts one file, while combinations with `--pick`, `--pdf`, and `--terminal` remain rejected.
 
 ## Why it fits
 
@@ -262,7 +264,7 @@ When the final tab disconnects, schedule shutdown after a short grace period so 
 
 ### Initial non-goals
 
-- Watching arbitrary files for filesystem changes
+- Watching multiple files or linked assets for filesystem changes
 - Editing Markdown from the watch page
 - Exposing thinking/reasoning content
 - Mirroring every tool call and result in the document

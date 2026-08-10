@@ -46,6 +46,14 @@ assert.match(
 	/const DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX = 15;/,
 	"Browser preview default font size should match Studio's compact markdown rendering.",
 );
+assert.ok(
+	src.includes("watchFile(filePath, { interval: BROWSER_FILE_WATCH_INTERVAL_MS }, listener)")
+		&& src.includes("unwatchFile(activeWatch.source.filePath, activeWatch.source.listener)")
+		&& src.includes("appendToHistory: snapshot.contentHash !== activeWatch.source.lastContentHash")
+		&& src.includes("activeWatch.source.refreshSequence !== refreshSequence")
+		&& src.includes("scheduleBrowserFileWatchRefresh(ctx, activeWatch);"),
+	"Browser file watch should poll one path, clean up its exact listener, retain only genuinely changed versions, and reconcile async races.",
+);
 assert.match(
 	src,
 	/const DEFAULT_TERMINAL_DEVICE_SCALE_FACTOR = 2;/,
@@ -350,6 +358,7 @@ for (const functionName of [
 	"getPiManagedMermaidCliPath",
 	"getPreviewCacheDir",
 	"parsePreviewArgs",
+	"prepareFilePreview",
 	"resolvePiAgentDir",
 ]) {
 	transpiledIndex = exposeTranspiledFunction(transpiledIndex, functionName);
@@ -369,12 +378,13 @@ let getPiManagedMermaidCliPath;
 let getPreviewBrowserLaunchOptions;
 let getPreviewCacheDir;
 let parsePreviewArgs;
+let prepareFilePreview;
 let resolvePiAgentDir;
 let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
@@ -433,8 +443,23 @@ assert.equal(parsePreviewArgs("--browser --stop").stop, true, "Browser watch sho
 assert.equal(parsePreviewArgs("watch").file, "watch", "Bare watch should remain a valid file path rather than becoming a new alias.");
 assert.equal(parsePreviewArgs("w").file, "w", "Bare w should remain a valid file path rather than becoming a short flag.");
 assert.match(parsePreviewArgs("-w").error ?? "", /only available for browser previews/, "Short watch mode should still require the browser target.");
-assert.match(parsePreviewArgs("--browser -w --file report.md").error ?? "", /cannot be combined/, "Short watch mode should reject file inputs.");
+const parsedExplicitFileWatch = parsePreviewArgs("--browser -w --file report.md");
+assert.equal(parsedExplicitFileWatch.watch, true);
+assert.equal(parsedExplicitFileWatch.file, "report.md", "Browser watch should accept an explicit file input.");
+const parsedBareFileWatch = parsePreviewArgs("-b -w report.md");
+assert.equal(parsedBareFileWatch.target, "browser");
+assert.equal(parsedBareFileWatch.watch, true);
+assert.equal(parsedBareFileWatch.file, "report.md", "Browser watch should accept a bare file path.");
+assert.equal(parsePreviewArgs('-b -w "reports/my report.md"').file, "reports/my report.md", "Browser file watch should preserve quoted paths with spaces.");
+assert.match(parsePreviewArgs("-b -w --pick").error ?? "", /cannot be combined with --pick/, "File/response watch should remain incompatible with the response picker.");
+assert.match(parsePreviewArgs("-b --stop report.md").error ?? "", /--stop cannot be combined with a file/, "Stopping the single active watcher should not accept a file target.");
 assert.match(parsePreviewArgs("-b -w --stop").error ?? "", /Cannot use --watch and --stop together/, "Short watch and stop operations should be mutually exclusive.");
+assert.deepEqual(prepareFilePreview("report.md", "# Report"), { markdown: "# Report", isLatex: false });
+assert.deepEqual(prepareFilePreview("report.tex", "\\section{Report}"), { markdown: "\\section{Report}", isLatex: true });
+const preparedCodeFile = prepareFilePreview("example.ts", "const answer = 42;");
+assert.equal(preparedCodeFile.isLatex, false);
+assert.match(preparedCodeFile.markdown, /```typescript/);
+assert.match(preparedCodeFile.markdown, /const answer = 42;/);
 assert.equal(
 	extractAssistantMarkdownContent([
 		{ type: "thinking", thinking: "private" },
@@ -600,7 +625,7 @@ async function assertBrowserWatchServer() {
 		const evictedAbsoluteImage = await fetch(new URL(absoluteImageRoute, watchUrl.origin), { headers: { cookie } });
 		assert.equal(evictedAbsoluteImage.status, 404, "Absolute image access should expire when its last referencing response leaves watch history.");
 
-		const waitingServer = await createBrowserWatchServer(initialHtml, resourceRoot, { initialDocumentIsResponse: false });
+		const waitingServer = await createBrowserWatchServer(initialHtml, resourceRoot, { initialDocumentIsHistory: false });
 		try {
 			const waitingBody = await (await fetch(waitingServer.url)).text();
 			assert.match(waitingBody, /pi-markdown-preview-watch-count[^>]*[^>]*>Waiting</, "The pre-response waiting page should not present itself as response history.");
@@ -1112,7 +1137,7 @@ try {
 	delete process.env[exportToolEnvName];
 	const defaultRegistrations = collectExtensionRegistrations();
 	assert.deepEqual(defaultRegistrations.events, ["agent_end", "agent_settled", "session_shutdown"], "Browser watch should prefer agent_settled, retain an agent_end fallback for compatible hosts, and clean up on session shutdown.");
-	assert.match(defaultRegistrations.commandDefinitions.get("preview-browser").description, /--watch\/-w auto-refreshes after completed responses/, "The browser command description should advertise both watch aliases.");
+	assert.match(defaultRegistrations.commandDefinitions.get("preview-browser").description, /--watch\/-w auto-refreshes completed responses or a file/, "The browser command description should advertise response and file watch modes.");
 	assert.deepEqual(
 		defaultRegistrations.tools,
 		["preview_export"],

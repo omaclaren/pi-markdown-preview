@@ -198,7 +198,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		? watchedHtml.replace(/<\/head>/i, `${watchStyle}\n</head>`)
 		: `${watchStyle}\n${watchedHtml}`;
 
-	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Rendered response history">
+	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Rendered preview history">
   <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
   <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1} of ${revisions.length}`}</span>
   <a id="pi-markdown-preview-watch-next" data-watch-control="next" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
@@ -319,11 +319,11 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
 }
 
 /**
- * Start the local-only server used by completion-level browser watch mode.
+ * Start the local-only server used by response and file browser watch modes.
  *
  * @param {string} initialHtml
  * @param {string} resourceRoot
- * @param {{ historyLimit?: number, initialDocumentIsResponse?: boolean }} [options]
+ * @param {{ historyLimit?: number, initialDocumentIsHistory?: boolean }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const token = randomBytes(24).toString("base64url");
@@ -348,7 +348,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	};
 	let documents = [buildDocument(1, initialHtml)];
 	let revision = 1;
-	let hasResponseDocument = options.initialDocumentIsResponse !== false;
+	let hasHistoryDocument = options.initialDocumentIsHistory !== false;
 	let port = 0;
 	let closed = false;
 	let cookieName = "";
@@ -407,7 +407,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const html = prepareBrowserWatchHtml(selectedDocument.html, {
 				revision: selectedDocument.revision,
 				revisions: documents.map((document) => document.revision),
-				isWaiting: !hasResponseDocument,
+				isWaiting: !hasHistoryDocument,
 			}, scriptNonce);
 			res.writeHead(200, {
 				...getHtmlSecurityHeaders(scriptNonce),
@@ -548,12 +548,12 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			if (closed) return documents[documents.length - 1].revision;
 			revision += 1;
 			const nextDocument = buildDocument(revision, html);
-			if (appendToHistory && hasResponseDocument) {
+			if (appendToHistory && hasHistoryDocument) {
 				documents.push(nextDocument);
 			} else {
 				documents[documents.length - 1] = nextDocument;
 			}
-			if (appendToHistory) hasResponseDocument = true;
+			if (appendToHistory) hasHistoryDocument = true;
 			if (documents.length > historyLimit) documents = documents.slice(-historyLimit);
 			for (const client of eventClients) {
 				if (client.writableEnded || client.destroyed) {
