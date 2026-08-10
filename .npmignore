@@ -6,3 +6,4 @@ package-lock.json
 *.tgz
 attachments/
 docs/preview-browser-watch-plan.md
+docs/preview-browser-multi-watch-plan.md
