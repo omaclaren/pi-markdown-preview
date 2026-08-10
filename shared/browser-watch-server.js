@@ -237,9 +237,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: `${watchStyle}\n${watchedHtml}`;
 
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Rendered preview history">
-  <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
+  <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
   <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1} of ${revisions.length}`}</span>
-  <a id="pi-markdown-preview-watch-next" data-watch-control="next" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
+  <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
   <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
   <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser">Copy link</button>
   <div id="pi-markdown-preview-watch-share-panel" data-watch-control="share-panel" role="dialog" aria-label="Transferable preview link" hidden>
@@ -266,6 +266,12 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const shareInput = navigation?.querySelector('[data-watch-control="share-input"]');
   const shareCloseButton = navigation?.querySelector('[data-watch-control="share-close"]');
   const revisionUrl = (value) => '/?revision=' + encodeURIComponent(value);
+  const latestUrl = () => '/' + window.location.hash;
+  const withCurrentHash = (value) => {
+    const target = new URL(value, window.location.href);
+    target.hash = window.location.hash;
+    return target.href;
+  };
   const copyWithFallback = (value) => {
     const textarea = document.createElement('textarea');
     textarea.value = value;
@@ -356,6 +362,44 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const initialLatestRevision = revisions[revisions.length - 1] || revision;
   const events = new EventSource(${JSON.stringify(`${EVENTS_PATH}?revision=`)} + encodeURIComponent(revision) + '&latest=' + encodeURIComponent(initialLatestRevision));
   let navigating = false;
+  const navigateTo = (value, replace = false) => {
+    if (navigating) return false;
+    navigating = true;
+    events.close();
+    if (replace) window.location.replace(value);
+    else window.location.assign(value);
+    return true;
+  };
+  const navigateToLink = (link) => {
+    const href = link?.getAttribute('href');
+    return href ? navigateTo(withCurrentHash(href)) : false;
+  };
+  previousLink?.addEventListener('click', (event) => {
+    if (!previousLink.getAttribute('href')) return;
+    event.preventDefault();
+    navigateToLink(previousLink);
+  });
+  nextLink?.addEventListener('click', (event) => {
+    if (!nextLink.getAttribute('href')) return;
+    event.preventDefault();
+    navigateToLink(nextLink);
+  });
+  latestLink?.addEventListener('click', (event) => {
+    if (!latestLink.getAttribute('href')) return;
+    event.preventDefault();
+    navigateTo(latestUrl());
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+    let link;
+    if (event.key === 'ArrowLeft') link = previousLink;
+    else if (event.key === 'ArrowRight') link = nextLink;
+    else return;
+    event.preventDefault();
+    navigateToLink(link);
+  });
   events.addEventListener('reload', (event) => {
     let state;
     try { state = JSON.parse(event.data); } catch { return; }
@@ -366,11 +410,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       updateNavigation(nextRevisions, false);
       return;
     }
-    if (followingLatest && !navigating) {
-      navigating = true;
-      events.close();
-      if (nextRevisions.includes(revision)) window.location.assign(revisionUrl(nextLatestRevision));
-      else window.location.replace(revisionUrl(nextLatestRevision));
+    if (followingLatest) {
+      if (!navigating) navigateTo(latestUrl(), !nextRevisions.includes(revision));
       return;
     }
     updateNavigation(nextRevisions, true);

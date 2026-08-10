@@ -115,7 +115,7 @@ Response watch mode is deliberately completion-level rather than token-streaming
 
 One watcher can be active per pi session: either assistant responses or one file. Repeating the same watch command reopens it; starting a different source reports the active watcher and asks you to stop it first. `/preview-browser --stop` is therefore unambiguous and does not accept a file path.
 
-Watch history starts with the initial preview and retains the latest 20 completed responses or successfully rendered file versions. Use the browser’s Back/Forward buttons or the **Previous**, **Next**, and **Latest** controls to move between them. Auto-follow continues while the latest preview is open; when viewing an older one, the page stays put and marks **Latest (new)** as new responses or file versions arrive. Use `/preview --pick --browser` for assistant responses from before a response watcher started.
+Watch history starts with the initial preview and retains the latest 20 completed responses or successfully rendered file versions. Use the browser’s Back/Forward buttons or the **Previous**, **Next**, and **Latest** controls to move between them. **Option/Alt+Left** and **Option/Alt+Right** are shortcuts for Previous and Next when focus is outside an editable field. Auto-follow continues while the latest preview is open; when viewing an older one, the page stays put and marks **Latest (new)** as new responses or file versions arrive. Use `/preview --pick --browser` for assistant responses from before a response watcher started.
 
 ### LLM-callable artifact export
 

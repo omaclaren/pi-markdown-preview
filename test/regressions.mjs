@@ -540,6 +540,11 @@ async function assertBrowserWatchServer() {
 	assert.match(preparedHtml, />2 of 3</, "Watch HTML should identify the selected response within bounded history.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-previous"[^>]*href="\/?\?revision=5"/, "Watch HTML should link to the previous rendered response.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-next"[^>]*href="\/?\?revision=9"/, "Watch HTML should link to the next rendered response.");
+	assert.match(preparedHtml, /aria-keyshortcuts="Alt\+ArrowLeft"/, "Watch HTML should advertise the previous-revision keyboard shortcut.");
+	assert.match(preparedHtml, /aria-keyshortcuts="Alt\+ArrowRight"/, "Watch HTML should advertise the next-revision keyboard shortcut.");
+	assert.match(preparedHtml, /window\.addEventListener\('keydown'/, "Watch HTML should install keyboard revision navigation.");
+	assert.match(preparedHtml, /navigateTo\(latestUrl\(\), !nextRevisions\.includes\(revision\)\)/, "Auto-follow should request whichever revision is latest when navigation reaches the server.");
+	assert.doesNotMatch(preparedHtml, /location\.(?:assign|replace)\(revisionUrl\(nextLatestRevision\)\)/, "Auto-follow should not race by requesting a revision that may already be historical.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-copy-link"/, "Watch HTML should offer an explicit way to copy an authenticated link for another browser.");
 	await assert.rejects(
 		createBrowserWatchServer(initialHtml, resourceRoot, { historyLimit: 0 }),
@@ -841,8 +846,58 @@ async function assertBrowserWatchReload() {
 		await page.click("#pi-markdown-preview-watch-latest");
 		await page.waitForFunction(() => window.location.search === "?revision=3" && document.body.textContent?.includes("Third watch document"));
 
+		await page.keyboard.down("Alt");
+		await page.keyboard.press("ArrowLeft");
+		await page.keyboard.up("Alt");
+		await page.waitForFunction(() => window.location.search === "?revision=2" && document.body.textContent?.includes("Second watch document"));
+		await page.keyboard.down("Alt");
+		await page.keyboard.press("ArrowRight");
+		await page.keyboard.up("Alt");
+		await page.waitForFunction(() => window.location.search === "?revision=3" && document.body.textContent?.includes("Third watch document"));
+		const editableShortcutWasPrevented = await page.evaluate(() => {
+			const input = document.createElement("input");
+			document.body.appendChild(input);
+			input.focus();
+			const event = new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true, cancelable: true });
+			input.dispatchEvent(event);
+			input.remove();
+			return event.defaultPrevented;
+		});
+		assert.equal(editableShortcutWasPrevented, false, "Revision shortcuts should not capture Option/Alt+Arrow inside editable fields.");
+
+		await page.setRequestInterception(true);
+		let captureNextNavigation = true;
+		let resolveAutoNavigation;
+		let rejectAutoNavigation;
+		const autoNavigationRequestPromise = new Promise((resolvePromise, rejectPromise) => {
+			resolveAutoNavigation = resolvePromise;
+			rejectAutoNavigation = rejectPromise;
+		});
+		const navigationTimeout = setTimeout(() => rejectAutoNavigation(new Error("Timed out waiting for auto-follow navigation.")), 5_000);
+		const onRequest = (request) => {
+			if (captureNextNavigation && request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+				captureNextNavigation = false;
+				clearTimeout(navigationTimeout);
+				resolveAutoNavigation(request);
+				return;
+			}
+			void request.continue().catch(() => {});
+		};
+		page.on("request", onRequest);
+		server.updateDocument('<!doctype html><html><head></head><body><p>Intermediate watch document</p></body></html>');
+		const autoNavigationRequest = await autoNavigationRequestPromise;
+		const autoNavigationUrl = new URL(autoNavigationRequest.url());
+		assert.equal(autoNavigationUrl.pathname, "/");
+		assert.equal(autoNavigationUrl.search, "", "Auto-follow should request the latest document rather than a revision that can become stale in flight.");
+		server.updateDocument('<!doctype html><html><head></head><body><p>Newest watch document</p></body></html>');
+		await autoNavigationRequest.continue();
+		await page.waitForFunction(() => window.location.search === "?revision=5" && document.body.textContent?.includes("Newest watch document"));
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "5 of 5");
+		page.off("request", onRequest);
+		await page.setRequestInterception(false);
+
 		server.updateDocument(`<!doctype html><html><head></head><body><h1 id="updated">Updated watch document</h1><a id="jump" href="#updated">Jump</a><a id="unsafe" href="javascript:window.previewUnsafeLinkRan = true">Unsafe</a><img id="relative-pixel" src="pixel.png" /><img id="absolute-pixel" src="${absoluteImagePath}" /></body></html>`);
-		await page.waitForFunction(() => window.location.search === "?revision=4" && document.body.textContent?.includes("Updated watch document"));
+		await page.waitForFunction(() => window.location.search === "?revision=6" && document.body.textContent?.includes("Updated watch document"));
 		await page.waitForFunction(() => {
 			const images = [...document.querySelectorAll("img")];
 			return images.length === 2 && images.every((image) => image.complete && image.naturalWidth > 0);
