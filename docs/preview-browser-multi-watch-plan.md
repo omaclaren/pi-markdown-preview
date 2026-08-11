@@ -77,7 +77,7 @@ const browserWatches = new Map<BrowserWatcherId, BrowserWatchState>();
 
 The registry, provisional starts, monotonic operation counter, per-ID owner records, response fallback timer, and registry epoch must live inside the extension-factory closure. Do not add module-level watcher state that could cross Pi or compatible-host sessions. The existing shared headless renderer lifecycle is unchanged by this feature.
 
-File IDs use a deterministic lexical path key: expand and resolve against `ctx.cwd`, normalize separators and `.`/`..`, and normalize only the Windows drive-letter case. Identity is path-based rather than inode-based; symlink, hard-link, and differently cased aliases are deliberately distinct rather than being guessed equivalent. The exact normalized watch path remains stable while the file is missing, so stop and recovery do not require `realpath()`.
+File IDs use the existing file's canonical `realpath()` plus deterministic path normalization. A session-local alias map retains each normalized requested path, so the same symlink or differently cased alias reuses one watcher and can still be reopened or stopped while temporarily missing. Identity remains path-based rather than inode-based, so distinct hard-link paths are not guessed equivalent. Aliases are removed only after that watcher's lifecycle and any cleanup retry have ended.
 
 The file source owns its exact `watchFile` listener, debounce timer, refresh sequence, last content hash, last error, and stable display/source path. The response source owns its last response key; the session owns the single compatible-host fallback timer. Health reporting derives from these explicit fields and `lastSuccessfulAt`.
 
@@ -96,7 +96,7 @@ Use per-ID operation ownership plus a registry epoch. Allocate operation IDs fro
 - `--stop --all` and `session_shutdown` advance the registry epoch, invalidate all per-ID work, and make in-flight starts close any server they created.
 - Cleanup removes registry/provisional entries only with compare-and-delete semantics: stale work may clean up resources it owns, but must never delete or overwrite a replacement operation.
 - Existing per-watcher render and file-refresh generations continue to reject stale reads, renders, and errors.
-- Cleanup is idempotent and uses `Promise.allSettled()` when stopping several watchers, so one close failure cannot leak the others.
+- Cleanup is idempotent and uses `Promise.allSettled()` when stopping several watchers, so one close failure cannot block the others. Failed cleanup resources remain in a retriable registry entry rather than becoming unreachable.
 
 Track provisional starts in a map keyed by watcher ID. Reserving a new ID is a synchronous registry mutation that counts both active and provisional entries against the eight-watcher limit. A repeated start for an already provisional ID attaches to that operation's promise and records the latest requested font/open action; it never launches a second render or server. A targeted stop tombstones and cancels that provisional operation, while a later start receives a new operation ID. Starts for different sources may proceed independently.
 

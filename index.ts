@@ -16,9 +16,9 @@ import {
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, type Stats, unwatchFile, watchFile } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, extname, join, resolve as resolvePath, win32 as win32Path } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import { Type, type TUnsafe } from "typebox";
@@ -90,6 +90,7 @@ const DEFAULT_TERMINAL_PREVIEW_FONT_SIZE_PX = 16;
 const DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX = 15;
 const BROWSER_FILE_WATCH_INTERVAL_MS = 300;
 const BROWSER_FILE_WATCH_DEBOUNCE_MS = 150;
+const MAX_BROWSER_WATCHES = 8;
 const MIN_PREVIEW_FONT_SIZE_PX = 10;
 const MAX_PREVIEW_FONT_SIZE_PX = 24;
 const DEFAULT_TERMINAL_DEVICE_SCALE_FACTOR = 2;
@@ -954,6 +955,25 @@ function resolveUserPath(ctx: ExtensionContext, rawPath: string): string {
 		: withoutAtPrefix === "~" ? homedir()
 		: withoutAtPrefix;
 	return resolvePath(ctx.cwd, expanded);
+}
+
+function getBrowserFileWatchId(filePath: string, platform: NodeJS.Platform = process.platform): string {
+	let normalizedPath = platform === "win32" ? win32Path.normalize(filePath) : resolvePath(filePath);
+	if (platform === "win32" && /^[A-Z]:/.test(normalizedPath)) {
+		normalizedPath = `${normalizedPath[0]!.toLowerCase()}${normalizedPath.slice(1)}`;
+	}
+	return `file:${normalizedPath}`;
+}
+
+function getBrowserFileWatchSourceLabel(ctx: ExtensionContext, filePath: string): string {
+	const relativeFilePath = relativePath(ctx.cwd, filePath);
+	if (
+		relativeFilePath
+		&& relativeFilePath !== ".."
+		&& !relativeFilePath.startsWith(`..${sep}`)
+		&& !isAbsolute(relativeFilePath)
+	) return relativeFilePath;
+	return basename(filePath);
 }
 
 function prepareFilePreview(filePath: string, fileContent: string): PreparedFilePreview {
@@ -4364,6 +4384,9 @@ interface ParsedPreviewArgs {
 	fontSizePx?: number;
 	watch?: boolean;
 	stop?: boolean;
+	stopAll?: boolean;
+	stopResponses?: boolean;
+	list?: boolean;
 	help?: boolean;
 	error?: string;
 }
@@ -4377,9 +4400,29 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 	let fontSizePx: number | undefined;
 	let watch = false;
 	let stop = false;
+	let stopAll = false;
+	let stopResponses = false;
+	let list = false;
+	let optionsEnded = false;
+
+	const setFile = (value: string): string | undefined => {
+		if (file !== undefined) return "Only one preview file path may be supplied.";
+		file = value;
+		return undefined;
+	};
 
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i]!;
+
+		if (optionsEnded) {
+			const error = setFile(token);
+			if (error) return { error };
+			continue;
+		}
+		if (token === "--") {
+			optionsEnded = true;
+			continue;
+		}
 
 		if (token === "--help" || token === "-h" || token === "help") {
 			return { help: true };
@@ -4400,12 +4443,26 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 			continue;
 		}
 
+		if (token === "--list") {
+			list = true;
+			continue;
+		}
+
+		if (token === "--all") {
+			stopAll = true;
+			continue;
+		}
+
+		if (token === "--responses") {
+			stopResponses = true;
+			continue;
+		}
+
 		if (token === "--file" || token === "-f") {
 			const next = tokens[i + 1];
-			if (!next || next.startsWith("-")) {
-				return { error: "Missing file path after --file." };
-			}
-			file = next;
+			if (next === undefined) return { error: "Missing file path after --file." };
+			const error = setFile(next);
+			if (error) return { error };
 			i++;
 			continue;
 		}
@@ -4469,39 +4526,43 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 			return { error: "Engine selection was removed. Use /preview or /preview --browser." };
 		}
 
-		// Treat bare argument as a file path if no --file flag was used
-		if (!file && !token.startsWith("-")) {
-			file = token;
+		if (!token.startsWith("-")) {
+			const error = setFile(token);
+			if (error) return { error };
 			continue;
 		}
 
-		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--stop]] [--pdf] [--terminal] [--font-size <px>]` };
+		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
-	if (file && pick) {
-		return { error: "Cannot use --pick and --file together." };
+	if (file && pick) return { error: "Cannot use --pick and --file together." };
+	if (watch && stop) return { error: "Cannot use --watch and --stop together." };
+	if (watch && list) return { error: "Cannot use --watch and --list together." };
+	if (stop && list) return { error: "Cannot use --stop and --list together." };
+	if ((watch || stop || list) && target !== "browser") {
+		const operation = watch ? "--watch" : stop ? "--stop" : "--list";
+		return { error: `${operation} is only available for browser previews.` };
 	}
-	if (watch && stop) {
-		return { error: "Cannot use --watch and --stop together." };
+	if (watch && pick) return { error: "Browser watch cannot be combined with --pick." };
+	if (!stop && (stopAll || stopResponses)) return { error: `${stopAll ? "--all" : "--responses"} is only valid with --stop.` };
+	if (stop && (pick || fontSizePx !== undefined)) return { error: "--stop cannot be combined with --pick or --font-size." };
+	if (Number(file !== undefined) + Number(stopAll) + Number(stopResponses) > 1) {
+		return { error: "Choose only one stop target: a file path, --responses, or --all." };
 	}
-	if ((watch || stop) && target !== "browser") {
-		return { error: `${watch ? "--watch" : "--stop"} is only available for browser previews.` };
-	}
-	if (watch && pick) {
-		return { error: "Browser watch cannot be combined with --pick." };
-	}
-	if (stop && (file || pick || fontSizePx !== undefined)) {
-		return { error: "--stop cannot be combined with a file, --pick, or --font-size." };
+	if (list && (file !== undefined || pick || fontSizePx !== undefined || stopAll || stopResponses)) {
+		return { error: "--list cannot be combined with a file, --pick, --font-size, --responses, or --all." };
 	}
 
-	return { target, pick, file, fontSizePx, watch, stop };
+	return { target, pick, file, fontSizePx, watch, stop, stopAll, stopResponses, list };
 }
 
 export default function (pi: ExtensionAPI) {
 	type BrowserWatchServer = Awaited<ReturnType<typeof createBrowserWatchServer>>;
+	type BrowserWatchId = "responses" | `file:${string}`;
 	interface ResponseBrowserWatchSource {
 		kind: "responses";
 		lastResponseKey?: string;
+		queuedResponseOverride?: AssistantResponseSnapshot;
 	}
 	interface FileBrowserWatchSource {
 		kind: "file";
@@ -4513,20 +4574,277 @@ export default function (pi: ExtensionAPI) {
 		debounceTimer?: ReturnType<typeof setTimeout>;
 	}
 	interface BrowserWatchState {
+		id: BrowserWatchId;
+		operationId: number;
 		server: BrowserWatchServer;
 		source: ResponseBrowserWatchSource | FileBrowserWatchSource;
+		sourceLabel: string;
 		resourcePath: string;
 		fontSizePx: number;
 		lastRenderKey: string;
 		pendingRenderKey?: string;
 		renderGeneration: number;
+		renderInFlight?: Promise<boolean>;
+		renderQueued: boolean;
+		forceRenderQueued: boolean;
+		lastSuccessfulAt: number;
+	}
+	interface BrowserWatchOperation {
+		id: BrowserWatchId;
+		operationId: number;
+		registryEpoch: number;
+	}
+	interface ProvisionalBrowserWatch {
+		id: BrowserWatchId;
+		operation: BrowserWatchOperation;
+		filePath?: string;
+		sourceLabel: string;
+		requestedFontSizePx: number;
+		promise: Promise<void>;
+		server?: BrowserWatchServer;
+		fileSource?: FileBrowserWatchSource;
+	}
+	interface BrowserWatchCleanupResource {
+		id: BrowserWatchId;
+		sourceDescription: string;
+		server?: BrowserWatchServer;
+		source?: ResponseBrowserWatchSource | FileBrowserWatchSource;
+		lastError?: string;
 	}
 
-	let browserWatch: BrowserWatchState | undefined;
-	let browserWatchOperationGeneration = 0;
+	const RESPONSE_BROWSER_WATCH_ID: BrowserWatchId = "responses";
+	const browserWatches = new Map<BrowserWatchId, BrowserWatchState>();
+	const provisionalBrowserWatches = new Map<BrowserWatchId, ProvisionalBrowserWatch>();
+	const pendingBrowserWatchCleanups = new Map<BrowserWatchId, BrowserWatchCleanupResource[]>();
+	const browserFileWatchAliases = new Map<BrowserWatchId, BrowserWatchId>();
+	const browserWatchOperationOwners = new Map<BrowserWatchId, number>();
+	let nextBrowserWatchOperationId = 0;
+	let browserWatchRegistryEpoch = 0;
 	let agentEndFallbackSequence = 0;
 	let agentEndFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 	let hasShownBrowserWatchHint = false;
+
+	const getResponseBrowserWatch = (): BrowserWatchState | undefined => {
+		const watch = browserWatches.get(RESPONSE_BROWSER_WATCH_ID);
+		return watch?.source.kind === "responses" ? watch : undefined;
+	};
+
+	const isBrowserWatchActive = (watch: BrowserWatchState): boolean => browserWatches.get(watch.id) === watch;
+
+	const hasBrowserWatchLifecycle = (id: BrowserWatchId): boolean =>
+		browserWatches.has(id) || provisionalBrowserWatches.has(id) || pendingBrowserWatchCleanups.has(id);
+
+	const pruneBrowserFileWatchAliases = (id: BrowserWatchId) => {
+		if (id === RESPONSE_BROWSER_WATCH_ID || hasBrowserWatchLifecycle(id)) return;
+		for (const [alias, target] of browserFileWatchAliases) {
+			if (target === id) browserFileWatchAliases.delete(alias);
+		}
+	};
+
+	const resolveBrowserFileWatchId = async (filePath: string): Promise<BrowserWatchId> => {
+		const lexicalId = getBrowserFileWatchId(filePath) as BrowserWatchId;
+		const aliasedId = browserFileWatchAliases.get(lexicalId);
+		if (aliasedId && hasBrowserWatchLifecycle(aliasedId)) return aliasedId;
+		if (aliasedId) browserFileWatchAliases.delete(lexicalId);
+
+		const canonicalPath = await realpath(filePath);
+		const canonicalId = getBrowserFileWatchId(canonicalPath) as BrowserWatchId;
+		browserFileWatchAliases.set(lexicalId, canonicalId);
+		browserFileWatchAliases.set(canonicalId, canonicalId);
+		return canonicalId;
+	};
+
+	const resolveBrowserFileWatchIdForStop = async (filePath: string): Promise<BrowserWatchId> => {
+		const lexicalId = getBrowserFileWatchId(filePath) as BrowserWatchId;
+		const aliasedId = browserFileWatchAliases.get(lexicalId);
+		if (aliasedId && hasBrowserWatchLifecycle(aliasedId)) return aliasedId;
+		try {
+			return await resolveBrowserFileWatchId(filePath);
+		} catch {
+			return lexicalId;
+		}
+	};
+
+	const claimBrowserWatchOperation = (id: BrowserWatchId): BrowserWatchOperation => {
+		const operation: BrowserWatchOperation = {
+			id,
+			operationId: ++nextBrowserWatchOperationId,
+			registryEpoch: browserWatchRegistryEpoch,
+		};
+		browserWatchOperationOwners.set(id, operation.operationId);
+		return operation;
+	};
+
+	const ownsBrowserWatchOperation = (operation: BrowserWatchOperation): boolean =>
+		operation.registryEpoch === browserWatchRegistryEpoch
+		&& browserWatchOperationOwners.get(operation.id) === operation.operationId;
+
+	const getBrowserWatchIds = (): BrowserWatchId[] => [
+		...new Set([...browserWatches.keys(), ...provisionalBrowserWatches.keys(), ...pendingBrowserWatchCleanups.keys()]),
+	];
+
+	const getBrowserWatchSourceDescription = (id: BrowserWatchId): string => {
+		if (id === RESPONSE_BROWSER_WATCH_ID) return "assistant responses";
+		const watch = browserWatches.get(id);
+		if (watch?.source.kind === "file") return watch.source.filePath;
+		return provisionalBrowserWatches.get(id)?.filePath
+			?? pendingBrowserWatchCleanups.get(id)?.[0]?.sourceDescription
+			?? id.slice("file:".length);
+	};
+
+	const formatBrowserWatchList = (): string => {
+		const ids = getBrowserWatchIds();
+		if (ids.length === 0) return "No browser preview watchers are running.";
+		const lines = [`Browser preview watchers (${ids.length}/${MAX_BROWSER_WATCHES}):`];
+		for (const id of ids) {
+			const watch = browserWatches.get(id);
+			const provisional = provisionalBrowserWatches.get(id);
+			const pendingCleanup = pendingBrowserWatchCleanups.get(id);
+			let status = "starting";
+			if (watch) {
+				status = watch.source.kind === "file" && watch.source.lastError
+					? `retaining last good preview (${watch.source.lastError})`
+					: `healthy, ${watch.server.historySize} ${watch.server.historySize === 1 ? "revision" : "revisions"}`;
+			} else if (pendingCleanup) {
+				status = `cleanup failed (${pendingCleanup[0]?.lastError ?? "retry stop"})`;
+			} else if (!provisional) {
+				status = "stopping";
+			}
+			lines.push(`- ${getBrowserWatchSourceDescription(id)} — ${status}`);
+		}
+		return lines.join("\n");
+	};
+
+	const clearResponseWatchFallback = () => {
+		if (!agentEndFallbackTimer) return;
+		clearTimeout(agentEndFallbackTimer);
+		agentEndFallbackTimer = undefined;
+	};
+
+	const invalidateBrowserWatch = (watch: BrowserWatchState) => {
+		watch.renderGeneration += 1;
+		watch.renderQueued = false;
+		watch.forceRenderQueued = false;
+		watch.pendingRenderKey = undefined;
+		if (watch.source.kind === "file") watch.source.refreshSequence += 1;
+	};
+
+	const cleanupBrowserWatchResources = async (
+		server: BrowserWatchServer | undefined,
+		source: ResponseBrowserWatchSource | FileBrowserWatchSource | undefined,
+	): Promise<void> => {
+		const errors: unknown[] = [];
+		if (source?.kind === "file") {
+			if (source.debounceTimer) {
+				clearTimeout(source.debounceTimer);
+				source.debounceTimer = undefined;
+			}
+			if (source.listener) {
+				try {
+					unwatchFile(source.filePath, source.listener);
+					source.listener = undefined;
+				} catch (error) {
+					errors.push(error);
+				}
+			}
+		}
+		try {
+			await server?.close();
+		} catch (error) {
+			errors.push(error);
+		}
+		if (errors.length > 0) throw new AggregateError(errors, "Browser preview watcher cleanup failed.");
+	};
+
+	const stopBrowserWatchById = async (id: BrowserWatchId): Promise<boolean> => {
+		const tombstone = claimBrowserWatchOperation(id);
+		const activeWatch = browserWatches.get(id);
+		const provisionalWatch = provisionalBrowserWatches.get(id);
+		const existingCleanups = pendingBrowserWatchCleanups.get(id) ?? [];
+		const sourceDescription = getBrowserWatchSourceDescription(id);
+		if (activeWatch && browserWatches.get(id) === activeWatch) browserWatches.delete(id);
+		if (provisionalWatch && provisionalBrowserWatches.get(id) === provisionalWatch) provisionalBrowserWatches.delete(id);
+		pendingBrowserWatchCleanups.delete(id);
+		if (id === RESPONSE_BROWSER_WATCH_ID) clearResponseWatchFallback();
+		if (activeWatch) invalidateBrowserWatch(activeWatch);
+
+		const resources: BrowserWatchCleanupResource[] = [
+			...existingCleanups,
+			...(activeWatch ? [{ id, sourceDescription, server: activeWatch.server, source: activeWatch.source }] : []),
+			...(provisionalWatch ? [{ id, sourceDescription, server: provisionalWatch.server, source: provisionalWatch.fileSource }] : []),
+		];
+		const results = await Promise.allSettled(resources.map((resource) => cleanupBrowserWatchResources(resource.server, resource.source)));
+		const failedResources: BrowserWatchCleanupResource[] = [];
+		const cleanupErrors: unknown[] = [];
+		for (let index = 0; index < results.length; index++) {
+			const result = results[index]!;
+			if (result.status === "fulfilled") continue;
+			const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+			failedResources.push({ ...resources[index]!, lastError: message });
+			cleanupErrors.push(result.reason);
+		}
+		if (failedResources.length > 0) pendingBrowserWatchCleanups.set(id, failedResources);
+		if (browserWatchOperationOwners.get(id) === tombstone.operationId) browserWatchOperationOwners.delete(id);
+		pruneBrowserFileWatchAliases(id);
+		if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, `Failed to clean up browser preview watch for ${sourceDescription}.`);
+		return resources.length > 0;
+	};
+
+	const stopAllBrowserWatches = async (): Promise<number> => {
+		browserWatchRegistryEpoch += 1;
+		const activeWatches = [...browserWatches.values()];
+		const provisionalWatches = [...provisionalBrowserWatches.values()];
+		const existingCleanups = [...pendingBrowserWatchCleanups.values()].flat();
+		const ids = new Set([
+			...activeWatches.map((watch) => watch.id),
+			...provisionalWatches.map((watch) => watch.id),
+			...existingCleanups.map((resource) => resource.id),
+		]);
+		const resources: BrowserWatchCleanupResource[] = [
+			...existingCleanups,
+			...activeWatches.map((watch) => ({
+				id: watch.id,
+				sourceDescription: watch.source.kind === "file" ? watch.source.filePath : "assistant responses",
+				server: watch.server,
+				source: watch.source,
+			})),
+			...provisionalWatches.map((watch) => ({
+				id: watch.id,
+				sourceDescription: watch.filePath ?? "assistant responses",
+				server: watch.server,
+				source: watch.fileSource,
+			})),
+		];
+		browserWatches.clear();
+		provisionalBrowserWatches.clear();
+		pendingBrowserWatchCleanups.clear();
+		browserWatchOperationOwners.clear();
+		clearResponseWatchFallback();
+		for (const watch of activeWatches) invalidateBrowserWatch(watch);
+
+		const results = await Promise.allSettled(resources.map((resource) => cleanupBrowserWatchResources(resource.server, resource.source)));
+		const cleanupErrors: unknown[] = [];
+		for (let index = 0; index < results.length; index++) {
+			const result = results[index]!;
+			if (result.status === "fulfilled") continue;
+			const resource = resources[index]!;
+			const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+			const failures = pendingBrowserWatchCleanups.get(resource.id) ?? [];
+			failures.push({ ...resource, lastError: message });
+			pendingBrowserWatchCleanups.set(resource.id, failures);
+			cleanupErrors.push(result.reason);
+		}
+		for (const id of ids) pruneBrowserFileWatchAliases(id);
+		if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, "Failed to clean up one or more browser preview watchers.");
+		return ids.size;
+	};
+
+	const reserveProvisionalBrowserWatch = (watch: ProvisionalBrowserWatch): void => {
+		if (getBrowserWatchIds().length >= MAX_BROWSER_WATCHES) {
+			throw new Error(`At most ${MAX_BROWSER_WATCHES} browser preview watchers may run in one Pi session.\n${formatBrowserWatchList()}`);
+		}
+		provisionalBrowserWatches.set(watch.id, watch);
+	};
 
 	const getBrowserWatchRenderKey = (
 		contentKey: string,
@@ -4552,53 +4870,72 @@ export default function (pi: ExtensionAPI) {
 			.update(markdown)
 			.digest("hex");
 
-	const stopBrowserWatch = async (): Promise<boolean> => {
-		browserWatchOperationGeneration += 1;
-		const activeWatch = browserWatch;
-		if (!activeWatch) return false;
-		browserWatch = undefined;
-		if (activeWatch.source.kind === "file") {
-			if (activeWatch.source.debounceTimer) clearTimeout(activeWatch.source.debounceTimer);
-			if (activeWatch.source.listener) unwatchFile(activeWatch.source.filePath, activeWatch.source.listener);
-		}
-		if (agentEndFallbackTimer) {
-			clearTimeout(agentEndFallbackTimer);
-			agentEndFallbackTimer = undefined;
-		}
-		await activeWatch.server.close();
-		return true;
-	};
-
-	const refreshBrowserResponseWatch = async (ctx: ExtensionContext, force = false, responseOverride?: AssistantResponseSnapshot): Promise<boolean> => {
-		const activeWatch = browserWatch;
-		if (!activeWatch || activeWatch.source.kind !== "responses") return false;
-
+	const performBrowserResponseWatchRefresh = async (
+		ctx: ExtensionContext,
+		activeWatch: BrowserWatchState,
+		force = false,
+		responseOverride?: AssistantResponseSnapshot,
+	): Promise<boolean> => {
+		if (!isBrowserWatchActive(activeWatch) || activeWatch.source.kind !== "responses") return false;
 		const response = responseOverride ?? getLastAssistantResponse(ctx);
 		if (!response) return false;
 		const style = getPreviewStyle(ctx.ui.theme);
 		const renderKey = getBrowserWatchRenderKey(response.responseKey, response.markdown, style, activeWatch.resourcePath, activeWatch.fontSizePx);
-		if (!force && (renderKey === activeWatch.lastRenderKey || renderKey === activeWatch.pendingRenderKey)) return false;
+		if (!force && renderKey === activeWatch.lastRenderKey) return false;
 
 		activeWatch.pendingRenderKey = renderKey;
 		const renderGeneration = ++activeWatch.renderGeneration;
 		try {
 			const rendered = await renderPreviewHtmlDocument(response.markdown, style, activeWatch.resourcePath, false, activeWatch.fontSizePx);
-			if (browserWatch !== activeWatch || activeWatch.renderGeneration !== renderGeneration) return false;
+			if (!isBrowserWatchActive(activeWatch) || activeWatch.renderGeneration !== renderGeneration || activeWatch.source.kind !== "responses") return false;
 			activeWatch.server.updateDocument(rendered.html, {
 				appendToHistory: response.responseKey !== activeWatch.source.lastResponseKey,
 			});
 			activeWatch.lastRenderKey = renderKey;
 			activeWatch.source.lastResponseKey = response.responseKey;
+			activeWatch.lastSuccessfulAt = Date.now();
 			return true;
 		} catch (error) {
-			if (browserWatch === activeWatch && activeWatch.renderGeneration === renderGeneration) {
+			if (isBrowserWatchActive(activeWatch) && activeWatch.renderGeneration === renderGeneration) {
 				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Browser preview watch refresh failed: ${message}`, "warning");
+				ctx.ui.notify(`Browser response watch refresh failed: ${message}`, "warning");
 			}
 			return false;
 		} finally {
 			if (activeWatch.pendingRenderKey === renderKey) activeWatch.pendingRenderKey = undefined;
 		}
+	};
+
+	const refreshBrowserResponseWatch = (
+		ctx: ExtensionContext,
+		activeWatch: BrowserWatchState,
+		force = false,
+		responseOverride?: AssistantResponseSnapshot,
+	): Promise<boolean> => {
+		if (!isBrowserWatchActive(activeWatch) || activeWatch.source.kind !== "responses") return Promise.resolve(false);
+		const responseSource = activeWatch.source;
+		activeWatch.renderQueued = true;
+		activeWatch.forceRenderQueued ||= force;
+		if (responseOverride !== undefined) responseSource.queuedResponseOverride = responseOverride;
+		if (activeWatch.renderInFlight) return activeWatch.renderInFlight;
+
+		let renderPromise: Promise<boolean>;
+		renderPromise = (async () => {
+			let changed = false;
+			while (isBrowserWatchActive(activeWatch) && activeWatch.renderQueued && activeWatch.source.kind === "responses") {
+				activeWatch.renderQueued = false;
+				const nextForce = activeWatch.forceRenderQueued;
+				activeWatch.forceRenderQueued = false;
+				const nextOverride = responseSource.queuedResponseOverride;
+				responseSource.queuedResponseOverride = undefined;
+				changed = await performBrowserResponseWatchRefresh(ctx, activeWatch, nextForce, nextOverride) || changed;
+			}
+			return changed;
+		})().finally(() => {
+			if (activeWatch.renderInFlight === renderPromise) activeWatch.renderInFlight = undefined;
+		});
+		activeWatch.renderInFlight = renderPromise;
+		return renderPromise;
 	};
 
 	const readBrowserFileWatchSnapshot = async (filePath: string) => {
@@ -4609,16 +4946,19 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const notifyBrowserFileWatchError = (ctx: ExtensionContext, activeWatch: BrowserWatchState, error: unknown) => {
-		if (activeWatch.source.kind !== "file" || browserWatch !== activeWatch) return;
+		if (activeWatch.source.kind !== "file" || !isBrowserWatchActive(activeWatch)) return;
 		const message = error instanceof Error ? error.message : String(error);
 		if (activeWatch.source.lastError === message) return;
 		activeWatch.source.lastError = message;
-		ctx.ui.notify(`Browser file watch refresh failed; keeping the last good preview: ${message}`, "warning");
+		ctx.ui.notify(`Browser file watch refresh failed for ${activeWatch.source.filePath}; keeping the last good preview: ${message}`, "warning");
 	};
 
-	const refreshBrowserFileWatch = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
-		const activeWatch = browserWatch;
-		if (!activeWatch || activeWatch.source.kind !== "file") return false;
+	const performBrowserFileWatchRefresh = async (
+		ctx: ExtensionContext,
+		activeWatch: BrowserWatchState,
+		force = false,
+	): Promise<boolean> => {
+		if (!isBrowserWatchActive(activeWatch) || activeWatch.source.kind !== "file") return false;
 		const refreshSequence = ++activeWatch.source.refreshSequence;
 
 		let snapshot: Awaited<ReturnType<typeof readBrowserFileWatchSnapshot>>;
@@ -4626,16 +4966,14 @@ export default function (pi: ExtensionAPI) {
 			snapshot = await readBrowserFileWatchSnapshot(activeWatch.source.filePath);
 		} catch (error) {
 			if (
-				browserWatch === activeWatch
+				isBrowserWatchActive(activeWatch)
 				&& activeWatch.source.kind === "file"
 				&& activeWatch.source.refreshSequence === refreshSequence
-			) {
-				notifyBrowserFileWatchError(ctx, activeWatch, error);
-			}
+			) notifyBrowserFileWatchError(ctx, activeWatch, error);
 			return false;
 		}
 		if (
-			browserWatch !== activeWatch
+			!isBrowserWatchActive(activeWatch)
 			|| activeWatch.source.kind !== "file"
 			|| activeWatch.source.refreshSequence !== refreshSequence
 		) return false;
@@ -4649,7 +4987,7 @@ export default function (pi: ExtensionAPI) {
 			activeWatch.fontSizePx,
 			snapshot.isLatex,
 		);
-		if (!force && (renderKey === activeWatch.lastRenderKey || renderKey === activeWatch.pendingRenderKey)) {
+		if (!force && renderKey === activeWatch.lastRenderKey) {
 			activeWatch.source.lastError = undefined;
 			return false;
 		}
@@ -4664,20 +5002,20 @@ export default function (pi: ExtensionAPI) {
 				snapshot.isLatex,
 				activeWatch.fontSizePx,
 			);
-			if (browserWatch !== activeWatch || activeWatch.renderGeneration !== renderGeneration || activeWatch.source.kind !== "file") return false;
+			if (!isBrowserWatchActive(activeWatch) || activeWatch.renderGeneration !== renderGeneration || activeWatch.source.kind !== "file") return false;
 			activeWatch.server.updateDocument(rendered.html, {
 				appendToHistory: snapshot.contentHash !== activeWatch.source.lastContentHash,
 			});
 			activeWatch.lastRenderKey = renderKey;
 			activeWatch.source.lastContentHash = snapshot.contentHash;
 			activeWatch.source.lastError = undefined;
-			// A save can land while an earlier async read/render is in flight. A
-			// debounced reconciliation prevents that older snapshot from remaining
-			// visible even if filesystem notifications coalesce or complete out of order.
+			activeWatch.lastSuccessfulAt = Date.now();
+			// Reconcile once more after a successful render. A save can land while
+			// an earlier read/render is in flight, and filesystem events may coalesce.
 			scheduleBrowserFileWatchRefresh(ctx, activeWatch);
 			return true;
 		} catch (error) {
-			if (activeWatch.renderGeneration === renderGeneration) {
+			if (isBrowserWatchActive(activeWatch) && activeWatch.renderGeneration === renderGeneration) {
 				notifyBrowserFileWatchError(ctx, activeWatch, error);
 			}
 			return false;
@@ -4686,166 +5024,307 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
+	const refreshBrowserFileWatch = (
+		ctx: ExtensionContext,
+		activeWatch: BrowserWatchState,
+		force = false,
+	): Promise<boolean> => {
+		if (!isBrowserWatchActive(activeWatch) || activeWatch.source.kind !== "file") return Promise.resolve(false);
+		activeWatch.renderQueued = true;
+		activeWatch.forceRenderQueued ||= force;
+		if (activeWatch.renderInFlight) return activeWatch.renderInFlight;
+
+		let renderPromise: Promise<boolean>;
+		renderPromise = (async () => {
+			let changed = false;
+			while (isBrowserWatchActive(activeWatch) && activeWatch.renderQueued && activeWatch.source.kind === "file") {
+				activeWatch.renderQueued = false;
+				const nextForce = activeWatch.forceRenderQueued;
+				activeWatch.forceRenderQueued = false;
+				changed = await performBrowserFileWatchRefresh(ctx, activeWatch, nextForce) || changed;
+			}
+			return changed;
+		})().finally(() => {
+			if (activeWatch.renderInFlight === renderPromise) activeWatch.renderInFlight = undefined;
+		});
+		activeWatch.renderInFlight = renderPromise;
+		return renderPromise;
+	};
+
 	const scheduleBrowserFileWatchRefresh = (ctx: ExtensionContext, activeWatch: BrowserWatchState) => {
-		if (browserWatch !== activeWatch || activeWatch.source.kind !== "file") return;
+		if (!isBrowserWatchActive(activeWatch) || activeWatch.source.kind !== "file") return;
 		if (activeWatch.source.debounceTimer) clearTimeout(activeWatch.source.debounceTimer);
 		activeWatch.source.debounceTimer = setTimeout(() => {
 			if (activeWatch.source.kind === "file") activeWatch.source.debounceTimer = undefined;
-			void refreshBrowserFileWatch(ctx);
+			void refreshBrowserFileWatch(ctx, activeWatch);
 		}, BROWSER_FILE_WATCH_DEBOUNCE_MS);
 	};
 
 	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number): Promise<void> => {
-		const operationGeneration = ++browserWatchOperationGeneration;
-		const previewFontSizePx = browserWatch && fontSizePx === undefined
-			? browserWatch.fontSizePx
-			: normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
-		if (browserWatch) {
-			const activeWatch = browserWatch;
-			if (activeWatch.source.kind === "file") {
-				throw new Error(`A browser watcher is already active for ${activeWatch.source.filePath}. Stop it with /preview-browser --stop before watching assistant responses.`);
-			}
-			const fontChanged = activeWatch.fontSizePx !== previewFontSizePx;
-			activeWatch.fontSizePx = previewFontSizePx;
-			if (fontChanged) await refreshBrowserResponseWatch(ctx, true);
-			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
-			await openFileInDefaultBrowser(activeWatch.server.url, true);
-			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
+		const id = RESPONSE_BROWSER_WATCH_ID;
+		if (pendingBrowserWatchCleanups.has(id)) {
+			throw new Error("The previous assistant-response watcher did not clean up completely. Retry /preview-browser --stop --responses first.");
+		}
+		const existingWatch = browserWatches.get(id);
+		if (existingWatch) {
+			if (existingWatch.source.kind !== "responses") throw new Error("Invalid response watcher state.");
+			const operation = claimBrowserWatchOperation(id);
+			const previewFontSizePx = fontSizePx === undefined
+				? existingWatch.fontSizePx
+				: normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+			const fontChanged = existingWatch.fontSizePx !== previewFontSizePx;
+			existingWatch.fontSizePx = previewFontSizePx;
+			if (fontChanged) await refreshBrowserResponseWatch(ctx, existingWatch, true);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(existingWatch)) return;
+			await openFileInDefaultBrowser(existingWatch.server.url, true);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(existingWatch)) return;
 			hasShownBrowserWatchHint = true;
-			ctx.ui.notify("Browser preview watch is already running; opened it again. Stop with /preview-browser --stop.", "info");
+			ctx.ui.notify("Browser response watch is already running; opened it again. Stop with /preview-browser --stop --responses.", "info");
 			return;
 		}
 
-		const resourcePath = ctx.cwd;
-		const style = getPreviewStyle(ctx.ui.theme);
-		const response = getLastAssistantResponse(ctx);
-		let html: string;
-		let renderKey: string;
-		if (response) {
-			const rendered = await renderPreviewHtmlDocument(response.markdown, style, resourcePath, false, previewFontSizePx);
-			html = rendered.html;
-			renderKey = getBrowserWatchRenderKey(response.responseKey, response.markdown, style, resourcePath, previewFontSizePx);
-		} else {
-			html = buildBrowserHtmlFromPandocFragment(
-				"<p>Waiting for the next completed assistant response…</p>",
-				style,
-				resourcePath,
-				[],
-				previewFontSizePx,
-			);
-			renderKey = getBrowserWatchRenderKey("waiting", "", style, resourcePath, previewFontSizePx);
-		}
-
-		if (browserWatchOperationGeneration !== operationGeneration) return;
-		const server = await createBrowserWatchServer(html, resourcePath, { initialDocumentIsHistory: !!response });
-		if (browserWatchOperationGeneration !== operationGeneration) {
-			await server.close();
+		const existingProvisional = provisionalBrowserWatches.get(id);
+		if (existingProvisional) {
+			if (fontSizePx !== undefined) {
+				existingProvisional.requestedFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+			}
+			await existingProvisional.promise;
 			return;
 		}
-		const newWatch: BrowserWatchState = {
-			server,
-			source: { kind: "responses", lastResponseKey: response?.responseKey },
-			resourcePath,
-			fontSizePx: previewFontSizePx,
-			lastRenderKey: renderKey,
-			renderGeneration: 0,
+
+		const operation = claimBrowserWatchOperation(id);
+		const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+		const provisional: ProvisionalBrowserWatch = {
+			id,
+			operation,
+			sourceLabel: "Assistant responses",
+			requestedFontSizePx: previewFontSizePx,
+			promise: Promise.resolve(),
 		};
-		browserWatch = newWatch;
 		try {
-			await openFileInDefaultBrowser(server.url, true);
+			reserveProvisionalBrowserWatch(provisional);
 		} catch (error) {
-			if (browserWatch === newWatch) await stopBrowserWatch();
+			if (browserWatchOperationOwners.get(id) === operation.operationId) browserWatchOperationOwners.delete(id);
 			throw error;
 		}
-		if (browserWatch !== newWatch || browserWatchOperationGeneration !== operationGeneration) return;
-		hasShownBrowserWatchHint = true;
-		ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop.", "info");
+
+		let newWatch: BrowserWatchState | undefined;
+		const startPromise = (async () => {
+			const resourcePath = ctx.cwd;
+			const style = getPreviewStyle(ctx.ui.theme);
+			const response = getLastAssistantResponse(ctx);
+			let html: string;
+			let renderKey: string;
+			if (response) {
+				const rendered = await renderPreviewHtmlDocument(response.markdown, style, resourcePath, false, previewFontSizePx);
+				html = rendered.html;
+				renderKey = getBrowserWatchRenderKey(response.responseKey, response.markdown, style, resourcePath, previewFontSizePx);
+			} else {
+				html = buildBrowserHtmlFromPandocFragment(
+					"<p>Waiting for the next completed assistant response…</p>",
+					style,
+					resourcePath,
+					[],
+					previewFontSizePx,
+				);
+				renderKey = getBrowserWatchRenderKey("waiting", "", style, resourcePath, previewFontSizePx);
+			}
+			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) return;
+
+			const server = await createBrowserWatchServer(html, resourcePath, {
+				initialDocumentIsHistory: !!response,
+				sourceLabel: provisional.sourceLabel,
+			});
+			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
+				await server.close();
+				return;
+			}
+			provisional.server = server;
+			newWatch = {
+				id,
+				operationId: operation.operationId,
+				server,
+				source: { kind: "responses", lastResponseKey: response?.responseKey },
+				sourceLabel: provisional.sourceLabel,
+				resourcePath,
+				fontSizePx: provisional.requestedFontSizePx,
+				lastRenderKey: renderKey,
+				renderGeneration: 0,
+				renderQueued: false,
+				forceRenderQueued: false,
+				lastSuccessfulAt: Date.now(),
+			};
+			browserWatches.set(id, newWatch);
+			if (provisionalBrowserWatches.get(id) === provisional) provisionalBrowserWatches.delete(id);
+
+			await refreshBrowserResponseWatch(ctx, newWatch, newWatch.fontSizePx !== previewFontSizePx);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(newWatch)) return;
+			await openFileInDefaultBrowser(server.url, true);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(newWatch)) return;
+			hasShownBrowserWatchHint = true;
+			ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop --responses.", "info");
+		})();
+		provisional.promise = startPromise;
+		try {
+			await startPromise;
+		} catch (error) {
+			const shouldReportError = ownsBrowserWatchOperation(operation)
+				&& (!newWatch || browserWatches.get(id) === newWatch);
+			if (newWatch && browserWatches.get(id) === newWatch) {
+				await stopBrowserWatchById(id);
+			} else {
+				await cleanupBrowserWatchResources(provisional.server, provisional.fileSource);
+			}
+			if (shouldReportError) throw error;
+		} finally {
+			if (provisionalBrowserWatches.get(id) === provisional) provisionalBrowserWatches.delete(id);
+			if (!browserWatches.has(id) && browserWatchOperationOwners.get(id) === operation.operationId) {
+				browserWatchOperationOwners.delete(id);
+			}
+		}
 	};
 
 	const startBrowserFileWatch = async (ctx: ExtensionCommandContext, rawFilePath: string, fontSizePx?: number): Promise<void> => {
-		const operationGeneration = ++browserWatchOperationGeneration;
 		const filePath = resolveUserPath(ctx, rawFilePath);
-		const previewFontSizePx = browserWatch && fontSizePx === undefined
-			? browserWatch.fontSizePx
-			: normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
-		if (browserWatch) {
-			const activeWatch = browserWatch;
-			if (activeWatch.source.kind === "responses") {
-				throw new Error("A browser watcher is already following assistant responses. Stop it with /preview-browser --stop before watching a file.");
-			}
-			const sameFile = process.platform === "win32"
-				? activeWatch.source.filePath.toLowerCase() === filePath.toLowerCase()
-				: activeWatch.source.filePath === filePath;
-			if (!sameFile) {
-				throw new Error(`A browser watcher is already active for ${activeWatch.source.filePath}. Stop it with /preview-browser --stop before watching ${filePath}.`);
-			}
-			const fontChanged = activeWatch.fontSizePx !== previewFontSizePx;
-			activeWatch.fontSizePx = previewFontSizePx;
-			await refreshBrowserFileWatch(ctx, fontChanged);
-			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
-			await openFileInDefaultBrowser(activeWatch.server.url, true);
-			if (browserWatch !== activeWatch || browserWatchOperationGeneration !== operationGeneration) return;
+		const id = await resolveBrowserFileWatchId(filePath);
+		if (pendingBrowserWatchCleanups.has(id)) {
+			throw new Error(`The previous watcher for ${filePath} did not clean up completely. Retry /preview-browser --stop --file ${rawFilePath} first.`);
+		}
+		const existingWatch = browserWatches.get(id);
+		if (existingWatch) {
+			if (existingWatch.source.kind !== "file") throw new Error(`Invalid file watcher state for ${filePath}.`);
+			const operation = claimBrowserWatchOperation(id);
+			const previewFontSizePx = fontSizePx === undefined
+				? existingWatch.fontSizePx
+				: normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+			const fontChanged = existingWatch.fontSizePx !== previewFontSizePx;
+			existingWatch.fontSizePx = previewFontSizePx;
+			await refreshBrowserFileWatch(ctx, existingWatch, fontChanged);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(existingWatch)) return;
+			await openFileInDefaultBrowser(existingWatch.server.url, true);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(existingWatch)) return;
 			hasShownBrowserWatchHint = true;
-			ctx.ui.notify(`Browser file watch is already running for ${filePath}; opened it again. Stop with /preview-browser --stop.`, "info");
+			ctx.ui.notify(`Browser file watch is already running for ${filePath}; opened it again.`, "info");
 			return;
 		}
 
-		const snapshot = await readBrowserFileWatchSnapshot(filePath);
-		const resourcePath = dirname(filePath);
-		const style = getPreviewStyle(ctx.ui.theme);
-		const rendered = await renderPreviewHtmlDocument(snapshot.markdown, style, resourcePath, snapshot.isLatex, previewFontSizePx);
-		const renderKey = getBrowserWatchRenderKey(
-			`file:${snapshot.contentHash}`,
-			snapshot.markdown,
-			style,
-			resourcePath,
-			previewFontSizePx,
-			snapshot.isLatex,
-		);
-		if (browserWatchOperationGeneration !== operationGeneration) return;
-		const server = await createBrowserWatchServer(rendered.html, resourcePath, { initialDocumentIsHistory: true });
-		if (browserWatchOperationGeneration !== operationGeneration) {
-			await server.close();
+		const existingProvisional = provisionalBrowserWatches.get(id);
+		if (existingProvisional) {
+			if (fontSizePx !== undefined) {
+				existingProvisional.requestedFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+			}
+			await existingProvisional.promise;
 			return;
 		}
-		const fileSource: FileBrowserWatchSource = {
-			kind: "file",
+
+		const operation = claimBrowserWatchOperation(id);
+		const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
+		const provisional: ProvisionalBrowserWatch = {
+			id,
+			operation,
 			filePath,
-			lastContentHash: snapshot.contentHash,
-			refreshSequence: 0,
+			sourceLabel: getBrowserFileWatchSourceLabel(ctx, filePath),
+			requestedFontSizePx: previewFontSizePx,
+			promise: Promise.resolve(),
 		};
-		const newWatch: BrowserWatchState = {
-			server,
-			source: fileSource,
-			resourcePath,
-			fontSizePx: previewFontSizePx,
-			lastRenderKey: renderKey,
-			renderGeneration: 0,
-		};
-		const listener = (_current: Stats, _previous: Stats) => {
-			scheduleBrowserFileWatchRefresh(ctx, newWatch);
-		};
-		fileSource.listener = listener;
-		browserWatch = newWatch;
 		try {
-			watchFile(filePath, { interval: BROWSER_FILE_WATCH_INTERVAL_MS }, listener);
-			await refreshBrowserFileWatch(ctx);
-			if (browserWatch !== newWatch || browserWatchOperationGeneration !== operationGeneration) return;
-			await openFileInDefaultBrowser(server.url, true);
+			reserveProvisionalBrowserWatch(provisional);
 		} catch (error) {
-			if (browserWatch === newWatch) await stopBrowserWatch();
+			if (browserWatchOperationOwners.get(id) === operation.operationId) browserWatchOperationOwners.delete(id);
+			pruneBrowserFileWatchAliases(id);
 			throw error;
 		}
-		if (browserWatch !== newWatch || browserWatchOperationGeneration !== operationGeneration) return;
-		hasShownBrowserWatchHint = true;
-		ctx.ui.notify(`Watching file changes in browser: ${filePath}. Stop with /preview-browser --stop.`, "info");
+
+		let newWatch: BrowserWatchState | undefined;
+		const startPromise = (async () => {
+			const snapshot = await readBrowserFileWatchSnapshot(filePath);
+			const resourcePath = dirname(filePath);
+			const style = getPreviewStyle(ctx.ui.theme);
+			const rendered = await renderPreviewHtmlDocument(snapshot.markdown, style, resourcePath, snapshot.isLatex, previewFontSizePx);
+			const renderKey = getBrowserWatchRenderKey(
+				`file:${snapshot.contentHash}`,
+				snapshot.markdown,
+				style,
+				resourcePath,
+				previewFontSizePx,
+				snapshot.isLatex,
+			);
+			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) return;
+
+			const server = await createBrowserWatchServer(rendered.html, resourcePath, {
+				initialDocumentIsHistory: true,
+				sourceLabel: provisional.sourceLabel,
+			});
+			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
+				await server.close();
+				return;
+			}
+			provisional.server = server;
+			const fileSource: FileBrowserWatchSource = {
+				kind: "file",
+				filePath,
+				lastContentHash: snapshot.contentHash,
+				refreshSequence: 0,
+			};
+			provisional.fileSource = fileSource;
+			newWatch = {
+				id,
+				operationId: operation.operationId,
+				server,
+				source: fileSource,
+				sourceLabel: provisional.sourceLabel,
+				resourcePath,
+				fontSizePx: provisional.requestedFontSizePx,
+				lastRenderKey: renderKey,
+				renderGeneration: 0,
+				renderQueued: false,
+				forceRenderQueued: false,
+				lastSuccessfulAt: Date.now(),
+			};
+			const listener = (_current: Stats, _previous: Stats) => scheduleBrowserFileWatchRefresh(ctx, newWatch!);
+			fileSource.listener = listener;
+			watchFile(filePath, { interval: BROWSER_FILE_WATCH_INTERVAL_MS }, listener);
+			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
+				await cleanupBrowserWatchResources(server, fileSource);
+				return;
+			}
+			browserWatches.set(id, newWatch);
+			if (provisionalBrowserWatches.get(id) === provisional) provisionalBrowserWatches.delete(id);
+
+			await refreshBrowserFileWatch(ctx, newWatch, newWatch.fontSizePx !== previewFontSizePx);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(newWatch)) return;
+			await openFileInDefaultBrowser(server.url, true);
+			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(newWatch)) return;
+			hasShownBrowserWatchHint = true;
+			ctx.ui.notify(`Watching file changes in browser: ${filePath}.`, "info");
+		})();
+		provisional.promise = startPromise;
+		try {
+			await startPromise;
+		} catch (error) {
+			const shouldReportError = ownsBrowserWatchOperation(operation)
+				&& (!newWatch || browserWatches.get(id) === newWatch);
+			if (newWatch && browserWatches.get(id) === newWatch) {
+				await stopBrowserWatchById(id);
+			} else {
+				await cleanupBrowserWatchResources(provisional.server, provisional.fileSource);
+			}
+			if (shouldReportError) throw error;
+		} finally {
+			if (provisionalBrowserWatches.get(id) === provisional) provisionalBrowserWatches.delete(id);
+			if (!browserWatches.has(id) && browserWatchOperationOwners.get(id) === operation.operationId) {
+				browserWatchOperationOwners.delete(id);
+			}
+			pruneBrowserFileWatchAliases(id);
+		}
 	};
 
 	// Standard Pi emits agent_settled after retries and queued continuations.
 	// Compatible hosts without that newer event still emit agent_end, so use a
 	// short idle-check fallback there; agent_settled cancels it in standard Pi.
 	pi.on("agent_end", (event, ctx) => {
-		if (browserWatch?.source.kind !== "responses" || ("willContinue" in event && event.willContinue === true)) return;
+		const responseWatch = getResponseBrowserWatch();
+		if (!responseWatch || ("willContinue" in event && event.willContinue === true)) return;
 		if (agentEndFallbackTimer) clearTimeout(agentEndFallbackTimer);
 		let fallbackResponse: AssistantResponseSnapshot | undefined;
 		const fallbackSequence = ++agentEndFallbackSequence;
@@ -4861,35 +5340,33 @@ export default function (pi: ExtensionAPI) {
 		const refreshWhenCompatibleHostIsIdle = (attempt: number) => {
 			agentEndFallbackTimer = setTimeout(() => {
 				agentEndFallbackTimer = undefined;
-				if (browserWatch?.source.kind !== "responses") return;
+				if (getResponseBrowserWatch() !== responseWatch) return;
 				if (typeof ctx.isIdle === "function" && !ctx.isIdle()) {
 					if (attempt < 200) refreshWhenCompatibleHostIsIdle(attempt + 1);
 					return;
 				}
-				void refreshBrowserResponseWatch(ctx, false, fallbackResponse);
+				void refreshBrowserResponseWatch(ctx, responseWatch, false, fallbackResponse);
 			}, attempt === 0 ? 0 : 50);
 		};
 		refreshWhenCompatibleHostIsIdle(0);
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (browserWatch?.source.kind !== "responses") return;
-		if (agentEndFallbackTimer) {
-			clearTimeout(agentEndFallbackTimer);
-			agentEndFallbackTimer = undefined;
-		}
-		void refreshBrowserResponseWatch(ctx);
+		const responseWatch = getResponseBrowserWatch();
+		if (!responseWatch) return;
+		clearResponseWatchFallback();
+		void refreshBrowserResponseWatch(ctx, responseWatch);
 	});
 
 	pi.on("session_shutdown", async () => {
 		hasShownBrowserWatchHint = false;
-		await Promise.all([stopBrowserWatch(), closeSharedPreviewBrowser()]);
+		await Promise.all([stopAllBrowserWatches(), closeSharedPreviewBrowser()]);
 	});
 
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--stop]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
@@ -4897,10 +5374,46 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (parsed.list) {
+			ctx.ui.notify(formatBrowserWatchList(), "info");
+			return;
+		}
+
 		if (parsed.stop) {
 			try {
-				const stopped = await stopBrowserWatch();
-				ctx.ui.notify(stopped ? "Stopped browser preview watch." : "Browser preview watch is not running.", "info");
+				if (parsed.stopAll) {
+					const stoppedCount = await stopAllBrowserWatches();
+					ctx.ui.notify(stoppedCount > 0
+						? `Stopped ${stoppedCount} browser preview ${stoppedCount === 1 ? "watcher" : "watchers"}.`
+						: "Browser preview watch is not running.", "info");
+					return;
+				}
+
+				let id: BrowserWatchId | undefined;
+				let description: string | undefined;
+				if (parsed.stopResponses) {
+					id = RESPONSE_BROWSER_WATCH_ID;
+					description = "assistant responses";
+				} else if (parsed.file) {
+					const filePath = resolveUserPath(ctx, parsed.file);
+					id = await resolveBrowserFileWatchIdForStop(filePath);
+					description = filePath;
+				} else {
+					const ids = getBrowserWatchIds();
+					if (ids.length > 1) {
+						ctx.ui.notify(`${formatBrowserWatchList()}\nChoose a file path, --responses, or --all.`, "error");
+						return;
+					}
+					id = ids[0];
+					description = id ? getBrowserWatchSourceDescription(id) : undefined;
+				}
+
+				const stopped = id ? await stopBrowserWatchById(id) : false;
+				ctx.ui.notify(stopped
+					? `Stopped browser preview watch for ${description}.`
+					: description
+						? `No browser preview watcher is running for ${description}.`
+						: "Browser preview watch is not running.", "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Failed to stop browser preview watch: ${message}`, "error");
@@ -5074,12 +5587,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("preview", {
-		description: "Rendered markdown preview (--pick select response, --file <path> or bare path, --browser/-b for HTML, --watch/-w to auto-refresh responses or a file, --pdf for PDF, --terminal to force inline, --font-size <px>)",
+		description: "Rendered markdown preview (--pick select response, --file <path> or bare path, --browser/-b for HTML, --watch/-w to auto-refresh responses or files, --list/--stop manage watchers, --pdf for PDF, --terminal to force inline, --font-size <px>)",
 		handler: run,
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open browser preview (--watch/-w auto-refreshes completed responses or a file; --stop stops watching)",
+		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them)",
 		handler: async (args, ctx) => {
 			await run(`--browser ${args}`.trim(), ctx);
 		},

@@ -95,8 +95,12 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 | `/preview-browser` | Shortcut for a one-shot browser preview |
 | `/preview-browser <path/to/file>` | Open a file preview in browser |
 | `/preview-browser --watch` (`-w`) | Keep a browser preview updated after each completed assistant response |
-| `/preview-browser --watch <path>` | Keep a browser preview updated as a file changes |
-| `/preview-browser --stop` | Stop the active browser preview watcher |
+| `/preview-browser --watch <path>` | Start or reopen a browser watcher for a file |
+| `/preview-browser --list` | List active and starting browser preview watchers |
+| `/preview-browser --stop <path>` | Stop one file watcher |
+| `/preview-browser --stop --responses` | Stop the assistant-response watcher |
+| `/preview-browser --stop --all` | Stop every browser preview watcher in this Pi session |
+| `/preview-browser --stop` | Stop the watcher when zero or one is running; otherwise request a target |
 | `/preview --pdf` | Export to PDF and open |
 | `/preview-pdf` | Shortcut for `--pdf` |
 | `/preview --pdf <path/to/file>` | Export a file to PDF |
@@ -105,15 +109,15 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 
 Local images are supported. File previews resolve relative image paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, relative images remain restricted beneath the preview resource directory, while exact absolute image paths and `file:` URLs referenced by retained previews are rewritten to opaque authenticated routes. Watch mode never exposes a general filesystem route and serves only allowlisted image types.
 
-The short response-watch forms are `/preview-browser -w` and `/preview -b -w`. Use `/preview-browser -w ./report.md` or `/preview -b -w --file ./report.md` to watch a file.
+The short response-watch forms are `/preview-browser -w` and `/preview -b -w`. Use `/preview-browser -w ./report.md` or `/preview -b -w --file ./report.md` to watch a file. Quoted paths are supported; `--file` also makes reserved or dash-prefixed filenames explicit.
 
 When pi is running inside cmux, browser previews automatically open as a focused cmux browser split in the caller’s workspace. If cmux is unavailable or declines the request, the normal system-browser opener is used instead.
 
 The watch server removes its bootstrap token from the address bar after setting a browser-specific session cookie. Consequently, copying the cleaned address-bar URL into another browser is intentionally rejected. Use the watch toolbar’s **Copy link** control to request a fresh authenticated URL; it copies directly when browser permissions allow and otherwise selects the URL for manual copying.
 
-Response watch mode is deliberately completion-level rather than token-streaming: it performs one canonical Pandoc render after each settled agent run, and only for a new or changed latest assistant response. File watch mode debounces source-file changes, hashes the file contents, and renders only genuine changes; temporary read/render failures leave the last good preview visible. Linked asset changes alone do not trigger a render. Both modes use a token-protected server bound to `127.0.0.1` and stop with `/preview-browser --stop` or when the session shuts down. One-shot browser previews remain unchanged and do not start this server.
+Response watch mode is deliberately completion-level rather than token-streaming: it performs one canonical Pandoc render after each settled agent run, and only for a new or changed latest assistant response. File watch mode debounces source-file changes, hashes the file contents, and renders only genuine changes; temporary read/render failures leave the last good preview visible. Linked asset changes alone do not trigger a render. Both modes use token-protected servers bound to `127.0.0.1` and stop through the browser-watch lifecycle commands or when the session shuts down. One-shot browser previews remain unchanged and do not start this server.
 
-One watcher can be active per pi session: either assistant responses or one file. Repeating the same watch command reopens it; starting a different source reports the active watcher and asks you to stop it first. `/preview-browser --stop` is therefore unambiguous and does not accept a file path.
+Up to eight browser preview watchers can run per Pi session: multiple canonical file paths plus at most one assistant-response watcher. Each has an independent loopback server, authentication token, history, resource root, render state, and cleanup lifecycle. Repeating the same source reopens its existing watcher rather than duplicating it, and file and response watchers may coexist. Use `--list` to inspect them, a path or `--responses` to stop one, and `--all` to stop every watcher. Bare `--stop` retains the convenient old behaviour when zero or one watcher exists but makes no change when several are running.
 
 Watch history starts with the initial preview and retains the latest 20 completed responses or successfully rendered file versions. Use the browser’s Back/Forward buttons or the **Previous**, **Next**, and **Latest** controls to move between them. **Option/Alt+Left** and **Option/Alt+Right** are shortcuts for Previous and Next when focus is outside an editable field. Auto-follow continues while the latest preview is open; when viewing an older one, the page stays put and marks **Latest (new)** as new responses or file versions arrive. Use `/preview --pick --browser` for assistant responses from before a response watcher started.
 

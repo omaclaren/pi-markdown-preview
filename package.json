@@ -12,6 +12,7 @@
   "scripts": {
     "check:readme-commands": "node ./scripts/check-readme-commands.mjs",
     "check:regressions": "node ./test/regressions.mjs",
+    "check:multi-watch": "node ./test/multi-watch-rpc.mjs",
     "typecheck": "tsc --noEmit"
   },
   "license": "MIT",

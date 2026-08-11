@@ -12,6 +12,19 @@ const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const DEFAULT_HISTORY_LIMIT = 20;
 
+function escapeBrowserWatchHtmlText(value) {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
+function escapeBrowserWatchHtmlAttribute(value) {
+	return escapeBrowserWatchHtmlText(value)
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
 const RESOURCE_CONTENT_TYPES = new Map([
 	[".avif", "image/avif"],
 	[".bmp", "image/bmp"],
@@ -138,7 +151,7 @@ function getHtmlSecurityHeaders(scriptNonce) {
  * preview document.
  *
  * @param {string} html
- * @param {{ revision: number, revisions: number[], isWaiting?: boolean }} navigation
+ * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string }} navigation
  * @param {string} [scriptNonce]
  */
 export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
@@ -150,6 +163,13 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const revision = String(navigation.revision);
 	const revisions = navigation.revisions.map(String);
 	const isWaiting = navigation.isWaiting === true;
+	const sourceLabel = navigation.sourceLabel?.trim();
+	if (sourceLabel) {
+		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — Markdown Preview`);
+		watchedHtml = /<title\b[^>]*>[\s\S]*?<\/title>/i.test(watchedHtml)
+			? watchedHtml.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, `<title>${escapedTitle}</title>`)
+			: watchedHtml.replace(/<\/head>/i, `<title>${escapedTitle}</title>\n</head>`);
+	}
 	const currentIndex = Math.max(0, revisions.indexOf(revision));
 	const previousRevision = revisions[currentIndex - 1];
 	const nextRevision = revisions[currentIndex + 1];
@@ -197,6 +217,12 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 #pi-markdown-preview-watch-nav button:disabled { opacity: 0.38; pointer-events: none; }
 #pi-markdown-preview-watch-latest.pi-markdown-preview-watch-new { color: var(--accent, LinkText); }
 #pi-markdown-preview-watch-count { color: var(--muted, GrayText); font-variant-numeric: tabular-nums; }
+#pi-markdown-preview-watch-source {
+  color: var(--muted, GrayText);
+  max-width: min(32vw, 24rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 #pi-markdown-preview-watch-share-panel {
   align-items: center;
   background: var(--card, Canvas);
@@ -236,7 +262,11 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		? watchedHtml.replace(/<\/head>/i, `${watchStyle}\n</head>`)
 		: `${watchStyle}\n${watchedHtml}`;
 
+	const sourceControl = sourceLabel
+		? `<span id="pi-markdown-preview-watch-source" data-watch-control="source" title="${escapeBrowserWatchHtmlAttribute(sourceLabel)}">${escapeBrowserWatchHtmlText(sourceLabel)}</span>`
+		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Rendered preview history">
+  ${sourceControl}
   <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
   <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1} of ${revisions.length}`}</span>
   <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
@@ -464,7 +494,7 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  *
  * @param {string} initialHtml
  * @param {string} resourceRoot
- * @param {{ historyLimit?: number, initialDocumentIsHistory?: boolean }} [options]
+ * @param {{ historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const token = randomBytes(24).toString("base64url");
@@ -549,6 +579,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				revision: selectedDocument.revision,
 				revisions: documents.map((document) => document.revision),
 				isWaiting: !hasHistoryDocument,
+				sourceLabel: options.sourceLabel,
 			}, scriptNonce);
 			res.writeHead(200, {
 				...getHtmlSecurityHeaders(scriptNonce),

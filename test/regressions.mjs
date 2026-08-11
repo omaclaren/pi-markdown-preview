@@ -48,11 +48,17 @@ assert.match(
 );
 assert.ok(
 	src.includes("watchFile(filePath, { interval: BROWSER_FILE_WATCH_INTERVAL_MS }, listener)")
-		&& src.includes("unwatchFile(activeWatch.source.filePath, activeWatch.source.listener)")
+		&& src.includes("unwatchFile(source.filePath, source.listener)")
 		&& src.includes("appendToHistory: snapshot.contentHash !== activeWatch.source.lastContentHash")
 		&& src.includes("activeWatch.source.refreshSequence !== refreshSequence")
-		&& src.includes("scheduleBrowserFileWatchRefresh(ctx, activeWatch);"),
-	"Browser file watch should poll one path, clean up its exact listener, retain only genuinely changed versions, and reconcile async races.",
+		&& src.includes("scheduleBrowserFileWatchRefresh(ctx, activeWatch);")
+		&& src.includes("const browserWatches = new Map<BrowserWatchId, BrowserWatchState>();")
+		&& src.includes("const pendingBrowserWatchCleanups = new Map<BrowserWatchId, BrowserWatchCleanupResource[]>();")
+		&& src.includes("const canonicalPath = await realpath(filePath);")
+		&& src.includes("const MAX_BROWSER_WATCHES = 8;")
+		&& src.includes("if (activeWatch.renderInFlight) return activeWatch.renderInFlight;")
+		&& src.includes("if (responseOverride !== undefined) responseSource.queuedResponseOverride = responseOverride;"),
+	"Browser file watch should isolate canonical paths, retain failed cleanup ownership, coalesce rendering, and preserve explicit response fallbacks.",
 );
 assert.match(
 	src,
@@ -354,6 +360,7 @@ for (const functionName of [
 	"findBrowserExecutable",
 	"getBrowserCandidates",
 	"getBrowserOpenTarget",
+	"getBrowserFileWatchId",
 	"getCmuxBrowserOpenCommand",
 	"getLastAssistantResponse",
 	"getPiManagedMermaidCliPath",
@@ -374,6 +381,7 @@ let getAssistantResponseKey;
 let findBrowserExecutable;
 let getBrowserCandidates;
 let getBrowserOpenTarget;
+let getBrowserFileWatchId;
 let getCmuxBrowserOpenCommand;
 let getLastAssistantResponse;
 let getPiManagedMermaidCliPath;
@@ -386,7 +394,7 @@ let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getBrowserFileWatchId, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
@@ -453,7 +461,7 @@ assert.equal(parsedBrowserWatch.fontSizePx, 14);
 const parsedShortBrowserWatch = parsePreviewArgs("-b -w");
 assert.equal(parsedShortBrowserWatch.target, "browser", "-b should select the browser target.");
 assert.equal(parsedShortBrowserWatch.watch, true, "-w should enable browser watch mode.");
-assert.equal(parsePreviewArgs("--browser --stop").stop, true, "Browser watch should support an explicit stop operation.");
+assert.equal(parsePreviewArgs("--browser --stop").stop, true, "Browser watch should support an unambiguous bare stop operation.");
 assert.equal(parsePreviewArgs("watch").file, "watch", "Bare watch should remain a valid file path rather than becoming a new alias.");
 assert.equal(parsePreviewArgs("w").file, "w", "Bare w should remain a valid file path rather than becoming a short flag.");
 assert.match(parsePreviewArgs("-w").error ?? "", /only available for browser previews/, "Short watch mode should still require the browser target.");
@@ -465,9 +473,21 @@ assert.equal(parsedBareFileWatch.target, "browser");
 assert.equal(parsedBareFileWatch.watch, true);
 assert.equal(parsedBareFileWatch.file, "report.md", "Browser watch should accept a bare file path.");
 assert.equal(parsePreviewArgs('-b -w "reports/my report.md"').file, "reports/my report.md", "Browser file watch should preserve quoted paths with spaces.");
+assert.equal(parsePreviewArgs("-b -w --file --all").file, "--all", "--file should consume reserved or dash-prefixed filenames literally.");
+assert.equal(parsePreviewArgs("-b -w -- --responses").file, "--responses", "The option delimiter should preserve reserved filenames.");
 assert.match(parsePreviewArgs("-b -w --pick").error ?? "", /cannot be combined with --pick/, "File/response watch should remain incompatible with the response picker.");
-assert.match(parsePreviewArgs("-b --stop report.md").error ?? "", /--stop cannot be combined with a file/, "Stopping the single active watcher should not accept a file target.");
+const parsedFileStop = parsePreviewArgs('-b --stop "reports/my report.md"');
+assert.equal(parsedFileStop.stop, true);
+assert.equal(parsedFileStop.file, "reports/my report.md", "Targeted stop should accept a quoted file path.");
+assert.equal(parsePreviewArgs("-b --stop --responses").stopResponses, true, "Targeted stop should identify the response watcher.");
+assert.equal(parsePreviewArgs("-b --stop --all").stopAll, true, "Stop-all should be explicit.");
+assert.equal(parsePreviewArgs("-b --list").list, true, "Browser watch should expose a list operation.");
+assert.match(parsePreviewArgs("-b --stop --all report.md").error ?? "", /Choose only one stop target/, "Stop operations should reject multiple targets.");
+assert.match(parsePreviewArgs("-b --list report.md").error ?? "", /--list cannot be combined/, "List should reject a file target.");
+assert.match(parsePreviewArgs("-b --responses").error ?? "", /only valid with --stop/, "Response selection should only be meaningful for stop.");
 assert.match(parsePreviewArgs("-b -w --stop").error ?? "", /Cannot use --watch and --stop together/, "Short watch and stop operations should be mutually exclusive.");
+assert.equal(getBrowserFileWatchId("C:\\Users\\Oliver\\Report.md", "win32"), "file:c:\\Users\\Oliver\\Report.md", "Windows watcher IDs should normalize only drive-letter case.");
+assert.notEqual(getBrowserFileWatchId("C:\\Work\\Report.md", "win32"), getBrowserFileWatchId("C:\\Work\\report.md", "win32"), "Path identity should not conflate differently cased aliases on case-sensitive Windows directories.");
 assert.deepEqual(prepareFilePreview("report.md", "# Report"), { markdown: "# Report", isLatex: false });
 assert.deepEqual(prepareFilePreview("report.tex", "\\section{Report}"), { markdown: "\\section{Report}", isLatex: true });
 const preparedCodeFile = prepareFilePreview("example.ts", "const answer = 42;");
@@ -533,7 +553,11 @@ async function assertBrowserWatchServer() {
 
 	const absoluteImagePath = join(parent, "outside.png");
 	const initialHtml = `<!doctype html><html><head><base href="file:///tmp/old/" /></head><body><p>Initial response</p><img id="absolute-image" src="${absoluteImagePath}" /><img id="file-url-image" src="${pathToFileURL(absoluteImagePath).href}" /></body></html>`;
-	const preparedHtml = prepareBrowserWatchHtml(initialHtml, { revision: 7, revisions: [5, 7, 9] });
+	const preparedHtml = prepareBrowserWatchHtml(initialHtml, {
+		revision: 7,
+		revisions: [5, 7, 9],
+		sourceLabel: 'docs/<unsafe>&".md',
+	});
 	assert.doesNotMatch(preparedHtml, /<base\s/i, "Watch HTML should remove the file base so anchors remain in-page and relative resources use the authenticated local server.");
 	assert.match(preparedHtml, /EventSource/, "Watch HTML should subscribe for completion notifications.");
 	assert.match(preparedHtml, /const revision = "7";/, "Watch HTML should identify its rendered revision.");
@@ -546,6 +570,9 @@ async function assertBrowserWatchServer() {
 	assert.match(preparedHtml, /navigateTo\(latestUrl\(\), !nextRevisions\.includes\(revision\)\)/, "Auto-follow should request whichever revision is latest when navigation reaches the server.");
 	assert.doesNotMatch(preparedHtml, /location\.(?:assign|replace)\(revisionUrl\(nextLatestRevision\)\)/, "Auto-follow should not race by requesting a revision that may already be historical.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-copy-link"/, "Watch HTML should offer an explicit way to copy an authenticated link for another browser.");
+	assert.match(preparedHtml, /<title>docs\/&lt;unsafe&gt;&amp;"\.md — Markdown Preview<\/title>/, "Watch pages should use a source-specific escaped title.");
+	assert.match(preparedHtml, /data-watch-control="source" title="docs\/&lt;unsafe&gt;&amp;&quot;\.md"/, "Watch source labels should use attribute-safe escaping.");
+	assert.doesNotMatch(preparedHtml, /<unsafe>/, "Watch source labels must not inject HTML.");
 	await assert.rejects(
 		createBrowserWatchServer(initialHtml, resourceRoot, { historyLimit: 0 }),
 		/positive integer/,
@@ -574,6 +601,18 @@ async function assertBrowserWatchServer() {
 		const cookie = setCookie.split(";", 1)[0];
 		const initialBody = await initialResponse.text();
 		assert.match(initialBody, /Initial response/);
+		const isolatedServer = await createBrowserWatchServer(initialHtml, resourceRoot, { sourceLabel: "Second watcher" });
+		try {
+			const isolatedBootstrap = await fetch(isolatedServer.url);
+			const isolatedCookie = (isolatedBootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+			assert.ok(isolatedCookie);
+			assert.notEqual(isolatedCookie.split("=", 1)[0], cookie.split("=", 1)[0], "Concurrent watcher cookies should use port-specific names.");
+			assert.equal((await fetch(watchUrl.origin, { headers: { cookie: isolatedCookie } })).status, 403, "One watcher's cookie must not authorize another server.");
+			assert.equal((await fetch(new URL(isolatedServer.url).origin, { headers: { cookie } })).status, 403, "Watcher authorization must remain isolated in both directions.");
+			await isolatedBootstrap.body?.cancel();
+		} finally {
+			await isolatedServer.close();
+		}
 		assert.match(initialBody, /<script nonce="[^"]+">/, "Trusted preview scripts should carry the CSP nonce.");
 		assert.doesNotMatch(initialBody, new RegExp(watchUrl.searchParams.get("token")), "The watch token should not be embedded in the served HTML.");
 		assert.match(initialBody, /id="pi-markdown-preview-watch-copy-link"/, "Authenticated watch pages should expose the transferable-link control.");
@@ -1220,7 +1259,7 @@ try {
 	delete process.env[exportToolEnvName];
 	const defaultRegistrations = collectExtensionRegistrations();
 	assert.deepEqual(defaultRegistrations.events, ["agent_end", "agent_settled", "session_shutdown"], "Browser watch should prefer agent_settled, retain an agent_end fallback for compatible hosts, and clean up on session shutdown.");
-	assert.match(defaultRegistrations.commandDefinitions.get("preview-browser").description, /--watch\/-w auto-refreshes completed responses or a file/, "The browser command description should advertise response and file watch modes.");
+	assert.match(defaultRegistrations.commandDefinitions.get("preview-browser").description, /--watch\/-w starts or reopens response\/file watchers; --list and --stop manage them/, "The browser command description should advertise multi-watch lifecycle operations.");
 	assert.deepEqual(
 		defaultRegistrations.tools,
 		["preview_export"],
