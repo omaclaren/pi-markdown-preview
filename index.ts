@@ -20,7 +20,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
-import puppeteer from "puppeteer-core";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { Type, type TUnsafe } from "typebox";
 import {
 	hasMarkdownAnnotationMarkers,
@@ -1759,8 +1759,8 @@ function findBrowserExecutable(
 	return getBrowserCandidates(platform, env).find((candidate) => pathExists(candidate));
 }
 
-let sharedPreviewBrowser: puppeteer.Browser | undefined;
-let sharedPreviewBrowserLaunchPromise: Promise<puppeteer.Browser> | undefined;
+let sharedPreviewBrowser: Browser | undefined;
+let sharedPreviewBrowserLaunchPromise: Promise<Browser> | undefined;
 let sharedPreviewBrowserLaunchToken = 0;
 
 export function getPreviewBrowserLaunchOptions(): { executablePath: string; args: string[] } {
@@ -1776,12 +1776,12 @@ export function getPreviewBrowserLaunchOptions(): { executablePath: string; args
 	return { executablePath, args };
 }
 
-async function launchPreviewBrowser(): Promise<puppeteer.Browser> {
+async function launchPreviewBrowser(): Promise<Browser> {
 	return puppeteer.launch({ headless: true, ...getPreviewBrowserLaunchOptions() });
 }
 
-async function getSharedPreviewBrowser(): Promise<puppeteer.Browser> {
-	if (sharedPreviewBrowser?.isConnected()) return sharedPreviewBrowser;
+async function getSharedPreviewBrowser(): Promise<Browser> {
+	if (sharedPreviewBrowser?.connected) return sharedPreviewBrowser;
 	sharedPreviewBrowser = undefined;
 
 	if (sharedPreviewBrowserLaunchPromise) return sharedPreviewBrowserLaunchPromise;
@@ -1875,7 +1875,7 @@ async function writeCachedPage(markdownPage: string, styleKey: string, page: Cac
 	await writeFile(metaPath, JSON.stringify(meta), "utf-8");
 }
 
-async function waitForPageRenderReady(page: puppeteer.Page): Promise<void> {
+async function waitForPageRenderReady(page: Page): Promise<void> {
 	await page.evaluate(async () => {
 		if ("fonts" in document) {
 			await (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready;
@@ -1945,7 +1945,7 @@ function buildBlockAwarePageClips(
 	return clips;
 }
 
-async function collectPreviewPageLayout(page: puppeteer.Page): Promise<PreviewPageLayout> {
+async function collectPreviewPageLayout(page: Page): Promise<PreviewPageLayout> {
 	return page.evaluate((pageHeight) => {
 		const root = document.getElementById("preview-root");
 		if (!root) return { breakCandidates: [], protectedRanges: [] };
@@ -2056,7 +2056,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex);
 	const html = buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx);
 
-	let browserPage: puppeteer.Page | undefined;
+	let browserPage: Page | undefined;
 	let tempHtmlPath: string | undefined;
 
 	try {

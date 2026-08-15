@@ -35,7 +35,7 @@
     "typebox": "*"
   },
   "dependencies": {
-    "puppeteer-core": "^24.22.3"
+    "puppeteer-core": "^25.7.0"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.81.1",
