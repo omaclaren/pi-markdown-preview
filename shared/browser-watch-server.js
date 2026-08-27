@@ -72,7 +72,7 @@ export function getBrowserWatchAbsoluteImagePath(source, platform = process.plat
 				return filePath.includes("\0") ? undefined : filePath;
 			}
 			let windowsPath = decodeURIComponent(fileUrl.pathname).replace(/^\/([a-zA-Z]:[\\/])/, "$1").replace(/\//g, "\\");
-			if (windowsPath.includes("\0") || windowsPath.startsWith("\\\\") || !win32Path.isAbsolute(windowsPath)) return undefined;
+			if (windowsPath.includes("\0") || windowsPath.startsWith("\\\\") || !/^[a-zA-Z]:[\\/]/.test(windowsPath)) return undefined;
 			return win32Path.normalize(windowsPath);
 		} catch {
 			return undefined;
@@ -92,7 +92,7 @@ export function getBrowserWatchAbsoluteImagePath(source, platform = process.plat
 	if (pathSource.includes("\0")) return undefined;
 	if (platform === "win32") {
 		pathSource = pathSource.replace(/^\/([a-zA-Z]:[\\/])/, "$1").replace(/\//g, "\\");
-		if (pathSource.startsWith("\\\\") || !win32Path.isAbsolute(pathSource)) return undefined;
+		if (pathSource.startsWith("\\\\") || !/^[a-zA-Z]:[\\/]/.test(pathSource)) return undefined;
 		return win32Path.normalize(pathSource);
 	}
 	return posixPath.isAbsolute(pathSource) ? posixPath.normalize(pathSource) : undefined;
@@ -113,6 +113,67 @@ export function rewriteBrowserWatchAbsoluteImageSources(html, routeForImage, pla
 		const contentType = RESOURCE_CONTENT_TYPES.get(extname(absolutePath).toLowerCase());
 		if (!contentType) return match;
 		return `${prefix}${quote}${routeForImage(absolutePath, contentType)}${quote}`;
+	});
+}
+
+/**
+ * Resolve an explicitly referenced local media source against the preview's
+ * resource directory. Unlike the general resource route, this may resolve a
+ * parent-relative path because only its opaque HMAC route is exposed.
+ *
+ * @param {string} source
+ * @param {string} resourceRoot
+ * @param {NodeJS.Platform} [platform]
+ */
+export function getBrowserWatchLocalMediaPath(source, resourceRoot, platform = process.platform) {
+	const absolutePath = getBrowserWatchAbsoluteImagePath(source, platform);
+	if (absolutePath) return absolutePath;
+
+	const decodedSource = decodeHtmlImageSource(source.trim());
+	if (!decodedSource || decodedSource.includes("\0") || decodedSource.startsWith("//") || decodedSource.startsWith("\\\\")) return undefined;
+	if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(decodedSource)) return undefined;
+
+	let pathSource = decodedSource.split(/[?#]/, 1)[0];
+	try {
+		pathSource = decodeURIComponent(pathSource);
+	} catch {
+		return undefined;
+	}
+	if (!pathSource || pathSource.includes("\0") || pathSource.startsWith("//") || pathSource.startsWith("\\\\")) return undefined;
+	if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(pathSource) && !/^[a-zA-Z]:[\\/]/.test(pathSource)) return undefined;
+
+	const pathApi = platform === "win32" ? win32Path : posixPath;
+	if (!pathApi.isAbsolute(resourceRoot)) return undefined;
+	if (platform === "win32") {
+		pathSource = pathSource.replace(/\//g, "\\");
+		if (pathSource.startsWith("\\\\")) return undefined;
+	}
+	return pathApi.normalize(pathApi.resolve(resourceRoot, pathSource));
+}
+
+/**
+ * Rewrite exact local image and Pandoc PDF-embed references to opaque,
+ * authenticated routes. Network/data sources and unsupported media types are
+ * left unchanged.
+ *
+ * @param {string} html
+ * @param {string} resourceRoot
+ * @param {(absolutePath: string, contentType: string) => string} routeForMedia
+ * @param {NodeJS.Platform} [platform]
+ */
+export function rewriteBrowserWatchLocalMediaSources(html, resourceRoot, routeForMedia, platform = process.platform) {
+	return html.replace(/(<(img|embed)\b[^>]*?\s+src\s*=\s*)(["'])([^"']*)\3/gi, (match, prefix, tagName, quote, source) => {
+		const absolutePath = getBrowserWatchLocalMediaPath(source, resourceRoot, platform);
+		if (!absolutePath) return match;
+		const extension = extname(absolutePath).toLowerCase();
+		const contentType = String(tagName).toLowerCase() === "embed"
+			? (extension === ".pdf" ? "application/pdf" : undefined)
+			: RESOURCE_CONTENT_TYPES.get(extension);
+		if (!contentType) return match;
+		const decodedSource = decodeHtmlImageSource(String(source));
+		const suffixIndex = decodedSource.search(/[?#]/);
+		const suffix = suffixIndex < 0 ? "" : escapeBrowserWatchHtmlAttribute(decodedSource.slice(suffixIndex));
+		return `${prefix}${quote}${routeForMedia(absolutePath, contentType)}${suffix}${quote}`;
 	});
 }
 
@@ -139,7 +200,9 @@ function getHtmlSecurityHeaders(scriptNonce) {
 			"connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com",
 			"font-src 'self' data: https://cdn.jsdelivr.net",
 			"frame-ancestors 'none'",
+			"frame-src 'self'",
 			"img-src 'self' data: http: https:",
+			"object-src 'self'",
 			`script-src 'nonce-${scriptNonce}' 'strict-dynamic' https://cdn.jsdelivr.net`,
 			"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
 		].join("; "),
@@ -498,7 +561,8 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const token = randomBytes(24).toString("base64url");
-	const resolvedResourceRoot = await realpath(resourceRoot);
+	const lexicalResourceRoot = resolve(resourceRoot);
+	const resolvedResourceRoot = await realpath(lexicalResourceRoot);
 	const historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
 	if (!Number.isInteger(historyLimit) || historyLimit < 1) {
 		throw new Error("Browser preview watch history limit must be a positive integer.");
@@ -507,7 +571,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	const eventClients = new Set();
 	const buildDocument = (documentRevision, html) => {
 		const absoluteImages = new Map();
-		const rewrittenHtml = rewriteBrowserWatchAbsoluteImageSources(html, (absolutePath, contentType) => {
+		const rewrittenHtml = rewriteBrowserWatchLocalMediaSources(html, lexicalResourceRoot, (absolutePath, contentType) => {
 			const imageId = createHmac("sha256", token)
 				.update("absolute-image\0")
 				.update(absolutePath)

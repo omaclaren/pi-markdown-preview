@@ -32,6 +32,7 @@ import {
 	transformMarkdownOutsideFences,
 } from "./shared/annotation-scanner.js";
 import { createBrowserWatchServer } from "./shared/browser-watch-server.js";
+import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 
 // Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
 // A namespace lookup avoids an ESM load failure and falls back to rendering without targeted deletion.
@@ -78,7 +79,7 @@ const CACHE_DIR = getPreviewCacheDir();
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
-const RENDER_VERSION = "v26";
+const RENDER_VERSION = "v27";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const MERMAID_CLI_ICON_PACKS = ["@iconify-json/lucide", "@iconify-json/logos"] as const;
 const MERMAID_BROWSER_ICON_PACKS = [
@@ -2005,7 +2006,8 @@ function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean): {
 	pandocMarkdown: string;
 	annotationPlaceholders: PreviewAnnotationPlaceholder[];
 } {
-	const normalizedMarkdown = isLatex ? markdown : normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdown)));
+	const markdownWithoutHtmlComments = isLatex ? markdown : stripMarkdownHtmlCommentsPreservingYamlFrontMatter(markdown);
+	const normalizedMarkdown = isLatex ? markdownWithoutHtmlComments : normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments)));
 	if (isLatex || !hasMarkdownAnnotationMarkers(normalizedMarkdown)) {
 		return { normalizedMarkdown, pandocMarkdown: normalizedMarkdown, annotationPlaceholders: [] };
 	}
@@ -3325,9 +3327,10 @@ async function renderPreviewPdfToFile(
 	isLatex?: boolean,
 	onWarning?: (message: string) => void,
 ): Promise<string> {
+	const markdownWithoutHtmlComments = isLatex ? markdown : stripMarkdownHtmlCommentsPreservingYamlFrontMatter(markdown);
 	const normalizedMarkdown = isLatex
-		? markdown
-		: normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdown))));
+		? markdownWithoutHtmlComments
+		: normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments))));
 	const mermaidPrepared = isLatex ? { markdown: normalizedMarkdown, found: 0, replaced: 0, failed: 0, missingCli: false } : await preprocessMermaidForPdf(normalizedMarkdown);
 
 	if (mermaidPrepared.missingCli) {
@@ -3836,6 +3839,13 @@ body {
   margin: 1.25em 0;
 }
 #preview-root img { max-width: 100%; }
+#preview-root embed {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: 360px;
+  margin: 0 auto;
+}
 #preview-root math[display="block"] {
   display: block;
   margin: 1em 0;

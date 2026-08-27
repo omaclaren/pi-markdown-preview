@@ -36,7 +36,7 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 - **Annotation marker highlighting** — inline `[an: ...]` markers are highlighted in terminal/browser/PDF previews as note-only chips (`...`, without the `[an: ]` wrapper) outside code blocks; long notes wrap correctly in PDF instead of running off the page
 - **Theme-aware** — matches your pi theme (dark/light inference, export page/card colours, Markdown colours, accent colours, syntax colours)
 - **Response picker** — select any past assistant response to preview, not just the latest
-- **File preview** — preview arbitrary Markdown files (including `.md`, `.mdx`, `.rmd`, `.qmd`), LaTeX `.tex` files, diff/patch files, or code files (`.py`, `.ts`, `.js`, `.rs`, etc.) from the filesystem. LaTeX files are rendered as documents with full math and sectioning; diff files are rendered with coloured add/remove lines; code files are rendered with syntax highlighting.
+- **File preview** — preview arbitrary Markdown files (including `.md`, `.mdx`, `.rmd`, and lightweight `.qmd` documents), LaTeX `.tex` files, diff/patch files, or code files (`.py`, `.ts`, `.js`, `.rs`, etc.) from the filesystem. Markdown HTML comments are omitted outside code, local image/PDF figure references are supported, and no Quarto computation is executed. LaTeX files are rendered as documents with full math and sectioning; diff files are rendered with coloured add/remove lines; code files are rendered with syntax highlighting. Use Quarto itself when full Quarto project, filter, cross-reference, or execution semantics are required.
 - **Caching** — rendered pages are cached for instant re-display; refresh (`r`) bypasses cache
 
 ## Prerequisites
@@ -107,7 +107,7 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 | `/preview-clear-cache` | Clear rendered preview cache |
 | `/preview --pick --browser` | Pick a response, open in browser |
 
-Local images are supported. File previews resolve relative image paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, relative images remain restricted beneath the preview resource directory, while exact absolute image paths and `file:` URLs referenced by retained previews are rewritten to opaque authenticated routes. Watch mode never exposes a general filesystem route and serves only allowlisted image types.
+Local images and Pandoc PDF figure embeds are supported. File previews resolve relative paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, exact local media references—including parent-relative paths such as `../figures/plot.png`—are rewritten to opaque authenticated routes. The general relative-resource route remains restricted beneath the preview resource directory; watch mode never exposes an arbitrary filesystem route and serves only allowlisted image types plus explicitly referenced PDF embeds.
 
 The short response-watch forms are `/preview-browser -w` and `/preview -b -w`. Use `/preview-browser -w ./report.md` or `/preview -b -w --file ./report.md` to watch a file. Quoted paths are supported; `--file` also makes reserved or dash-prefixed filenames explicit.
 

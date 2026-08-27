@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,10 +10,16 @@ import { Check } from "typebox/value";
 import {
 	createBrowserWatchServer,
 	getBrowserWatchAbsoluteImagePath,
+	getBrowserWatchLocalMediaPath,
 	prepareBrowserWatchHtml,
 	resolveBrowserWatchResource,
 	rewriteBrowserWatchAbsoluteImageSources,
+	rewriteBrowserWatchLocalMediaSources,
 } from "../shared/browser-watch-server.js";
+import {
+	stripMarkdownHtmlComments,
+	stripMarkdownHtmlCommentsPreservingYamlFrontMatter,
+} from "../shared/markdown-html-comments.js";
 
 const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
@@ -174,14 +180,15 @@ assert.match(src, /function getLongestFenceRun\s*\(/, "Missing adaptive fence-le
 assert.match(src, /function normalizeMarkdownFencedBlocks\s*\(/, "Missing fenced-block normalization helper.");
 assert.match(
 	src,
-	/normalizeMarkdownFencedBlocks\(normalizeObsidianImages\(normalizeMathDelimiters\(markdown\)\)\)/,
-	"Preview/browser paths should normalize fenced blocks before pandoc rendering.",
+	/normalizeMarkdownFencedBlocks\(normalizeObsidianImages\(normalizeMathDelimiters\(markdownWithoutHtmlComments\)\)\)/,
+	"Preview/browser paths should strip HTML comments and normalize fenced blocks before pandoc rendering.",
 );
 assert.match(
 	src,
-	/normalizeSubSupTags\(normalizeMarkdownFencedBlocks\(normalizeObsidianImages\(normalizeMathDelimiters\(markdown\)\)\)\)/,
-	"PDF export should normalize fenced blocks before pandoc rendering.",
+	/normalizeSubSupTags\(normalizeMarkdownFencedBlocks\(normalizeObsidianImages\(normalizeMathDelimiters\(markdownWithoutHtmlComments\)\)\)\)/,
+	"PDF export should strip HTML comments and normalize fenced blocks before pandoc rendering.",
 );
+assert.match(src, /stripMarkdownHtmlCommentsPreservingYamlFrontMatter\(markdown\)/, "Markdown previews should remove HTML comments before invoking Pandoc with raw HTML disabled.");
 assert.match(
 	src,
 	/const markerLength = Math\.max\(3, \(markerChar === "`" \? maxBackticks : maxTildes\) \+ 1\);/,
@@ -512,6 +519,7 @@ assert.equal(getBrowserWatchAbsoluteImagePath("/private/tmp/a%20b.png", "darwin"
 assert.equal(getBrowserWatchAbsoluteImagePath("file:///private/tmp/a%20b.png", "linux"), "/private/tmp/a b.png");
 assert.equal(getBrowserWatchAbsoluteImagePath("C:\\Users\\Oliver\\plot.png", "win32"), "C:\\Users\\Oliver\\plot.png");
 assert.equal(getBrowserWatchAbsoluteImagePath("file:///C:/Users/Oliver/My%20Plot.png", "win32"), "C:\\Users\\Oliver\\My Plot.png");
+assert.equal(getBrowserWatchAbsoluteImagePath("/report.pdf", "win32"), undefined, "A drive-relative Windows root path needs the preview resource drive.");
 assert.equal(getBrowserWatchAbsoluteImagePath("https://example.com/plot.png", "darwin"), undefined);
 assert.equal(getBrowserWatchAbsoluteImagePath("//example.com/plot.png", "darwin"), undefined);
 assert.equal(getBrowserWatchAbsoluteImagePath("images/plot.png", "darwin"), undefined);
@@ -530,6 +538,247 @@ assert.match(rewrittenAbsoluteImageHtml, /src="\/authenticated-image\/one"/);
 assert.match(rewrittenAbsoluteImageHtml, /src="images\/plot\.png"/);
 assert.match(rewrittenAbsoluteImageHtml, /src="https:\/\/example\.com\/plot\.png"/);
 assert.match(rewrittenAbsoluteImageHtml, /src="\/private\/tmp\/notes\.txt"/, "Unsupported absolute file types should not gain an authenticated route.");
+assert.equal(getBrowserWatchLocalMediaPath("../figures/plot.png", "/work/docs", "linux"), "/work/figures/plot.png");
+assert.equal(getBrowserWatchLocalMediaPath("..\\figures\\plot.pdf", "C:\\Work\\docs", "win32"), "C:\\Work\\figures\\plot.pdf");
+assert.equal(getBrowserWatchLocalMediaPath("/report.pdf", "D:\\Work\\docs", "win32"), "D:\\report.pdf", "Windows root-relative media should stay on the preview resource drive.");
+assert.equal(getBrowserWatchLocalMediaPath("https://example.com/plot.png", "/work/docs", "linux"), undefined);
+assert.equal(getBrowserWatchLocalMediaPath("data:image/png;base64,AAAA", "/work/docs", "linux"), undefined);
+assert.equal(getBrowserWatchLocalMediaPath("\\\\server\\share\\plot.png", "C:\\Work\\docs", "win32"), undefined);
+assert.equal(getBrowserWatchLocalMediaPath("%5C%5Cserver%5Cshare%5Cplot.png", "C:\\Work\\docs", "win32"), undefined, "Encoded UNC media references must not trigger network filesystem reads.");
+assert.equal(getBrowserWatchLocalMediaPath("%5C%2Fserver%2Fshare%2Fplot.png", "C:\\Work\\docs", "win32"), undefined, "Mixed-separator encoded UNC references must not trigger network filesystem reads.");
+const rewrittenLocalMedia = [];
+const rewrittenLocalMediaHtml = rewriteBrowserWatchLocalMediaSources(
+	'<figure><img src="../figures/plot%20one.png#layer-two" /><embed src="../figures/plot.pdf#page=7&amp;zoom=125" /><embed src="../figures/notes.txt" /></figure>',
+	"/work/docs",
+	(absolutePath, contentType) => {
+		rewrittenLocalMedia.push({ absolutePath, contentType });
+		return `/authenticated-media/${rewrittenLocalMedia.length}`;
+	},
+	"linux",
+);
+assert.deepEqual(rewrittenLocalMedia, [
+	{ absolutePath: "/work/figures/plot one.png", contentType: "image/png" },
+	{ absolutePath: "/work/figures/plot.pdf", contentType: "application/pdf" },
+]);
+assert.match(rewrittenLocalMediaHtml, /<img src="\/authenticated-media\/1#layer-two"/);
+assert.match(rewrittenLocalMediaHtml, /<embed src="\/authenticated-media\/2#page=7&amp;zoom=125"/);
+assert.match(rewrittenLocalMediaHtml, /<embed src="\.\.\/figures\/notes\.txt"/, "Unsupported embed types should not gain an authenticated route.");
+const markdownWithComments = `---
+title: Comment test
+literal: "<!-- preserve front matter -->"
+---
+Visible before <!-- hidden inline --> visible after.
+<!--
+Hidden draft list:
+- one
+- two
+-->
+\`<!-- preserve inline code -->\`
+
+\`\`\`html
+<!-- preserve fenced code -->
+\`\`\`
+`;
+const strippedMarkdownComments = stripMarkdownHtmlCommentsPreservingYamlFrontMatter(markdownWithComments);
+assert.match(strippedMarkdownComments, /literal: "<!-- preserve front matter -->"/);
+assert.match(strippedMarkdownComments, /Visible before  visible after\./);
+assert.doesNotMatch(strippedMarkdownComments, /Hidden draft list|hidden inline/);
+assert.match(strippedMarkdownComments, /`<!-- preserve inline code -->`/);
+assert.match(strippedMarkdownComments, /```html\n<!-- preserve fenced code -->\n```/);
+assert.equal(stripMarkdownHtmlComments("a<!-- hidden -->b"), "ab");
+assert.equal(stripMarkdownHtmlComments("<!-- hidden -->visible"), "visible", "Visible text sharing an HTML-flow line with a closed comment must survive.");
+assert.equal(stripMarkdownHtmlComments("   <!-- hidden -->\nVisible"), "   \nVisible", "Up-to-three-space-indented comments should be removed.");
+assert.equal(stripMarkdownHtmlComments("\uFEFF<!-- hidden -->\nVisible"), "\uFEFF\nVisible", "A leading byte-order mark must not shift Micromark comment offsets.");
+const htmlFlowWithComment = `<div>
+<!--
+![](../private-html-flow.png)
+-->
+</div>`;
+const strippedHtmlFlowComment = stripMarkdownHtmlComments(htmlFlowWithComment);
+assert.doesNotMatch(strippedHtmlFlowComment, /private-html-flow/, "Comments nested in a Markdown HTML-flow token must still be removed.");
+assert.match(strippedHtmlFlowComment, /^<div>\n\n\n\n<\/div>$/);
+assert.equal(
+	stripMarkdownHtmlComments('<span title="<!-- omitted attribute comment -->">Visible</span>'),
+	'<span title="">Visible</span>',
+	"Closed HTML-comment syntax outside Markdown literal/code contexts should be omitted even inside disabled raw HTML.",
+);
+assert.equal(
+	stripMarkdownHtmlComments('[Visible](target "<!-- literal link title -->")'),
+	'[Visible](target "<!-- literal link title -->")',
+	"Comment-like Markdown link-title text is not an HTML comment.",
+);
+const nativeHtmlFlowMarkdown = `<div>
+1 < 2
+<!--
+![](../private-native-flow.pdf)
+-->
+
+\`<!-- preserve inline code in native div -->\`
+
+\`\`\`html
+<!-- preserve fenced code in native div -->
+\`\`\`
+
+    <!-- preserve indented code in native div -->
+</div>`;
+const strippedNativeHtmlFlowMarkdown = stripMarkdownHtmlComments(nativeHtmlFlowMarkdown);
+assert.doesNotMatch(strippedNativeHtmlFlowMarkdown, /private-native-flow/, "A literal less-than sign must not hide a later HTML comment.");
+assert.match(strippedNativeHtmlFlowMarkdown, /`<!-- preserve inline code in native div -->`/);
+assert.match(strippedNativeHtmlFlowMarkdown, /```html\n<!-- preserve fenced code in native div -->\n```/);
+assert.match(strippedNativeHtmlFlowMarkdown, /    <!-- preserve indented code in native div -->/);
+const inlineNativeHtmlComment = `<div><!--
+![](../private-inline-native.png)
+--></div>`;
+assert.doesNotMatch(stripMarkdownHtmlComments(inlineNativeHtmlComment), /private-inline-native/, "An inline opening tag must not turn its following comment into masked indented code.");
+const malformedTagComment = `<x = "<!--
+![](../private-malformed-tag.png)
+-->">`;
+assert.doesNotMatch(stripMarkdownHtmlComments(malformedTagComment), /private-malformed-tag/, "Malformed tag-like text must not protect closed comment syntax.");
+const standaloneSpanComment = `<span>
+    <!--
+    ![](../private-standalone-span.png)
+    -->
+</span>`;
+assert.doesNotMatch(stripMarkdownHtmlComments(standaloneSpanComment), /private-standalone-span/, "An inline HTML tag must not fabricate an indented Markdown code block around a later comment.");
+const escapedTagComment = `\\<span title="<!--
+![](../private-escaped-tag.png)
+-->">`;
+assert.doesNotMatch(stripMarkdownHtmlComments(escapedTagComment), /private-escaped-tag/, "An escaped tag opener must not protect later closed comment syntax.");
+const nativeDivContainerCode = `> <div>
+>     <!-- preserve blockquoted native-div code -->
+> </div>
+
+- <div>
+      <!-- preserve list native-div code -->
+  </div>
+
+<!-- remove after native-div containers -->`;
+const strippedNativeDivContainerCode = stripMarkdownHtmlComments(nativeDivContainerCode);
+assert.match(strippedNativeDivContainerCode, />     <!-- preserve blockquoted native-div code -->/);
+assert.match(strippedNativeDivContainerCode, /      <!-- preserve list native-div code -->/);
+assert.doesNotMatch(strippedNativeDivContainerCode, /remove after native-div containers/);
+const nativeDivListComments = `- <div>
+    <!--
+    ![](../private-list-four-spaces.png)
+    -->
+  </div>
+
+- <div>
+     <!--
+     ![](../private-list-five-spaces.png)
+     -->
+  </div>`;
+assert.doesNotMatch(
+	stripMarkdownHtmlComments(nativeDivListComments),
+	/private-list-(?:four|five)-spaces/,
+	"Four- and five-space list continuation is not indented code and must not protect a native-div comment.",
+);
+const unclosedCommentLikeText = `<!-- draft
+
+# Visible heading
+Body`;
+assert.equal(stripMarkdownHtmlComments(unclosedCommentLikeText), unclosedCommentLikeText, "An unclosed opener is visible Markdown text rather than a complete HTML comment.");
+const hiddenCommentWithFence = `Before
+<!--
+\`\`\`text
+secret fenced draft
+\`\`\`
+![](../private.pdf)
+-->
+After`;
+assert.equal(stripMarkdownHtmlComments(hiddenCommentWithFence), "Before\n\n\n\n\n\n\nAfter", "Fences and media references inside comments must remain hidden while retaining line count.");
+const markdownCodeContexts = `    <!-- preserve indented code -->
+
+> \`\`\`html
+> <!-- preserve blockquoted fence -->
+> \`\`\`
+
+- \`\`\`html
+  <!-- preserve list-contained fence -->
+  \`\`\`
+
+\`\`<!-- preserve
+multiline code span -->\`\`
+
+\`\`\`text
+\`\`\`not-a-close
+<!-- preserve until the real close -->
+\`\`\`
+`;
+const preservedMarkdownCodeContexts = stripMarkdownHtmlComments(markdownCodeContexts);
+assert.match(preservedMarkdownCodeContexts, /    <!-- preserve indented code -->/);
+assert.match(preservedMarkdownCodeContexts, /> ```html\n> <!-- preserve blockquoted fence -->\n> ```/);
+assert.match(preservedMarkdownCodeContexts, /- ```html\n  <!-- preserve list-contained fence -->\n  ```/);
+assert.match(preservedMarkdownCodeContexts, /``<!-- preserve\nmultiline code span -->``/);
+assert.match(preservedMarkdownCodeContexts, /```not-a-close\n<!-- preserve until the real close -->\n```/);
+const markdownContainerBoundary = `> \`\`\`html
+> unterminated blockquote fence
+
+<!-- remove after blockquote
+![](../private-blockquote.png)
+-->
+
+- \`\`\`html
+  unterminated list fence
+
+<!-- remove after list
+![](../private-list.png)
+-->
+After`;
+const strippedContainerBoundary = stripMarkdownHtmlComments(markdownContainerBoundary);
+assert.match(strippedContainerBoundary, /> ```html\n> unterminated blockquote fence/);
+assert.match(strippedContainerBoundary, /- ```html\n  unterminated list fence/);
+assert.doesNotMatch(strippedContainerBoundary, /private-blockquote|private-list|remove after/, "A Markdown container ending must also end its unterminated code fence before later comments are classified.");
+const markdownFalseCodeContexts = `Paragraph continuation
+    <!-- remove despite four-space continuation
+    ![](../private-continuation.png)
+    -->
+
+\\\`<!-- remove after an escaped backtick -->\`
+
+\\<!-- preserve escaped comment syntax -->`;
+const strippedFalseCodeContexts = stripMarkdownHtmlComments(markdownFalseCodeContexts);
+assert.doesNotMatch(strippedFalseCodeContexts, /private-continuation|remove despite|remove after/, "Paragraph indentation and escaped backticks must not hide real comments from the tokenizer.");
+assert.match(strippedFalseCodeContexts, /\\<!-- preserve escaped comment syntax -->/, "An escaped opening angle bracket should remain literal Markdown text.");
+const markdownFenceCloserContexts = `\`\`\`html
+> \`\`\`
+- \`\`\`
+    \`\`\`
+<!-- preserve inside the real top-level fence -->
+\`\`\`
+<!-- remove outside the fence -->`;
+const strippedFenceCloserContexts = stripMarkdownHtmlComments(markdownFenceCloserContexts);
+assert.match(strippedFenceCloserContexts, /> ```\n- ```\n    ```\n<!-- preserve inside the real top-level fence -->\n```/);
+assert.doesNotMatch(strippedFenceCloserContexts, /remove outside/, "Container-prefixed and over-indented fence-like lines must not close a top-level fence.");
+const commentOnlyYamlCandidate = `---
+# <!-- ![](../private-comment-only-yaml.png) -->
+---
+After`;
+assert.doesNotMatch(
+	stripMarkdownHtmlCommentsPreservingYamlFrontMatter(commentOnlyYamlCandidate),
+	/private-comment-only-yaml/,
+	"A comment-only YAML document is not mapping front matter and must not bypass HTML-comment removal.",
+);
+const thematicBreakDocument = `---
+Ordinary Markdown between thematic breaks.
+<!--
+![](../private-thematic-break.png)
+-->
+---
+After`;
+const strippedThematicBreakDocument = stripMarkdownHtmlCommentsPreservingYamlFrontMatter(thematicBreakDocument);
+assert.doesNotMatch(strippedThematicBreakDocument, /private-thematic-break/, "Ordinary content between thematic breaks must not be mistaken for YAML front matter.");
+assert.match(strippedThematicBreakDocument, /Ordinary Markdown between thematic breaks\./);
+const dottedYamlFrontMatter = `---
+literal: "<!-- preserve dotted YAML -->"
+execute: !expr true
+...
+<!-- remove body comment -->
+Body`;
+const strippedDottedYaml = stripMarkdownHtmlCommentsPreservingYamlFrontMatter(dottedYamlFrontMatter);
+assert.match(strippedDottedYaml, /literal: "<!-- preserve dotted YAML -->"/);
+assert.doesNotMatch(strippedDottedYaml, /remove body comment/);
+assert.match(strippedDottedYaml, /\nBody$/);
 assert.deepEqual(
 	getLastAssistantResponse({
 		sessionManager: {
@@ -550,9 +799,10 @@ async function assertBrowserWatchServer() {
 	await writeFile(join(resourceRoot, "pixel.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 	await writeFile(join(resourceRoot, "notes.txt"), "not a browser preview asset");
 	await writeFile(join(parent, "outside.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+	await writeFile(join(parent, "outside.pdf"), Buffer.from("%PDF-1.4\n"));
 
 	const absoluteImagePath = join(parent, "outside.png");
-	const initialHtml = `<!doctype html><html><head><base href="file:///tmp/old/" /></head><body><p>Initial response</p><img id="absolute-image" src="${absoluteImagePath}" /><img id="file-url-image" src="${pathToFileURL(absoluteImagePath).href}" /></body></html>`;
+	const initialHtml = `<!doctype html><html><head><base href="file:///tmp/old/" /></head><body><p>Initial response</p><img id="absolute-image" src="${absoluteImagePath}" /><img id="file-url-image" src="${pathToFileURL(absoluteImagePath).href}" /><img id="parent-relative-image" src="../outside.png" /><embed id="parent-relative-pdf" src="../outside.pdf" /></body></html>`;
 	const preparedHtml = prepareBrowserWatchHtml(initialHtml, {
 		revision: 7,
 		revisions: [5, 7, 9],
@@ -595,6 +845,8 @@ async function assertBrowserWatchServer() {
 		const contentSecurityPolicy = initialResponse.headers.get("content-security-policy") ?? "";
 		assert.match(contentSecurityPolicy, /default-src 'none'/, "Browser watch pages should send a restrictive CSP.");
 		assert.match(contentSecurityPolicy, /script-src 'nonce-[^']+' 'strict-dynamic'/, "Browser watch scripts should require a per-response nonce.");
+		assert.match(contentSecurityPolicy, /object-src 'self'/, "Browser watch pages should allow only authenticated same-origin PDF embeds.");
+		assert.match(contentSecurityPolicy, /frame-src 'self'/, "Browser watch PDF plugins should be limited to authenticated same-origin resources.");
 		assert.doesNotMatch(contentSecurityPolicy, /script-src[^;]*'unsafe-inline'/, "Browser watch pages should block assistant-authored javascript links.");
 		const setCookie = initialResponse.headers.get("set-cookie") ?? "";
 		assert.match(setCookie, /^pi_markdown_preview_watch_\d+=/, "The bootstrap response should establish a port-specific watch cookie.");
@@ -629,14 +881,26 @@ async function assertBrowserWatchServer() {
 		assert.doesNotMatch(initialBody, new RegExp(absoluteImagePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "Absolute filesystem paths should not be exposed as browser resource URLs.");
 		const absoluteImageRoute = /id="absolute-image" src="([^"]+)"/.exec(initialBody)?.[1];
 		const fileUrlImageRoute = /id="file-url-image" src="([^"]+)"/.exec(initialBody)?.[1];
+		const parentRelativeImageRoute = /id="parent-relative-image" src="([^"]+)"/.exec(initialBody)?.[1];
+		const parentRelativePdfRoute = /id="parent-relative-pdf" src="([^"]+)"/.exec(initialBody)?.[1];
 		assert.match(absoluteImageRoute ?? "", /^\/__pi_markdown_preview_absolute_image__\/[a-f\d]{64}$/);
 		assert.equal(fileUrlImageRoute, absoluteImageRoute, "Equivalent absolute paths and file URLs should share one authenticated image route.");
+		assert.match(parentRelativeImageRoute ?? "", /^\/__pi_markdown_preview_absolute_image__\/[a-f\d]{64}$/, "An exact parent-relative image should use an opaque authenticated route without exposing its path.");
+		assert.match(parentRelativePdfRoute ?? "", /^\/__pi_markdown_preview_absolute_image__\/[a-f\d]{64}$/, "A parent-relative PDF embed should use an opaque authenticated route.");
 		const unauthorizedAbsoluteImage = await fetch(new URL(absoluteImageRoute, watchUrl.origin));
 		assert.equal(unauthorizedAbsoluteImage.status, 403, "Absolute image routes should require the watch session cookie.");
 		const absoluteImageResponse = await fetch(new URL(absoluteImageRoute, watchUrl.origin), { headers: { cookie } });
 		assert.equal(absoluteImageResponse.status, 200, "An exact absolute image referenced by retained watch HTML should be served.");
 		assert.equal(absoluteImageResponse.headers.get("content-type"), "image/png");
 		assert.deepEqual(new Uint8Array(await absoluteImageResponse.arrayBuffer()), new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+		const parentRelativeImageResponse = await fetch(new URL(parentRelativeImageRoute, watchUrl.origin), { headers: { cookie } });
+		assert.equal(parentRelativeImageResponse.status, 200, "An exact parent-relative image referenced by retained watch HTML should be served.");
+		assert.equal(parentRelativeImageResponse.headers.get("content-type"), "image/png");
+		assert.deepEqual(new Uint8Array(await parentRelativeImageResponse.arrayBuffer()), new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+		const parentRelativePdfResponse = await fetch(new URL(parentRelativePdfRoute, watchUrl.origin), { headers: { cookie } });
+		assert.equal(parentRelativePdfResponse.status, 200, "An exact parent-relative PDF referenced by retained watch HTML should be served.");
+		assert.equal(parentRelativePdfResponse.headers.get("content-type"), "application/pdf");
+		assert.equal(Buffer.from(await parentRelativePdfResponse.arrayBuffer()).toString("utf8"), "%PDF-1.4\n");
 		const unknownAbsoluteImage = await fetch(new URL(`/__pi_markdown_preview_absolute_image__/${"0".repeat(64)}`, watchUrl.origin), { headers: { cookie } });
 		assert.equal(unknownAbsoluteImage.status, 404, "Authenticated clients should not be able to guess arbitrary absolute image paths.");
 
@@ -696,6 +960,8 @@ async function assertBrowserWatchServer() {
 		assert.match(evictedRevisionBody, /const revision = "4";/, "Evicted revision URLs should be canonicalized to the oldest retained revision.");
 		const evictedAbsoluteImage = await fetch(new URL(absoluteImageRoute, watchUrl.origin), { headers: { cookie } });
 		assert.equal(evictedAbsoluteImage.status, 404, "Absolute image access should expire when its last referencing response leaves watch history.");
+		const evictedParentRelativePdf = await fetch(new URL(parentRelativePdfRoute, watchUrl.origin), { headers: { cookie } });
+		assert.equal(evictedParentRelativePdf.status, 404, "Parent-relative PDF access should expire when its last referencing response leaves watch history.");
 
 		const waitingServer = await createBrowserWatchServer(initialHtml, resourceRoot, { initialDocumentIsHistory: false });
 		try {
@@ -713,9 +979,44 @@ async function assertBrowserWatchServer() {
 	}
 }
 
-await assertBrowserWatchServer();
+async function assertBrowserWatchSymlinkResourceRoot() {
+	const parent = await mkdtemp(join(tmpdir(), "pi-markdown-preview-watch-symlink-"));
+	const lexicalParent = join(parent, "lexical");
+	const canonicalParent = join(parent, "canonical");
+	const canonicalResourceRoot = join(canonicalParent, "docs");
+	const lexicalResourceRoot = join(lexicalParent, "docs-link");
+	let server;
+	try {
+		await mkdir(lexicalParent);
+		await mkdir(canonicalResourceRoot, { recursive: true });
+		await writeFile(join(lexicalParent, "outside.png"), Buffer.from([0x11]));
+		await writeFile(join(canonicalParent, "outside.png"), Buffer.from([0x22]));
+		try {
+			await symlink(canonicalResourceRoot, lexicalResourceRoot, process.platform === "win32" ? "junction" : "dir");
+		} catch (error) {
+			if (process.platform === "win32" && error?.code === "EPERM") return;
+			throw error;
+		}
 
-assert.match(src, /const RENDER_VERSION = "v26";/, "Block-aware pagination should invalidate fixed-slice preview caches.");
+		server = await createBrowserWatchServer('<!doctype html><html><head></head><body><img id="outside" src="../outside.png" /></body></html>', lexicalResourceRoot);
+		const bootstrap = await fetch(server.url);
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const body = await bootstrap.text();
+		const route = /id="outside" src="([^"]+)"/.exec(body)?.[1];
+		assert.ok(route);
+		const response = await fetch(new URL(route, new URL(server.url).origin), { headers: { cookie } });
+		assert.equal(response.status, 200);
+		assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([0x11]), "Parent-relative media should resolve from the document's lexical symlink path, matching Pandoc and browser semantics.");
+	} finally {
+		await server?.close();
+		await rm(parent, { recursive: true, force: true });
+	}
+}
+
+await assertBrowserWatchServer();
+await assertBrowserWatchSymlinkResourceRoot();
+
+assert.match(src, /const RENDER_VERSION = "v27";/, "Comment and local-media rendering changes should invalidate older preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(
 	src,

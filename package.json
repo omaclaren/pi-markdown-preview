@@ -35,7 +35,9 @@
     "typebox": "*"
   },
   "dependencies": {
-    "puppeteer-core": "^25.7.0"
+    "micromark": "^4.0.2",
+    "puppeteer-core": "^25.7.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.81.1",
