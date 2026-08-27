@@ -19,7 +19,7 @@ import { existsSync, readFileSync, statSync, type Stats, unwatchFile, watchFile 
 import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep, win32 as win32Path } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { Type, type TUnsafe } from "typebox";
 import {
@@ -79,7 +79,8 @@ const CACHE_DIR = getPreviewCacheDir();
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
-const RENDER_VERSION = "v27";
+const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
+const RENDER_VERSION = "v28";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const MERMAID_CLI_ICON_PACKS = ["@iconify-json/lucide", "@iconify-json/logos"] as const;
 const MERMAID_BROWSER_ICON_PACKS = [
@@ -2570,8 +2571,9 @@ async function openFileInDefaultBrowser(pathOrUrl: string, preferCmuxBrowser = f
 async function renderMarkdownToHtmlWithPandoc(markdown: string, resourcePath?: string, isLatex?: boolean): Promise<string> {
 	const pandocCommand = process.env.PANDOC_PATH?.trim() || "pandoc";
 	const pandocInput = isLatex ? markdown : normalizeMarkdownFencedBlocks(markdown);
-	const inputFormat = isLatex ? "latex" : "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris-raw_html";
+	const inputFormat = isLatex ? "latex" : "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris-raw_html-raw_attribute";
 	const args = ["-f", inputFormat, "-t", "html5", "--mathml", "--wrap=none"];
+	if (!isLatex) args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	return await new Promise<string>((resolve, reject) => {
@@ -2803,7 +2805,7 @@ async function renderMarkdownToPdf(markdown: string, outputPath: string, resourc
 	const pdfEngine = process.env.PANDOC_PDF_ENGINE?.trim() || "xelatex";
 	const preamblePath = await ensurePdfPreamble();
 	const args = [
-		"-f", "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris+superscript+subscript-raw_html",
+		"-f", "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris+superscript+subscript-raw_html-raw_attribute",
 		"-o", outputPath,
 		`--pdf-engine=${pdfEngine}`,
 		...getPandocLatexEngineOptions(pdfEngine),
@@ -2814,6 +2816,7 @@ async function renderMarkdownToPdf(markdown: string, outputPath: string, resourc
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	return await new Promise<void>((resolve, reject) => {
@@ -3059,7 +3062,7 @@ async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath
 	const pandocInput = normalizeMarkdownFencedBlocks(markdown);
 	const preamblePath = await ensurePdfPreamble();
 	const args = [
-		"-f", "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris+superscript+subscript-raw_html",
+		"-f", "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris+superscript+subscript-raw_html-raw_attribute",
 		"-t", "latex",
 		"-s",
 		"-V", "geometry:margin=2.2cm",
@@ -3069,6 +3072,7 @@ async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const generatedLatex = await new Promise<string>((resolve, reject) => {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -84,18 +85,21 @@ assert.ok(
 
 assert.match(
 	src,
-	/markdown\+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header\+tex_math_dollars\+autolink_bare_uris-raw_html/,
-	"HTML preview input format should allow lists, blockquotes, and headings without a preceding blank line and disable raw HTML.",
+	/markdown\+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header\+tex_math_dollars\+autolink_bare_uris-raw_html-raw_attribute/,
+	"HTML preview input format should allow lists, blockquotes, and headings without a preceding blank line and disable raw HTML, including raw attributed blocks.",
 );
 assert.match(
 	src,
 	/\["-f", inputFormat, "-t", "html5", "--mathml", "--wrap=none"\]/,
 	"HTML preview should pass --wrap=none so long annotation markers survive pandoc wrapping.",
 );
+assert.match(src, /const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath\(new URL\("\.\/shared\/pandoc-figure-crossrefs\.lua", import\.meta\.url\)\);/);
+assert.equal((src.match(/--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}/g) ?? []).length, 3, "HTML and both Markdown-to-PDF paths should use the trusted lightweight figure-reference filter.");
+assert.match(src, /if \(!isLatex\) args\.push\(`--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}`\);/, "Direct LaTeX input must not pass through the Markdown figure-reference filter.");
 assert.match(
 	src,
-	/markdown\+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header\+tex_math_dollars\+autolink_bare_uris\+superscript\+subscript-raw_html/,
-	"PDF input format should allow lists, blockquotes, and headings without a preceding blank line and disable raw HTML.",
+	/markdown\+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header\+tex_math_dollars\+autolink_bare_uris\+superscript\+subscript-raw_html-raw_attribute/,
+	"PDF input format should allow lists, blockquotes, and headings without a preceding blank line and disable raw HTML/raw attributed blocks.",
 );
 assert.ok(
 	src.includes(String.raw`\\IfFileExists{titlesec.sty}`) && src.includes(String.raw`\\IfFileExists{enumitem.sty}`),
@@ -779,6 +783,122 @@ const strippedDottedYaml = stripMarkdownHtmlCommentsPreservingYamlFrontMatter(do
 assert.match(strippedDottedYaml, /literal: "<!-- preserve dotted YAML -->"/);
 assert.doesNotMatch(strippedDottedYaml, /remove body comment/);
 assert.match(strippedDottedYaml, /\nBody$/);
+
+const figureCrossrefFilterPath = resolve(process.cwd(), "shared", "pandoc-figure-crossrefs.lua");
+const figureCrossrefPandocCommand = process.env.PANDOC_PATH?.trim() || "pandoc";
+const figureCrossrefPandocVersion = spawnSync(figureCrossrefPandocCommand, ["--version"], { encoding: "utf8" });
+assert.equal(figureCrossrefPandocVersion.status, 0, figureCrossrefPandocVersion.stderr || figureCrossrefPandocVersion.error?.message);
+const figureCrossrefPandocMajor = Number.parseInt(/pandoc (\d+)/.exec(figureCrossrefPandocVersion.stdout)?.[1] ?? "0", 10);
+const rawAttributedHtmlResult = spawnSync(
+	figureCrossrefPandocCommand,
+	["-f", "markdown-raw_html-raw_attribute", "-t", "html5", "--wrap=none", `--lua-filter=${figureCrossrefFilterPath}`],
+	{ input: "```{=html}\n<script>globalThis.__unsafe = true</script>\n```", encoding: "utf8" },
+);
+assert.equal(rawAttributedHtmlResult.status, 0, rawAttributedHtmlResult.stderr || rawAttributedHtmlResult.error?.message);
+assert.doesNotMatch(rawAttributedHtmlResult.stdout, /<script>/i, "Raw attributed HTML blocks must not bypass the disabled raw-HTML boundary.");
+assert.match(rawAttributedHtmlResult.stdout, /&lt;script&gt;/, "Disabled raw attributed HTML should remain visible inert code.");
+const figureCrossrefFixture = `See @fig-elephant and @fig:whale. Missing @fig-missing.
+Qualified [see @fig-elephant, p. 2] remains unresolved.
+
+![An Elephant](elephant.png){#fig-elephant}
+
+![A Whale](whale.png){#fig:whale}
+
+Inline ![not a standalone figure](inline.png){#fig-inline}; @fig-inline.
+
+\`@fig-elephant\`
+`;
+const runFigureCrossrefPandoc = (outputFormat, input = figureCrossrefFixture) => {
+	const result = spawnSync(
+		figureCrossrefPandocCommand,
+		["-f", "markdown-raw_html-raw_attribute", "-t", outputFormat, "--wrap=none", `--lua-filter=${figureCrossrefFilterPath}`],
+		{ input, encoding: "utf8" },
+	);
+	assert.equal(result.status, 0, result.stderr || result.error?.message);
+	return result;
+};
+const figureCrossrefHtml = runFigureCrossrefPandoc("html5");
+assert.match(figureCrossrefHtml.stdout, /<a href="#fig-elephant">Figure 1<\/a>/);
+assert.match(figureCrossrefHtml.stdout, /<a href="#fig:whale">Figure 2<\/a>/);
+assert.match(figureCrossrefHtml.stdout, /<figcaption[^>]*>Figure 1: An Elephant<\/figcaption>/);
+assert.match(figureCrossrefHtml.stdout, /<figcaption[^>]*>Figure 2: A Whale<\/figcaption>/);
+assert.match(figureCrossrefHtml.stdout, /@fig-missing/);
+assert.match(figureCrossrefHtml.stdout, /\[see @fig-elephant, p\. 2\]/, "Qualified references should remain visibly unresolved rather than pretending to implement full Quarto semantics.");
+assert.match(figureCrossrefHtml.stdout, /@fig-inline/, "A labelled inline image is not a standalone figure and should not acquire a misleading reference number.");
+assert.match(figureCrossrefHtml.stdout, /<code>@fig-elephant<\/code>/, "Figure-reference syntax inside code should remain literal.");
+assert.match(figureCrossrefHtml.stderr, /unresolved figure reference: fig-missing/);
+assert.match(figureCrossrefHtml.stderr, /unresolved figure reference: fig-inline/);
+const figureCrossrefLatex = runFigureCrossrefPandoc("latex").stdout;
+assert.match(figureCrossrefLatex, /\\(?:hyperlink\{fig-elephant\}|hyperref\[fig-elephant\])\{Figure 1\}/);
+assert.match(figureCrossrefLatex, /\\(?:hyperlink\{fig:whale\}|hyperref\[fig:whale\])\{Figure 2\}/);
+assert.match(figureCrossrefLatex, /\\caption\{An Elephant\}\\label\{fig-elephant\}/, "LaTeX supplies its own Figure N caption prefix and must not receive a duplicated textual prefix.");
+assert.match(figureCrossrefLatex, /\\caption\{A Whale\}\\label\{fig:whale\}/);
+const duplicateFigureResult = runFigureCrossrefPandoc("html5", `![First](one.png){#fig-duplicate}
+
+![Second](two.png){#fig-duplicate}
+
+See @fig-duplicate.`);
+assert.match(duplicateFigureResult.stderr, /duplicate figure identifier: fig-duplicate/);
+assert.match(duplicateFigureResult.stderr, /unresolved figure reference: fig-duplicate/);
+assert.match(duplicateFigureResult.stdout, /@fig-duplicate/, "Duplicate figure references should remain visibly unresolved.");
+assert.match(duplicateFigureResult.stdout, /Figure 1: First/);
+assert.match(duplicateFigureResult.stdout, /Figure 2: Second/, "Individual figures remain numbered even when their shared reference label is ambiguous.");
+const unlabeledFigureResult = runFigureCrossrefPandoc("html5", `See @fig-second.
+
+![Unlabelled but captioned](first.png "hover title")
+
+![Second](second.png){#fig-second}`);
+assert.match(unlabeledFigureResult.stdout, /href="#fig-second">Figure 2<\/a>/);
+assert.match(unlabeledFigureResult.stdout, /Figure 1: Unlabelled but captioned/);
+assert.match(unlabeledFigureResult.stdout, /Figure 2: Second/, "Unlabelled/titled captioned figures should consume a number so references stay aligned with LaTeX's figure counter.");
+const containerFigureFixture = `See @fig-quote, @fig-div, and @fig-body.
+
+> ![Quote](quote.png){#fig-quote}
+
+::: {.box}
+![Div](div.png){#fig-div}
+:::
+
+![Body](body.png){#fig-body}`;
+const containerFigureHtml = runFigureCrossrefPandoc("html5", containerFigureFixture).stdout;
+assert.match(containerFigureHtml, /href="#fig-quote">Figure 1<\/a>/);
+assert.match(containerFigureHtml, /href="#fig-div">Figure 2<\/a>/);
+assert.match(containerFigureHtml, /href="#fig-body">Figure 3<\/a>/);
+const containerFigureLatex = runFigureCrossrefPandoc("latex", containerFigureFixture).stdout;
+assert.match(containerFigureLatex, /\\(?:hyperlink\{fig-body\}|hyperref\[fig-body\])\{Figure 3\}/, "Blockquote and fenced-Div figures should consume numbers because LaTeX emits figure environments for them.");
+const listFigureResult = runFigureCrossrefPandoc("html5", `See @fig-list and @fig-after-list.
+
+- ![List](list.png){#fig-list}
+
+![After list](after.png){#fig-after-list}`);
+if (figureCrossrefPandocMajor >= 3) {
+	assert.match(listFigureResult.stdout, /href="#fig-list">Figure 1<\/a>/);
+	assert.match(listFigureResult.stdout, /href="#fig-after-list">Figure 2<\/a>/, "Pandoc 3 emits list-contained Figure elements and its LaTeX writer increments the figure counter for them.");
+} else {
+	assert.match(listFigureResult.stdout, /@fig-list/);
+	assert.match(listFigureResult.stdout, /href="#fig-after-list">Figure 1<\/a>/, "Pandoc 2 renders list-contained images inline, so they must not consume a figure number.");
+}
+const nestedFigureResult = runFigureCrossrefPandoc("html5", `| Nested figure |
+| --- |
+| ![Nested](nested.png){#fig-nested} |
+
+See @fig-body and @fig-nested.
+
+![Body](body.png){#fig-body}`);
+assert.match(nestedFigureResult.stdout, /href="#fig-body">Figure 1<\/a>/, "Only top-level standalone figures should consume lightweight figure numbers.");
+assert.match(nestedFigureResult.stdout, /@fig-nested/, "A table-contained image should remain unresolved because LaTeX does not emit it as a numbered figure environment.");
+assert.match(nestedFigureResult.stderr, /unresolved figure reference: fig-nested/);
+const crossElementDuplicateResult = runFigureCrossrefPandoc("html5", `# Heading {#fig-shared}
+
+See @fig-shared.
+
+![Figure](figure.png){#fig-shared}`);
+assert.match(crossElementDuplicateResult.stderr, /duplicate figure identifier: fig-shared/);
+assert.match(crossElementDuplicateResult.stdout, /@fig-shared/, "A figure label duplicated by another document element must remain unresolved rather than linking to the wrong target.");
+const noReferenceFigureResult = runFigureCrossrefPandoc("html5", `![Ordinary Markdown caption](ordinary.png)`);
+assert.match(noReferenceFigureResult.stdout, /<figcaption[^>]*>Ordinary Markdown caption<\/figcaption>/);
+assert.doesNotMatch(noReferenceFigureResult.stdout, /Figure 1:/, "Documents without supported figure references should retain their established unnumbered Markdown captions.");
+
 assert.deepEqual(
 	getLastAssistantResponse({
 		sessionManager: {
@@ -1016,7 +1136,7 @@ async function assertBrowserWatchSymlinkResourceRoot() {
 await assertBrowserWatchServer();
 await assertBrowserWatchSymlinkResourceRoot();
 
-assert.match(src, /const RENDER_VERSION = "v27";/, "Comment and local-media rendering changes should invalidate older preview caches.");
+assert.match(src, /const RENDER_VERSION = "v28";/, "Comment, local-media, and figure-reference rendering changes should invalidate older preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(
 	src,
