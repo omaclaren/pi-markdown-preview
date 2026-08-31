@@ -1585,6 +1585,8 @@ async function assertSinglePagePdfFigureRendering() {
 			const heightLink = document.getElementById("height-only");
 			const heightCanvas = heightLink?.querySelector("canvas");
 			const outerLink = document.getElementById("outer-link");
+			const linkedWrapper = outerLink?.querySelector(".pdf-page-preview");
+			const linkedCanvas = linkedWrapper?.querySelector("canvas");
 			return {
 				rendered,
 				loaderFailure,
@@ -1606,6 +1608,16 @@ async function assertSinglePagePdfFigureRendering() {
 				linkLabel: link?.getAttribute("aria-label"),
 				canvasLabel: canvas?.getAttribute("aria-label"),
 				canvasSize: canvas ? [canvas.width, canvas.height] : null,
+				canvasStyleWidth: canvas?.style.width,
+				sizedLayout: link && canvas ? {
+					linkWidth: link.getBoundingClientRect().width,
+					canvasWidth: canvas.getBoundingClientRect().width,
+				} : null,
+				naturalLayout: linkedWrapper && linkedCanvas ? {
+					wrapperStyleWidth: linkedWrapper.style.width,
+					wrapperWidth: linkedWrapper.getBoundingClientRect().width,
+					canvasWidth: linkedCanvas.getBoundingClientRect().width,
+				} : null,
 				hugeCanvasSize: hugeCanvas ? [hugeCanvas.width, hugeCanvas.height] : null,
 				linkedFigure: {
 					href: outerLink?.getAttribute("href"),
@@ -1639,7 +1651,11 @@ async function assertSinglePagePdfFigureRendering() {
 		assert.equal(result.linkTitle, "Authored title — Open the original PDF");
 		assert.equal(result.linkLabel, "Open PDF: Single caption");
 		assert.equal(result.canvasLabel, "Single caption");
-		assert.deepEqual(result.canvasSize, [400, 250]);
+		assert.deepEqual(result.canvasSize, [534, 334]);
+		assert.equal(result.canvasStyleWidth, "100%", "Rendered PDF canvases should fill authored-width wrappers.");
+		assert.ok(Math.abs(result.sizedLayout.linkWidth - result.sizedLayout.canvasWidth) < 1, "Percentage-sized PDF canvases should fill their wrappers.");
+		assert.equal(result.naturalLayout.wrapperStyleWidth, "534px", "Natural PDF display widths should convert 72-point PDF units to 96-pixel CSS units.");
+		assert.ok(Math.abs(result.naturalLayout.wrapperWidth - result.naturalLayout.canvasWidth) < 1, "Naturally sized PDF canvases should fill their wrappers.");
 		assert.ok(result.hugeCanvasSize[0] < 10000 && result.hugeCanvasSize[0] * result.hugeCanvasSize[1] <= 8 * 1024 * 1024, "Oversized PDF pages should be downscaled beneath the per-canvas pixel cap.");
 		assert.deepEqual(result.linkedFigure, { href: "https://example.com/destination", nestedAnchorCount: 0, wrapperTag: "SPAN" }, "A PDF image with an authored outer link should retain that link without nesting a second anchor.");
 		assert.equal(result.heightOnlyLayout.linkStyleWidth, "fit-content");

@@ -3,6 +3,7 @@
 
 	const DEFAULT_RENDER_TIMEOUT_MS = 15000;
 	const DEFAULT_TOTAL_RENDER_TIMEOUT_MS = 30000;
+	const PDF_TO_CSS_UNITS = 96 / 72;
 	const MAX_RENDER_SCALE = 3;
 	const MAX_CANVAS_DIMENSION = 16384;
 	const MAX_CANVAS_PIXELS = 8 * 1024 * 1024;
@@ -102,7 +103,10 @@
 			|| viewport.width <= 0 || viewport.height <= 0) {
 			throw new Error("PDF page dimensions are invalid.");
 		}
-		const deviceScale = Math.max(1, Math.min(MAX_RENDER_SCALE, globalObject.devicePixelRatio || 1));
+		const deviceScale = Math.max(
+			PDF_TO_CSS_UNITS,
+			Math.min(MAX_RENDER_SCALE, PDF_TO_CSS_UNITS * (globalObject.devicePixelRatio || 1)),
+		);
 		const boundedPixelLimit = Math.max(1, Math.min(MAX_CANVAS_PIXELS, pixelLimit));
 		const scale = Math.min(
 			deviceScale,
@@ -155,10 +159,10 @@
 		} else if (authoredTitle) {
 			link.title = authoredTitle;
 		}
-		link.style.width = `${Math.ceil(viewport.width)}px`;
+		link.style.width = `${Math.ceil(viewport.width * PDF_TO_CSS_UNITS)}px`;
 
 		canvas.className = "pdf-page-preview-canvas";
-		canvas.style.width = `${Math.ceil(viewport.width)}px`;
+		canvas.style.width = "100%";
 		canvas.style.height = "auto";
 		canvas.setAttribute("role", "img");
 		canvas.setAttribute("aria-label", label);
