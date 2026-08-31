@@ -16,7 +16,7 @@ import {
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync, type Stats, unwatchFile, watchFile } from "node:fs";
-import { copyFile, mkdir, mkdtemp, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep, win32 as win32Path } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -32,7 +32,7 @@ import {
 	replaceInlineAnnotationMarkers,
 	transformMarkdownOutsideFences,
 } from "./shared/annotation-scanner.js";
-import { createBrowserWatchServer } from "./shared/browser-watch-server.js";
+import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 
 // Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
@@ -80,9 +80,21 @@ const CACHE_DIR = getPreviewCacheDir();
 const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
+const PDF_FIGURE_HELPERS_SOURCE = readFileSync(new URL("./client/pdf-figure-renderer.js", import.meta.url), "utf-8");
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
-const RENDER_VERSION = "v28";
+const RENDER_VERSION = "v29";
 const MERMAID_BROWSER_VERSION = "11.16.0";
+const PDFJS_BROWSER_VERSION = "6.3.289";
+const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
+const PDFJS_BROWSER_MODULE_URL = `${PDFJS_BROWSER_BASE_URL}build/pdf.min.mjs`;
+const PDFJS_BROWSER_WORKER_URL = `${PDFJS_BROWSER_BASE_URL}build/pdf.worker.min.mjs`;
+const PDFJS_BROWSER_DOCUMENT_OPTIONS = {
+	cMapPacked: true,
+	cMapUrl: `${PDFJS_BROWSER_BASE_URL}cmaps/`,
+	iccUrl: `${PDFJS_BROWSER_BASE_URL}iccs/`,
+	standardFontDataUrl: `${PDFJS_BROWSER_BASE_URL}standard_fonts/`,
+	wasmUrl: `${PDFJS_BROWSER_BASE_URL}wasm/`,
+};
 const MERMAID_CLI_ICON_PACKS = ["@iconify-json/lucide", "@iconify-json/logos"] as const;
 const MERMAID_BROWSER_ICON_PACKS = [
 	{ name: "lucide", url: "https://unpkg.com/@iconify-json/lucide@1/icons.json" },
@@ -108,6 +120,8 @@ const MAX_RENDER_HEIGHT_PX = PAGE_HEIGHT_PX * MAX_PREVIEW_PAGES;
 const DEFAULT_PANDOC_RENDER_TIMEOUT_MS = 30000;
 const MAX_RENDER_PROCESS_STDOUT_BYTES = 50 * 1024 * 1024;
 const MAX_RENDER_PROCESS_STDERR_BYTES = 5 * 1024 * 1024;
+const MAX_INLINE_BROWSER_PDF_BYTES = 16 * 1024 * 1024;
+const MAX_INLINE_BROWSER_PDF_TOTAL_BASE64_BYTES = 32 * 1024 * 1024;
 const DEFAULT_PDF_RENDER_TIMEOUT_MS = 120000;
 const MIN_PDF_RENDER_TIMEOUT_MS = 10000;
 const MAX_PDF_RENDER_TIMEOUT_MS = 600000;
@@ -3563,14 +3577,128 @@ export function buildMermaidBrowserModule(mermaidConfigJson: string, mermaidIcon
   `;
 }
 
+function decodeHtmlMediaSourceAttribute(value: string): string {
+	return value.replace(/&(amp|quot|apos|#39|#x27|#\d+|#x[\da-f]+);/gi, (entity, name: string) => {
+		switch (name.toLowerCase()) {
+			case "amp": return "&";
+			case "quot": return '"';
+			case "apos":
+			case "#39":
+			case "#x27": return "'";
+			default: {
+				const numeric = name.startsWith("#x")
+					? Number.parseInt(name.slice(2), 16)
+					: Number.parseInt(name.slice(1), 10);
+				return Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= 0x10ffff
+					? String.fromCodePoint(numeric)
+					: entity;
+			}
+		}
+	});
+}
+
+function isPdfEmbedSource(source: string): boolean {
+	const decoded = decodeHtmlMediaSourceAttribute(source.trim());
+	let pathPart = decoded.split(/[?#]/, 1)[0];
+	try {
+		pathPart = decodeURIComponent(pathPart);
+	} catch {
+		return false;
+	}
+	if (/^[\\/]{2}/.test(pathPart)) return false;
+	const scheme = /^([a-zA-Z][a-zA-Z\d+.-]*):/.exec(pathPart)?.[1]?.toLowerCase();
+	if (scheme && !["http", "https", "file", "data", "blob"].includes(scheme) && !/^[a-zA-Z]:[\\/]/.test(pathPart)) return false;
+	if (scheme === "data") return /^data:application\/pdf(?:[;,])/i.test(pathPart);
+	return extname(pathPart).toLowerCase() === ".pdf";
+}
+
+function markPandocPdfEmbeds(fragmentHtml: string): string {
+	let pdfIndex = 0;
+	return fragmentHtml.replace(/<embed\b[^>]*>/gi, (tag) => {
+		const canonicalTag = tag.replace(
+			/\sdata-pi-markdown-preview-pdf(?:-index)?(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/gi,
+			"",
+		);
+		const sourceMatch = canonicalTag.match(/\ssrc\s*=\s*(["'])([^"']*)\1/i);
+		if (!sourceMatch || !isPdfEmbedSource(sourceMatch[2] ?? "")) return canonicalTag;
+		const index = String(pdfIndex++);
+		return canonicalTag.replace(
+			/^<embed\b/i,
+			`<embed data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="${index}"`,
+		);
+	});
+}
+
+async function collectInlineLocalPdfData(
+	fragmentHtml: string,
+	resourcePath: string | undefined,
+	signal?: AbortSignal,
+): Promise<Record<string, string>> {
+	const sources: Array<{ index: string; source: string }> = [];
+	for (const match of fragmentHtml.matchAll(/<embed\b[^>]*\sdata-pi-markdown-preview-pdf\s*=\s*["']true["'][^>]*>/gi)) {
+		const sourceMatch = match[0].match(/\ssrc\s*=\s*(["'])([^"']*)\1/i);
+		const indexMatch = match[0].match(/\sdata-pi-markdown-preview-pdf-index\s*=\s*(["'])([^"']*)\1/i);
+		if (sourceMatch && indexMatch) {
+			sources.push({ index: indexMatch[2] ?? "", source: decodeHtmlMediaSourceAttribute(sourceMatch[2] ?? "") });
+		}
+	}
+	if (sources.length === 0) return {};
+
+	const rootPath = resolvePath(resourcePath ?? process.cwd());
+	const cachedData = new Map<string, string | null>();
+	const inlineData: Record<string, string> = {};
+	let totalBase64Bytes = 0;
+	for (const { index, source } of sources) {
+		throwIfPreviewCancelled(signal);
+		const localPath = getBrowserWatchLocalMediaPath(source, rootPath);
+		if (!localPath || extname(localPath).toLowerCase() !== ".pdf") {
+			continue;
+		}
+		if (cachedData.has(localPath)) {
+			const cached = cachedData.get(localPath) ?? null;
+			if (cached && totalBase64Bytes + cached.length <= MAX_INLINE_BROWSER_PDF_TOTAL_BASE64_BYTES) {
+				totalBase64Bytes += cached.length;
+				inlineData[index] = cached;
+			}
+			continue;
+		}
+
+		let encoded: string | null = null;
+		try {
+			const metadata = await stat(localPath);
+			const estimatedBase64Bytes = Math.ceil(metadata.size / 3) * 4;
+			if (metadata.isFile()
+				&& metadata.size <= MAX_INLINE_BROWSER_PDF_BYTES
+				&& totalBase64Bytes + estimatedBase64Bytes <= MAX_INLINE_BROWSER_PDF_TOTAL_BASE64_BYTES) {
+				const bytes = await readFile(localPath, { signal });
+				if (bytes.length <= MAX_INLINE_BROWSER_PDF_BYTES) {
+					const candidate = bytes.toString("base64");
+					if (totalBase64Bytes + candidate.length <= MAX_INLINE_BROWSER_PDF_TOTAL_BASE64_BYTES) {
+						encoded = candidate;
+						totalBase64Bytes += candidate.length;
+					}
+				}
+			}
+		} catch {
+			throwIfPreviewCancelled(signal);
+		}
+		cachedData.set(localPath, encoded);
+		if (encoded) inlineData[index] = encoded;
+	}
+	return inlineData;
+}
+
 function buildBrowserHtmlFromPandocFragment(
 	fragmentHtml: string,
 	style: PreviewStyle,
 	resourcePath?: string,
 	annotationPlaceholders: PreviewAnnotationPlaceholder[] = [],
 	fontSizePx?: number,
+	inlinePdfData: Record<string, string> = {},
+	pdfFigureRenderingEnabled = false,
 ): string {
 	const palette = style.palette;
+	const preparedFragmentHtml = markPandocPdfEmbeds(fragmentHtml);
 	const cssVarsBlock = Object.entries(buildPreviewCssVars(style, fontSizePx)).map(([key, value]) => `  ${key}: ${value};`).join("\n");
 	const mermaidConfig = {
 		startOnLoad: false,
@@ -3599,7 +3727,9 @@ function buildBrowserHtmlFromPandocFragment(
 	const mermaidIconPacksJson = JSON.stringify(MERMAID_BROWSER_ICON_PACKS).replace(/</g, "\\u003c");
 	const baseTag = resourcePath ? `\n<base href="${pathToFileURL(resourcePath + "/").href}" />` : "";
 	const annotationHelpersScript = ANNOTATION_HELPERS_SOURCE.replace(/<\/script/gi, "<\\/script");
+	const pdfFigureHelpersScript = PDF_FIGURE_HELPERS_SOURCE.replace(/<\/script/gi, "<\\/script");
 	const annotationPlaceholdersJson = JSON.stringify(annotationPlaceholders).replace(/</g, "\\u003c");
+	const inlinePdfDataJson = JSON.stringify(inlinePdfData).replace(/</g, "\\u003c");
 	return `<!doctype html>
 <html>
 <head>
@@ -3798,6 +3928,39 @@ body {
   height: 360px;
   margin: 0 auto;
 }
+#preview-root .pdf-page-preview {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+  position: relative;
+  text-decoration: none;
+}
+#preview-root .pdf-page-preview:hover { text-decoration: none; }
+#preview-root .pdf-page-preview-canvas {
+  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  display: block;
+  max-width: 100%;
+}
+#preview-root .pdf-page-preview:focus-visible .pdf-page-preview-canvas,
+#preview-root a:focus-visible > .pdf-page-preview .pdf-page-preview-canvas,
+#preview-root .pdf-page-preview:hover .pdf-page-preview-canvas {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+#preview-root .pdf-page-preview-badge {
+  background: var(--card);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  bottom: 0.55rem;
+  color: var(--muted);
+  font: 600 0.68em/1 system-ui, sans-serif;
+  padding: 0.32rem 0.45rem;
+  pointer-events: none;
+  position: absolute;
+  right: 0.55rem;
+}
 #preview-root math[display="block"] {
   display: block;
   margin: 1em 0;
@@ -3822,14 +3985,20 @@ body {
 </style>
 </head>
 <body>
-  <article id="preview-root">${fragmentHtml}</article>
+  <article id="preview-root">${preparedFragmentHtml}</article>
   <script>
 ${annotationHelpersScript}
+  </script>
+  <script>
+${pdfFigureHelpersScript}
   </script>
   <script type="module">
   (async () => {
     const annotationHelpers = window.PiMarkdownPreviewAnnotationHelpers || null;
+    const pdfFigureHelpers = window.PiMarkdownPreviewPdfFigures || null;
     const previewAnnotationPlaceholders = ${annotationPlaceholdersJson};
+    const previewInlinePdfData = ${inlinePdfDataJson};
+    const previewPdfFigureRenderingEnabled = ${JSON.stringify(pdfFigureRenderingEnabled)};
     const DIFF_META_LINE_REGEX = /^(diff --git |index |new file mode |deleted file mode |similarity index |rename from |rename to |Binary files )/;
 
     const escapeRegExp = (text) => {
@@ -4173,6 +4342,43 @@ ${annotationHelpersScript}
       }
     };
 
+    let pdfJsPromise = null;
+    const loadPdfJs = () => {
+      if (pdfJsPromise) return pdfJsPromise;
+      pdfJsPromise = import(${JSON.stringify(PDFJS_BROWSER_MODULE_URL)}).then((pdfjs) => {
+        if (pdfjs.GlobalWorkerOptions) {
+          pdfjs.GlobalWorkerOptions.workerSrc = ${JSON.stringify(PDFJS_BROWSER_WORKER_URL)};
+        }
+        return pdfjs;
+      }).catch((error) => {
+        pdfJsPromise = null;
+        throw error;
+      });
+      return pdfJsPromise;
+    };
+
+    const renderPdfFigures = async (root) => {
+      if (!previewPdfFigureRenderingEnabled) {
+        window.__pdfFigureRenderResult = { status: 'skipped', total: 0, rendered: 0, multiPage: 0, failed: 0 };
+        return;
+      }
+      if (!pdfFigureHelpers || typeof pdfFigureHelpers.renderSinglePagePdfFigures !== 'function') {
+        window.__pdfFigureRenderResult = { status: 'unavailable', total: 0, rendered: 0, multiPage: 0, failed: 0 };
+        return;
+      }
+      window.__pdfFigureRenderResult = { status: 'pending' };
+      try {
+        window.__pdfFigureRenderResult = await pdfFigureHelpers.renderSinglePagePdfFigures(root, {
+          documentOptions: ${JSON.stringify(PDFJS_BROWSER_DOCUMENT_OPTIONS)},
+          inlinePdfData: previewInlinePdfData,
+          loadPdfJs,
+        });
+      } catch (error) {
+        window.__pdfFigureRenderResult = { status: 'failed', error: error instanceof Error ? error.message : String(error) };
+        console.warn('PDF figure rendering failed; retaining native PDF embeds.', error);
+      }
+    };
+
 ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
 
     const root = document.getElementById('preview-root');
@@ -4182,6 +4388,7 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
       decorateDiffCodeBlocks(root);
       await renderAnnotationMarkerMath(root);
       await renderMathFallback(root);
+      await renderPdfFigures(root);
       await waitForFonts();
       await waitForPaint();
     } finally {
@@ -4200,12 +4407,16 @@ async function renderPreviewHtmlDocument(
 	isLatex?: boolean,
 	fontSizePx?: number,
 	signal?: AbortSignal,
+	inlineLocalPdfData = false,
 ): Promise<{ html: string; normalizedMarkdown: string; fontSizePx: number }> {
 	const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
 	const { normalizedMarkdown, pandocMarkdown, annotationPlaceholders } = prepareBrowserPreviewMarkdown(markdown, isLatex);
-	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex, signal);
+	const fragmentHtml = markPandocPdfEmbeds(await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex, signal));
+	const inlinePdfData = inlineLocalPdfData
+		? await collectInlineLocalPdfData(fragmentHtml, resourcePath, signal)
+		: {};
 	return {
-		html: buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx),
+		html: buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx, inlinePdfData, true),
 		normalizedMarkdown,
 		fontSizePx: previewFontSizePx,
 	};
@@ -4220,7 +4431,7 @@ async function renderPreviewHtmlToFile(
 	outputPath?: string,
 	signal?: AbortSignal,
 ): Promise<string> {
-	const rendered = await renderPreviewHtmlDocument(markdown, style, resourcePath, isLatex, fontSizePx, signal);
+	const rendered = await renderPreviewHtmlDocument(markdown, style, resourcePath, isLatex, fontSizePx, signal, true);
 	const hash = createHash("sha256")
 		.update(RENDER_VERSION)
 		.update("\u0000")

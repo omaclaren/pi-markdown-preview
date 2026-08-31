@@ -26,6 +26,8 @@ import {
 const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
 const boundedProcessSrc = readFileSync(resolve(process.cwd(), "shared", "bounded-process.js"), "utf-8");
+const browserWatchServerSrc = readFileSync(resolve(process.cwd(), "shared", "browser-watch-server.js"), "utf-8");
+const pdfFigureRendererSrc = readFileSync(resolve(process.cwd(), "client", "pdf-figure-renderer.js"), "utf-8");
 assert.match(boundedProcessSrc, /child\.stdout\.on\("error"/);
 assert.match(boundedProcessSrc, /child\.stderr\.on\("error"/);
 assert.match(boundedProcessSrc, /process\.kill\(-processId, "SIGKILL"\)/, "POSIX cancellation should terminate the child process group.");
@@ -36,6 +38,17 @@ assert.equal(
 	"Windows command-shim invocation should quote every argument and preserve shell metacharacters literally.",
 );
 assert.throws(() => buildWindowsCmdCommandLine("pandoc.cmd", ["%TEMP%\\result.pdf"]), /percent expansion/);
+assert.match(pdfFigureRendererSrc, /documentProxy\.numPages !== 1/, "Only single-page PDFs should replace native embeds.");
+assert.match(pdfFigureRendererSrc, /embed\.replaceWith\(buildRenderedFigure/, "A successfully rendered PDF should replace its embed atomically.");
+assert.match(pdfFigureRendererSrc, /isEvalSupported: false/g, "PDF.js should not evaluate PDF-defined JavaScript while rendering figures.");
+assert.match(pdfFigureRendererSrc, /MAX_TOTAL_CANVAS_PIXELS = 32 \* 1024 \* 1024/, "PDF canvases should have an aggregate browser-memory bound.");
+assert.match(pdfFigureRendererSrc, /for \(let index = 0; index < embeds\.length; index \+= 1\)/, "PDF figures should render sequentially rather than allocating every canvas concurrently.");
+assert.ok(
+	browserWatchServerSrc.includes('req.once("aborted", destroyStream)')
+		&& browserWatchServerSrc.includes('res.once("close", destroyStream)')
+		&& browserWatchServerSrc.includes("if (req.aborted || res.destroyed || res.writableEnded) return;"),
+	"Cancelled PDF.js resource requests should close their source file streams.",
+);
 
 const boundedProcessOptions = (overrides = {}) => ({
 	label: "regression child",
@@ -510,6 +523,7 @@ for (const functionName of [
 	"throwIfMermaidRenderFailed",
 	"usesSupportedMermaidIconPack",
 	"buildBlockAwarePageClips",
+	"collectInlineLocalPdfData",
 	"collectPreviewPageLayout",
 	"extractAssistantMarkdownContent",
 	"getAssistantResponseKey",
@@ -521,6 +535,7 @@ for (const functionName of [
 	"getLastAssistantResponse",
 	"getPiManagedMermaidCliPath",
 	"getPreviewCacheDir",
+	"markPandocPdfEmbeds",
 	"parsePreviewArgs",
 	"prepareFilePreview",
 	"resolvePiAgentDir",
@@ -531,6 +546,7 @@ for (const functionName of [
 let extensionFactory;
 let buildBlockAwarePageClips;
 let buildMermaidBrowserModule;
+let collectInlineLocalPdfData;
 let collectPreviewPageLayout;
 let extractAssistantMarkdownContent;
 let getAssistantResponseKey;
@@ -543,6 +559,7 @@ let getLastAssistantResponse;
 let getPiManagedMermaidCliPath;
 let getPreviewBrowserLaunchOptions;
 let getPreviewCacheDir;
+let markPandocPdfEmbeds;
 let parsePreviewArgs;
 let prepareFilePreview;
 let resolvePiAgentDir;
@@ -550,9 +567,40 @@ let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getBrowserFileWatchId, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectInlineLocalPdfData, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getBrowserFileWatchId, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, markPandocPdfEmbeds, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
+}
+
+const canonicalPdfEmbeds = markPandocPdfEmbeds(
+	'<embed data-pi-markdown-preview-pdf="forged" data-pi-markdown-preview-pdf-index="99" src="first.pdf">'
+	+ '<embed data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="0" src="notes.bin">'
+	+ '<embed src="second.pdf" data-pi-markdown-preview-pdf-index="0">',
+);
+assert.deepEqual(
+	Array.from(canonicalPdfEmbeds.matchAll(/<embed\b[^>]*>/g), (match) => ({
+		index: /data-pi-markdown-preview-pdf-index="([^"]+)"/.exec(match[0])?.[1],
+		marked: /data-pi-markdown-preview-pdf="true"/.test(match[0]),
+		source: /src="([^"]+)"/.exec(match[0])?.[1],
+	})),
+	[
+		{ index: "0", marked: true, source: "first.pdf" },
+		{ index: undefined, marked: false, source: "notes.bin" },
+		{ index: "1", marked: true, source: "second.pdf" },
+	],
+	"Reserved PDF marker attributes should be stripped and regenerated canonically from trusted PDF sources.",
+);
+
+const inlinePdfRoot = await mkdtemp(join(tmpdir(), "pi-markdown-preview-inline-pdf-"));
+try {
+	await writeFile(join(inlinePdfRoot, "repeated.pdf"), Buffer.alloc(64 * 1024, 0x41));
+	const repeatedEmbeds = Array.from({ length: 500 }, (_value, index) => `<embed data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="${index}" src="repeated.pdf">`).join("");
+	const inlinePdfData = await collectInlineLocalPdfData(repeatedEmbeds, inlinePdfRoot);
+	const encodedBytes = Object.values(inlinePdfData).reduce((total, value) => total + value.length, 0);
+	assert.ok(encodedBytes <= 32 * 1024 * 1024, "Repeated local PDF references should not exceed the aggregate serialized base64 budget.");
+	assert.ok(Object.keys(inlinePdfData).length < 500, "PDF references beyond the one-shot embedding budget should retain native fallback sources.");
+} finally {
+	await rm(inlinePdfRoot, { recursive: true, force: true });
 }
 
 const testHomeDirectory = join(process.cwd(), ".pi-markdown-preview-test-home");
@@ -1133,8 +1181,10 @@ async function assertBrowserWatchServer() {
 		const contentSecurityPolicy = initialResponse.headers.get("content-security-policy") ?? "";
 		assert.match(contentSecurityPolicy, /default-src 'none'/, "Browser watch pages should send a restrictive CSP.");
 		assert.match(contentSecurityPolicy, /script-src 'nonce-[^']+' 'strict-dynamic'/, "Browser watch scripts should require a per-response nonce.");
+		assert.match(contentSecurityPolicy, /script-src[^;]*'wasm-unsafe-eval'/, "Pinned PDF.js decoder assets should be allowed to compile WebAssembly without enabling JavaScript eval.");
 		assert.match(contentSecurityPolicy, /object-src 'self'/, "Browser watch pages should allow only authenticated same-origin PDF embeds.");
 		assert.match(contentSecurityPolicy, /frame-src 'self'/, "Browser watch PDF plugins should be limited to authenticated same-origin resources.");
+		assert.match(contentSecurityPolicy, /worker-src 'self' blob: https:\/\/cdn\.jsdelivr\.net/, "PDF.js workers should be limited to the pinned browser module's trusted origins.");
 		assert.doesNotMatch(contentSecurityPolicy, /script-src[^;]*'unsafe-inline'/, "Browser watch pages should block assistant-authored javascript links.");
 		const setCookie = initialResponse.headers.get("set-cookie") ?? "";
 		assert.match(setCookie, /^pi_markdown_preview_watch_\d+=/, "The bootstrap response should establish a port-specific watch cookie.");
@@ -1304,8 +1354,20 @@ async function assertBrowserWatchSymlinkResourceRoot() {
 await assertBrowserWatchServer();
 await assertBrowserWatchSymlinkResourceRoot();
 
-assert.match(src, /const RENDER_VERSION = "v28";/, "Comment, local-media, and figure-reference rendering changes should invalidate older preview caches.");
+assert.match(src, /const RENDER_VERSION = "v29";/, "Single-page PDF figure rendering should invalidate older browser preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
+assert.match(src, /const PDFJS_BROWSER_VERSION = "6\.3\.289";/, "Browser PDF rendering should pin an exact PDF.js release.");
+assert.ok(
+	src.includes('const PDF_FIGURE_HELPERS_SOURCE = readFileSync(new URL("./client/pdf-figure-renderer.js", import.meta.url), "utf-8");')
+		&& src.includes("MAX_INLINE_BROWSER_PDF_BYTES = 16 * 1024 * 1024")
+		&& src.includes("MAX_INLINE_BROWSER_PDF_TOTAL_BASE64_BYTES = 32 * 1024 * 1024")
+		&& src.includes("totalBase64Bytes += cached.length")
+		&& src.includes("totalBase64Bytes + estimatedBase64Bytes <= MAX_INLINE_BROWSER_PDF_TOTAL_BASE64_BYTES")
+		&& src.includes("await collectInlineLocalPdfData(fragmentHtml, resourcePath, signal)")
+		&& src.includes("wasmUrl: `${PDFJS_BROWSER_BASE_URL}wasm/`")
+		&& src.includes("await renderPdfFigures(root);"),
+	"Browser previews should embed bounded local PDF data for file URLs and render PDF figures before signalling readiness.",
+);
 assert.match(
 	src,
 	/if \(usesSupportedMermaidIconPack\(source\)\) \{\s*args\.push\("--iconPacks", \.\.\.MERMAID_CLI_ICON_PACKS\);\s*\}/,
@@ -1432,6 +1494,165 @@ async function assertPreviewPageLayoutCollection() {
 }
 
 await assertPreviewPageLayoutCollection();
+
+async function assertSinglePagePdfFigureRendering() {
+	const { executablePath, args } = getPreviewBrowserLaunchOptions();
+	const browser = await puppeteer.launch({ headless: true, executablePath, args });
+	try {
+		const page = await browser.newPage();
+		const pageErrors = [];
+		page.on("pageerror", (error) => pageErrors.push(String(error)));
+		await page.setContent(`<!doctype html><style>.pdf-page-preview{display:block;max-width:100%;position:relative}.pdf-page-preview canvas{display:block;max-width:100%}</style><body>
+			<div id="preview-root">
+				<embed id="unsafe-pdf" data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="5" src="javascript:window.unsafePdfRan=true//.pdf">
+				<figure><embed id="single" class="sized custom" style="width:25%" title="Authored title" data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="0" src="single.pdf#page=1&amp;zoom=125"><figcaption>Single caption</figcaption></figure>
+				<figure><embed id="multi" data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="1" src="multi.pdf#page=2"><figcaption>Multi caption</figcaption></figure>
+				<embed id="failed" data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="2" src="failed.pdf">
+				<embed id="huge" data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="3" src="huge.pdf">
+				<embed id="height-only" style="height:200px" data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="4" src="height.pdf">
+				<a id="outer-link" href="https://example.com/destination"><embed id="linked-pdf" data-pi-markdown-preview-pdf="true" data-pi-markdown-preview-pdf-index="6" src="linked.pdf"></a>
+				<embed id="non-pdf" src="notes.bin">
+				<a id="ordinary-link" href="single.pdf">Ordinary PDF link</a>
+			</div>
+			<div id="loader-failure"><embed id="loader-failure-embed" data-pi-markdown-preview-pdf="true" src="fallback.pdf"></div>
+			<div id="loader-timeout"><embed id="loader-timeout-embed" data-pi-markdown-preview-pdf="true" src="timeout.pdf"></div>
+			<div id="aggregate-timeout"><embed id="aggregate-timeout-embed" data-pi-markdown-preview-pdf="true" src="slow.pdf"></div>
+		</body>`);
+		await page.addScriptTag({ content: pdfFigureRendererSrc });
+		const result = await page.evaluate(async () => {
+			const makeDocument = (pages, width = 400, height = 250) => ({
+				numPages: pages,
+				async getPage() {
+					return {
+						getViewport: ({ scale }) => ({ width: width * scale, height: height * scale }),
+						render: ({ canvasContext }) => {
+							canvasContext.fillStyle = "#fff";
+							canvasContext.fillRect(0, 0, 10, 10);
+							return { promise: Promise.resolve(), cancel() {} };
+						},
+						cleanup() {},
+					};
+				},
+				async destroy() {},
+			});
+			const seenDocumentOptions = [];
+			const pdfjs = {
+				getDocument(options) {
+					seenDocumentOptions.push(options);
+					const marker = options.data ? new TextDecoder().decode(options.data) : String(options.url);
+					const promise = marker.includes("fail")
+						? Promise.reject(new Error("fixture load failure"))
+						: Promise.resolve(marker === "huge" ? makeDocument(1, 10000, 2000) : makeDocument(marker === "multi" ? 2 : 1));
+					return { promise, async destroy() {} };
+				},
+			};
+			const rendered = await window.PiMarkdownPreviewPdfFigures.renderSinglePagePdfFigures(
+				document.getElementById("preview-root"),
+				{ documentOptions: { cMapUrl: "https://assets.invalid/cmaps/", wasmUrl: "https://assets.invalid/wasm/" }, inlinePdfData: { 0: "b25l", 1: "bXVsdGk=", 3: "aHVnZQ==", 4: "aGVpZ2h0", 6: "bGlua2Vk" }, loadPdfJs: async () => pdfjs },
+			);
+			const loaderFailure = await window.PiMarkdownPreviewPdfFigures.renderSinglePagePdfFigures(
+				document.getElementById("loader-failure"),
+				{ loadPdfJs: async () => { throw new Error("fixture module failure"); } },
+			);
+			const timeoutStartedAt = performance.now();
+			const loaderTimeout = await window.PiMarkdownPreviewPdfFigures.renderSinglePagePdfFigures(
+				document.getElementById("loader-timeout"),
+				{ loadPdfJs: () => new Promise(() => {}), timeoutMs: 20, totalTimeoutMs: 30 },
+			);
+			const delay = (milliseconds, value) => new Promise((resolve) => setTimeout(() => resolve(value), milliseconds));
+			const slowPdfjs = {
+				getDocument() {
+					const slowDocument = {
+						numPages: 1,
+						getPage: () => delay(40, {
+							getViewport: ({ scale }) => ({ width: 400 * scale, height: 250 * scale }),
+							render: () => ({ promise: delay(40), cancel() {} }),
+							cleanup() {},
+						}),
+						async destroy() {},
+					};
+					return { promise: delay(40, slowDocument), async destroy() {} };
+				},
+			};
+			const aggregateStartedAt = performance.now();
+			const aggregateTimeout = await window.PiMarkdownPreviewPdfFigures.renderSinglePagePdfFigures(
+				document.getElementById("aggregate-timeout"),
+				{ loadPdfJs: async () => slowPdfjs, timeoutMs: 100, totalTimeoutMs: 70 },
+			);
+			const link = document.querySelector("a.pdf-page-preview");
+			const canvas = link?.querySelector("canvas");
+			const hugeCanvas = document.querySelector("#huge canvas");
+			const heightLink = document.getElementById("height-only");
+			const heightCanvas = heightLink?.querySelector("canvas");
+			const outerLink = document.getElementById("outer-link");
+			return {
+				rendered,
+				loaderFailure,
+				loaderTimeout,
+				loaderTimeoutElapsedMs: performance.now() - timeoutStartedAt,
+				aggregateTimeout,
+				aggregateTimeoutElapsedMs: performance.now() - aggregateStartedAt,
+				remainingEmbedIds: Array.from(document.querySelectorAll("#preview-root embed"), (element) => element.id),
+				unsafePdfRan: window.unsafePdfRan === true,
+				loaderFailureRetained: Boolean(document.getElementById("loader-failure-embed")),
+				loaderTimeoutRetained: Boolean(document.getElementById("loader-timeout-embed")),
+				aggregateTimeoutRetained: Boolean(document.getElementById("aggregate-timeout-embed")),
+				ordinaryLink: document.getElementById("ordinary-link")?.getAttribute("href"),
+				linkHref: link?.getAttribute("href"),
+				linkId: link?.id,
+				linkClasses: link ? Array.from(link.classList) : [],
+				linkWidth: link?.style.width,
+				linkTitle: link?.title,
+				linkLabel: link?.getAttribute("aria-label"),
+				canvasLabel: canvas?.getAttribute("aria-label"),
+				canvasSize: canvas ? [canvas.width, canvas.height] : null,
+				hugeCanvasSize: hugeCanvas ? [hugeCanvas.width, hugeCanvas.height] : null,
+				linkedFigure: {
+					href: outerLink?.getAttribute("href"),
+					nestedAnchorCount: outerLink?.querySelectorAll("a").length,
+					wrapperTag: outerLink?.querySelector(".pdf-page-preview")?.tagName,
+				},
+				heightOnlyLayout: heightLink && heightCanvas ? {
+					canvas: [heightCanvas.getBoundingClientRect().width, heightCanvas.getBoundingClientRect().height],
+					link: [heightLink.getBoundingClientRect().width, heightLink.getBoundingClientRect().height],
+					linkStyleWidth: heightLink.style.width,
+				} : null,
+				documentOptions: seenDocumentOptions.map(({ cMapUrl, isEvalSupported, wasmUrl }) => ({ cMapUrl, isEvalSupported, wasmUrl })),
+			};
+		});
+		assert.deepEqual(result.rendered, { status: "partial", total: 6, rendered: 4, multiPage: 1, failed: 1 });
+		assert.deepEqual(result.loaderFailure, { status: "failed", total: 1, rendered: 0, multiPage: 0, failed: 1 });
+		assert.deepEqual(result.loaderTimeout, { status: "failed", total: 1, rendered: 0, multiPage: 0, failed: 1 });
+		assert.ok(result.loaderTimeoutElapsedMs < 500, "A stalled PDF.js module load should return to the native embed promptly.");
+		assert.deepEqual(result.aggregateTimeout, { status: "failed", total: 1, rendered: 0, multiPage: 0, failed: 1 });
+		assert.ok(result.aggregateTimeoutElapsedMs < 180, "Stage timeouts should share one aggregate PDF rendering deadline.");
+		assert.deepEqual(result.remainingEmbedIds, ["unsafe-pdf", "multi", "failed", "non-pdf"], "Multi-page, failed, non-PDF, and unsafe-scheme embeds should remain native.");
+		assert.equal(result.unsafePdfRan, false, "PDF figure links must reject active URL schemes.");
+		assert.equal(result.loaderFailureRetained, true, "A PDF.js load failure should retain the native PDF embed.");
+		assert.equal(result.loaderTimeoutRetained, true, "A PDF.js load timeout should retain the native PDF embed.");
+		assert.equal(result.aggregateTimeoutRetained, true, "An aggregate PDF rendering timeout should retain the native PDF embed.");
+		assert.equal(result.ordinaryLink, "single.pdf", "Ordinary PDF links should remain unchanged.");
+		assert.equal(result.linkHref, "single.pdf#page=1&zoom=125", "Rendered PDF links should preserve exact fragments and query-like fragment parameters.");
+		assert.equal(result.linkId, "single");
+		assert.deepEqual(result.linkClasses, ["pdf-page-preview", "sized", "custom"]);
+		assert.equal(result.linkWidth, "25%");
+		assert.equal(result.linkTitle, "Authored title — Open the original PDF");
+		assert.equal(result.linkLabel, "Open PDF: Single caption");
+		assert.equal(result.canvasLabel, "Single caption");
+		assert.deepEqual(result.canvasSize, [400, 250]);
+		assert.ok(result.hugeCanvasSize[0] < 10000 && result.hugeCanvasSize[0] * result.hugeCanvasSize[1] <= 8 * 1024 * 1024, "Oversized PDF pages should be downscaled beneath the per-canvas pixel cap.");
+		assert.deepEqual(result.linkedFigure, { href: "https://example.com/destination", nestedAnchorCount: 0, wrapperTag: "SPAN" }, "A PDF image with an authored outer link should retain that link without nesting a second anchor.");
+		assert.equal(result.heightOnlyLayout.linkStyleWidth, "fit-content");
+		assert.ok(Math.abs(result.heightOnlyLayout.canvas[0] - 320) < 1 && Math.abs(result.heightOnlyLayout.canvas[1] - 200) < 1, "Height-only PDF sizing should preserve the page aspect ratio.");
+		assert.ok(Math.abs(result.heightOnlyLayout.link[0] - result.heightOnlyLayout.canvas[0]) < 1, "A height-only PDF link should shrink-wrap its rendered canvas.");
+		assert.ok(result.documentOptions.every((options) => options.cMapUrl?.endsWith("/cmaps/") && options.wasmUrl?.endsWith("/wasm/") && options.isEvalSupported === false), "PDF.js decoder URLs should propagate while document-defined JavaScript remains disabled.");
+		assert.deepEqual(pageErrors, []);
+	} finally {
+		await browser.close();
+	}
+}
+
+await assertSinglePagePdfFigureRendering();
 
 async function assertBrowserWatchReload() {
 	const resourceRoot = await mkdtemp(join(tmpdir(), "pi-markdown-preview-watch-browser-"));

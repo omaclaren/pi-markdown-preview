@@ -62,7 +62,7 @@ flowchart LR
   class github changed
 ```
 
-The browser renderer loads icon-pack JSON lazily from unpkg only when a diagram references that prefix, so first render requires network access. It contrast-corrects icon and shape labels against their rendered backgrounds while preserving semantic hues. PDF export forwards the same packs to Mermaid CLI 11.6+ only when a supported icon is present.
+The browser renderer loads icon-pack JSON lazily from unpkg only when a diagram references that prefix, so first render requires network access. It contrast-corrects icon and shape labels against their rendered backgrounds while preserving semantic hues. PDF export forwards the same packs to Mermaid CLI 11.6+ only when a supported icon is present. Browser previews likewise load a pinned PDF.js module from jsDelivr only when a PDF figure is present; if it cannot load or render a figure, the native PDF embed remains available.
 
 ## Install
 
@@ -107,7 +107,7 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 | `/preview-clear-cache` | Clear rendered preview cache |
 | `/preview --pick --browser` | Pick a response, open in browser |
 
-Local images and Pandoc PDF figure embeds are supported. File previews resolve relative paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, exact local media references—including parent-relative paths such as `../figures/plot.png`—are rewritten to opaque authenticated routes. The general relative-resource route remains restricted beneath the preview resource directory; watch mode never exposes an arbitrary filesystem route and serves only allowlisted image types plus explicitly referenced PDF embeds.
+Local images and Pandoc PDF figures are supported. In browser previews, a single-page PDF used with Markdown image syntax is rendered as a responsive page preview that links to the original PDF; multi-page PDFs retain the native browser viewer, as do single-page PDFs when page rendering is unavailable. Ordinary PDF links are unchanged, and PDF export continues to use the original vector file. File previews resolve relative paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, exact local media references—including parent-relative paths such as `../figures/plot.png`—are rewritten to opaque authenticated routes. The general relative-resource route remains restricted beneath the preview resource directory; watch mode never exposes an arbitrary filesystem route and serves only allowlisted image types plus explicitly referenced PDF embeds.
 
 Basic labelled-figure cross-references work consistently in terminal, browser, and PDF previews. Quarto syntax (`{#fig-elephant}` with `@fig-elephant`) and `pandoc-crossref` syntax (`{#fig:elephant}` with `@fig:elephant`) produce numbered captions and clickable **Figure N** references. This lightweight filter handles standalone captioned images and exact single references only; missing, duplicate, compound, or qualified references remain visibly unresolved. It does not emulate Quarto subfigures, project filters, chapter-aware numbering, or execution.
 

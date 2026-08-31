@@ -204,8 +204,9 @@ function getHtmlSecurityHeaders(scriptNonce) {
 			"frame-src 'self'",
 			"img-src 'self' data: http: https:",
 			"object-src 'self'",
-			`script-src 'nonce-${scriptNonce}' 'strict-dynamic' https://cdn.jsdelivr.net`,
+			`script-src 'nonce-${scriptNonce}' 'strict-dynamic' 'wasm-unsafe-eval' https://cdn.jsdelivr.net`,
 			"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+			"worker-src 'self' blob: https://cdn.jsdelivr.net",
 		].join("; "),
 	};
 }
@@ -754,6 +755,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			respondText(res, 404, "Preview resource not found.");
 			return;
 		}
+		if (req.aborted || res.destroyed || res.writableEnded) return;
 		res.writeHead(200, {
 			"Cache-Control": "no-store",
 			"Content-Length": String(resourceStat.size),
@@ -766,8 +768,22 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			res.end();
 			return;
 		}
+		if (req.aborted || res.destroyed || res.writableEnded) return;
 		const stream = createReadStream(resourcePath);
-		stream.once("error", () => res.destroy());
+		const destroyStream = () => {
+			if (!stream.destroyed) stream.destroy();
+		};
+		const removeStreamAbortListeners = () => {
+			req.off("aborted", destroyStream);
+			res.off("close", destroyStream);
+		};
+		req.once("aborted", destroyStream);
+		res.once("close", destroyStream);
+		stream.once("close", removeStreamAbortListeners);
+		stream.once("error", () => {
+			removeStreamAbortListeners();
+			res.destroy();
+		});
 		stream.pipe(res);
 	};
 
