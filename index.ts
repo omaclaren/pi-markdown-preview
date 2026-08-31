@@ -14,14 +14,15 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync, type Stats, unwatchFile, watchFile } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep, win32 as win32Path } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { Type, type TUnsafe } from "typebox";
+import { BoundedProcessError, isSpawnNotFoundError, runBoundedProcess } from "./shared/bounded-process.js";
 import {
 	hasMarkdownAnnotationMarkers,
 	isAnnotationWordChar,
@@ -104,6 +105,9 @@ const MAX_PREVIEW_PAGES = 30;
 const MIN_BLOCK_AWARE_PAGE_FILL_RATIO = 0.65;
 const MIN_PROTECTED_PAGE_FILL_RATIO = 0.2;
 const MAX_RENDER_HEIGHT_PX = PAGE_HEIGHT_PX * MAX_PREVIEW_PAGES;
+const DEFAULT_PANDOC_RENDER_TIMEOUT_MS = 30000;
+const MAX_RENDER_PROCESS_STDOUT_BYTES = 50 * 1024 * 1024;
+const MAX_RENDER_PROCESS_STDERR_BYTES = 5 * 1024 * 1024;
 const DEFAULT_PDF_RENDER_TIMEOUT_MS = 120000;
 const MIN_PDF_RENDER_TIMEOUT_MS = 10000;
 const MAX_PDF_RENDER_TIMEOUT_MS = 600000;
@@ -402,8 +406,75 @@ function getPandocLatexEngineOptions(engine: string): string[] {
 	return ["--pdf-engine-opt=-interaction=nonstopmode", "--pdf-engine-opt=-halt-on-error"];
 }
 
-function formatTimeoutMs(timeoutMs: number): string {
-	return timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}s` : `${timeoutMs}ms`;
+function needsWindowsCommandShell(command: string): boolean {
+	return process.platform === "win32" && /\.(?:bat|cmd)$/i.test(command.trim());
+}
+
+async function runPandocProcess(
+	args: string[],
+	input: string,
+	options: { label: string; timeoutMs: number; signal?: AbortSignal },
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: Buffer; stdout: Buffer }> {
+	const pandocCommand = process.env.PANDOC_PATH?.trim() || "pandoc";
+	try {
+		return await runBoundedProcess(pandocCommand, args, {
+			input,
+			label: options.label,
+			maxStderrBytes: MAX_RENDER_PROCESS_STDERR_BYTES,
+			maxStdoutBytes: MAX_RENDER_PROCESS_STDOUT_BYTES,
+			windowsCmdShim: needsWindowsCommandShell(pandocCommand),
+			signal: options.signal,
+			timeoutMs: options.timeoutMs,
+		});
+	} catch (error) {
+		if (isSpawnNotFoundError(error)) {
+			throw new Error("pandoc was not found. Install pandoc or set PANDOC_PATH to the pandoc binary.", { cause: error });
+		}
+		if (error instanceof BoundedProcessError && error.kind === "aborted") {
+			throw new Error("Preview rendering cancelled.", { cause: error });
+		}
+		throw error;
+	}
+}
+
+function formatProcessExit(code: number | null, signal: NodeJS.Signals | null): string {
+	return code === null ? `signal ${signal ?? "unknown"}` : `exit code ${code}`;
+}
+
+function throwIfPreviewCancelled(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new Error("Preview rendering cancelled.");
+}
+
+function rethrowRenderProcessError(error: unknown, signal?: AbortSignal): never {
+	if (signal?.aborted || (error instanceof BoundedProcessError && error.kind === "aborted")) {
+		throw new Error("Preview rendering cancelled.", { cause: error });
+	}
+	throw error;
+}
+
+function getArtifactStagingPath(filePath: string): string {
+	const extension = extname(filePath);
+	const stem = extension ? filePath.slice(0, -extension.length) : filePath;
+	return `${stem}.${process.pid}.${randomBytes(6).toString("hex")}.tmp${extension}`;
+}
+
+async function publishArtifactFiles(
+	artifacts: Array<{ content: string | Buffer; filePath: string }>,
+	signal?: AbortSignal,
+): Promise<void> {
+	const staged = artifacts.map((artifact) => ({ ...artifact, stagingPath: getArtifactStagingPath(artifact.filePath) }));
+	try {
+		await Promise.all(staged.map(async (artifact) => {
+			await mkdir(dirname(artifact.filePath), { recursive: true });
+			await writeFile(artifact.stagingPath, artifact.content, { signal });
+		}));
+		throwIfPreviewCancelled(signal);
+		// Publication is intentionally an uninterruptible, rename-only commit after
+		// the last cancellation check, so cancellation cannot leave partial files.
+		for (const artifact of staged) await rename(artifact.stagingPath, artifact.filePath);
+	} finally {
+		await Promise.all(staged.map((artifact) => unlink(artifact.stagingPath).catch(() => {})));
+	}
 }
 
 function toHexByte(value: number): string {
@@ -996,6 +1067,7 @@ async function resolvePreviewInput(
 		inputFormat?: PreviewInputFormat;
 		resourcePath?: string;
 	},
+	signal?: AbortSignal,
 ): Promise<ResolvedPreviewInput> {
 	const source = options.source ?? (options.markdown !== undefined ? "markdown" : options.path ? "file" : "last_assistant");
 
@@ -1004,7 +1076,7 @@ async function resolvePreviewInput(
 			throw new Error("preview_export source=file requires path.");
 		}
 		const filePath = resolveUserPath(ctx, options.path);
-		const fileContent = await readFile(filePath, "utf-8");
+		const fileContent = await readFile(filePath, { encoding: "utf-8", signal });
 		const prepared = prepareFilePreview(filePath, fileContent);
 		return {
 			...prepared,
@@ -2056,7 +2128,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 
 	await mkdir(CACHE_DIR, { recursive: true });
 
-	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex);
+	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex, signal);
 	const html = buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx);
 
 	let browserPage: Page | undefined;
@@ -2568,63 +2640,26 @@ async function openFileInDefaultBrowser(pathOrUrl: string, preferCmuxBrowser = f
 	});
 }
 
-async function renderMarkdownToHtmlWithPandoc(markdown: string, resourcePath?: string, isLatex?: boolean): Promise<string> {
-	const pandocCommand = process.env.PANDOC_PATH?.trim() || "pandoc";
+async function renderMarkdownToHtmlWithPandoc(
+	markdown: string,
+	resourcePath?: string,
+	isLatex?: boolean,
+	signal?: AbortSignal,
+): Promise<string> {
 	const pandocInput = isLatex ? markdown : normalizeMarkdownFencedBlocks(markdown);
 	const inputFormat = isLatex ? "latex" : "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris-raw_html-raw_attribute";
 	const args = ["-f", inputFormat, "-t", "html5", "--mathml", "--wrap=none"];
 	if (!isLatex) args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
-	return await new Promise<string>((resolve, reject) => {
-		const child = spawn(pandocCommand, args, { stdio: ["pipe", "pipe", "pipe"] });
-		const stdoutChunks: Buffer[] = [];
-		const stderrChunks: Buffer[] = [];
-		let settled = false;
-
-		const fail = (error: Error) => {
-			if (settled) return;
-			settled = true;
-			reject(error);
-		};
-		const succeed = (html: string) => {
-			if (settled) return;
-			settled = true;
-			resolve(html);
-		};
-
-		child.stdout.on("data", (chunk: Buffer | string) => {
-			stdoutChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-		});
-		child.stderr.on("data", (chunk: Buffer | string) => {
-			stderrChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-		});
-
-		child.once("error", (error) => {
-			const errno = error as NodeJS.ErrnoException;
-			if (errno.code === "ENOENT") {
-				fail(
-					new Error(
-						`pandoc was not found. Install pandoc or set PANDOC_PATH to the pandoc binary.`,
-					),
-				);
-				return;
-			}
-			fail(error);
-		});
-
-		child.once("close", (code) => {
-			if (settled) return;
-			if (code === 0) {
-				succeed(Buffer.concat(stdoutChunks).toString("utf-8"));
-				return;
-			}
-			const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
-			fail(new Error(`pandoc failed with exit code ${code}${stderr ? `: ${stderr}` : ""}`));
-		});
-
-		child.stdin.end(pandocInput);
+	const result = await runPandocProcess(args, pandocInput, {
+		label: "pandoc HTML render",
+		signal,
+		timeoutMs: DEFAULT_PANDOC_RENDER_TIMEOUT_MS,
 	});
+	if (result.code === 0) return result.stdout.toString("utf-8");
+	const stderr = result.stderr.toString("utf-8").trim();
+	throw new Error(`pandoc failed with ${formatProcessExit(result.code, result.signal)}${stderr ? `: ${stderr}` : ""}`);
 }
 
 const PDF_PREAMBLE = `% Optional styling: keep PDF export usable on smaller TeX installs.
@@ -2706,101 +2741,75 @@ async function ensurePdfPreamble(): Promise<string> {
 	return PDF_PREAMBLE_PATH;
 }
 
-async function compileLatexToPdf(latexSource: string, outputPath: string, resourcePath?: string): Promise<void> {
+async function compileLatexToPdf(
+	latexSource: string,
+	outputPath: string,
+	resourcePath?: string,
+	signal?: AbortSignal,
+): Promise<void> {
 	const engine = process.env.PANDOC_PDF_ENGINE?.trim() || "xelatex";
 	const tmpDir = join(CACHE_DIR, `_latex_${Date.now()}`);
+	throwIfPreviewCancelled(signal);
 	await mkdir(tmpDir, { recursive: true });
 
 	const texPath = join(tmpDir, "input.tex");
-	await writeFile(texPath, latexSource, "utf-8");
+	await writeFile(texPath, latexSource, { encoding: "utf-8", signal });
 
-	// Symlink resource directory contents so \includegraphics can find figures
+	// Symlink resource directory contents so \includegraphics can find figures.
 	if (resourcePath) {
 		const { readdirSync } = await import("node:fs");
 		try {
 			for (const entry of readdirSync(resourcePath)) {
+				throwIfPreviewCancelled(signal);
 				const src = join(resourcePath, entry);
 				const dest = join(tmpDir, entry);
 				try { await import("node:fs/promises").then(fs => fs.symlink(src, dest)); } catch { /* ignore collisions */ }
 			}
-		} catch { /* resource dir unreadable, skip */ }
+		} catch (error) {
+			throwIfPreviewCancelled(signal);
+			// A resource directory that cannot be read is non-fatal; TeX will report
+			// any genuinely missing figure with its normal actionable diagnostic.
+		}
 	}
 
-	return await new Promise<void>((resolve, reject) => {
-		// Run twice for cross-references (\ref, \eqref, \label)
-		const runLatex = (pass: number) => {
-			const child = spawn(engine, [
+	// Run twice for cross-references (\ref, \eqref, \label).
+	for (let pass = 1; pass <= 2; pass++) {
+		let result;
+		try {
+			result = await runBoundedProcess(engine, [
 				"-interaction=nonstopmode",
 				"-halt-on-error",
 				"-output-directory", tmpDir,
 				texPath,
-			], { stdio: ["pipe", "pipe", "pipe"], cwd: tmpDir });
-
-			const stderrChunks: Buffer[] = [];
-			const stdoutChunks: Buffer[] = [];
-			let passSettled = false;
-			const timeoutMs = getPdfRenderTimeoutMs();
-			const timeout = setTimeout(() => {
-				if (passSettled) return;
-				passSettled = true;
-				child.kill("SIGTERM");
-				reject(new Error(`${engine} timed out after ${formatTimeoutMs(timeoutMs)} on pass ${pass}.`));
-			}, timeoutMs);
-			timeout.unref?.();
-
-			child.stdout.on("data", (chunk: Buffer | string) => {
-				stdoutChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+			], {
+				cwd: tmpDir,
+				label: `${engine} pass ${pass}`,
+				maxStderrBytes: MAX_RENDER_PROCESS_STDERR_BYTES,
+				maxStdoutBytes: MAX_RENDER_PROCESS_STDOUT_BYTES,
+				windowsCmdShim: needsWindowsCommandShell(engine),
+				signal,
+				timeoutMs: getPdfRenderTimeoutMs(),
 			});
-			child.stderr.on("data", (chunk: Buffer | string) => {
-				stderrChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-			});
+		} catch (error) {
+			if (isSpawnNotFoundError(error)) {
+				throw new Error(`${engine} was not found. Install TeX Live (brew install --cask mactex) or set PANDOC_PDF_ENGINE.`, { cause: error });
+			}
+			rethrowRenderProcessError(error, signal);
+		}
+		if (result.code !== 0 && pass === 2) {
+			const log = `${result.stdout.toString("utf-8")}\n${result.stderr.toString("utf-8")}`;
+			const errorMatch = log.match(/^! .+$/m);
+			const hint = errorMatch ? errorMatch[0] : log.trim().slice(-2000);
+			throw new Error(`${engine} failed (${formatProcessExit(result.code, result.signal)})${hint ? `: ${hint}` : ""}`);
+		}
+	}
 
-			child.once("error", (error) => {
-				if (passSettled) return;
-				passSettled = true;
-				clearTimeout(timeout);
-				const errno = error as NodeJS.ErrnoException;
-				if (errno.code === "ENOENT") {
-					reject(new Error(
-						`${engine} was not found. Install TeX Live (brew install --cask mactex) or set PANDOC_PDF_ENGINE.`,
-					));
-					return;
-				}
-				reject(error);
-			});
-
-			child.once("close", (code) => {
-				if (passSettled) return;
-				passSettled = true;
-				clearTimeout(timeout);
-				if (code !== 0 && pass === 2) {
-					const log = `${Buffer.concat(stdoutChunks).toString("utf-8")}\n${Buffer.concat(stderrChunks).toString("utf-8")}`;
-					// Extract the first LaTeX error line for a useful message
-					const errorMatch = log.match(/^! .+$/m);
-					const hint = errorMatch ? errorMatch[0] : log.trim().slice(-2000);
-					reject(new Error(`${engine} failed (exit ${code})${hint ? `: ${hint}` : ""}`));
-					return;
-				}
-				if (pass === 1) {
-					runLatex(2);
-				} else {
-					// Copy PDF to output path
-					const generatedPdf = join(tmpDir, "input.pdf");
-					import("node:fs/promises").then(fs =>
-						fs.copyFile(generatedPdf, outputPath).then(() => resolve())
-					).catch(reject);
-				}
-			});
-
-			child.stdin.end();
-		};
-
-		runLatex(1);
-	});
+	throwIfPreviewCancelled(signal);
+	const generatedPdf = join(tmpDir, "input.pdf");
+	await import("node:fs/promises").then(fs => fs.copyFile(generatedPdf, outputPath));
 }
 
-async function renderMarkdownToPdf(markdown: string, outputPath: string, resourcePath?: string): Promise<void> {
-	const pandocCommand = process.env.PANDOC_PATH?.trim() || "pandoc";
+async function renderMarkdownToPdf(markdown: string, outputPath: string, resourcePath?: string, signal?: AbortSignal): Promise<void> {
 	const pandocInput = normalizeMarkdownFencedBlocks(markdown);
 	const pdfEngine = process.env.PANDOC_PDF_ENGINE?.trim() || "xelatex";
 	const preamblePath = await ensurePdfPreamble();
@@ -2819,64 +2828,19 @@ async function renderMarkdownToPdf(markdown: string, outputPath: string, resourc
 	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
-	return await new Promise<void>((resolve, reject) => {
-		const child = spawn(pandocCommand, args, { stdio: ["pipe", "pipe", "pipe"] });
-		const stdoutChunks: Buffer[] = [];
-		const stderrChunks: Buffer[] = [];
-		let settled = false;
-		const timeoutMs = getPdfRenderTimeoutMs();
-		const timeout = setTimeout(() => {
-			child.kill("SIGTERM");
-			fail(new Error(`pandoc PDF export timed out after ${formatTimeoutMs(timeoutMs)}.`));
-		}, timeoutMs);
-		timeout.unref?.();
-
-		const fail = (error: Error) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			reject(error);
-		};
-
-		child.stdout.on("data", (chunk: Buffer | string) => {
-			stdoutChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-		});
-		child.stderr.on("data", (chunk: Buffer | string) => {
-			stderrChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-		});
-
-		child.once("error", (error) => {
-			const errno = error as NodeJS.ErrnoException;
-			if (errno.code === "ENOENT") {
-				fail(
-					new Error(
-						`pandoc was not found. Install pandoc or set PANDOC_PATH to the pandoc binary.`,
-					),
-				);
-				return;
-			}
-			fail(error);
-		});
-
-		child.once("close", (code) => {
-			if (settled) return;
-			clearTimeout(timeout);
-			if (code === 0) {
-				settled = true;
-				resolve();
-				return;
-			}
-			const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
-			const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
-			const details = stderr || stdout.slice(-4000);
-			const hint = details.includes("not found") || details.includes("pdflatex") || details.includes("xelatex") || details.includes(".sty")
-				? "\nPDF export requires a LaTeX engine and common LaTeX packages. Install a fuller TeX Live package set (e.g. texlive-latexextra on Arch) or set PANDOC_PDF_ENGINE to your preferred engine."
-				: "";
-			fail(new Error(`pandoc PDF export failed with exit code ${code}${details ? `: ${details}` : ""}${hint}`));
-		});
-
-		child.stdin.end(pandocInput);
+	const result = await runPandocProcess(args, pandocInput, {
+		label: "pandoc PDF export",
+		signal,
+		timeoutMs: getPdfRenderTimeoutMs(),
 	});
+	if (result.code === 0) return;
+	const stderr = result.stderr.toString("utf-8").trim();
+	const stdout = result.stdout.toString("utf-8").trim();
+	const details = stderr || stdout.slice(-4000);
+	const hint = details.includes("not found") || details.includes("pdflatex") || details.includes("xelatex") || details.includes(".sty")
+		? "\nPDF export requires a LaTeX engine and common LaTeX packages. Install a fuller TeX Live package set (e.g. texlive-latexextra on Arch) or set PANDOC_PDF_ENGINE to your preferred engine."
+		: "";
+	throw new Error(`pandoc PDF export failed with ${formatProcessExit(result.code, result.signal)}${details ? `: ${details}` : ""}${hint}`);
 }
 
 function isGeneratedDiffHighlightingBlock(lines: string[]): boolean {
@@ -3057,8 +3021,7 @@ function rewriteGeneratedDiffHighlighting(latex: string): string {
 	return out.join("\n");
 }
 
-async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath: string, resourcePath?: string): Promise<void> {
-	const pandocCommand = process.env.PANDOC_PATH?.trim() || "pandoc";
+async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath: string, resourcePath?: string, signal?: AbortSignal): Promise<void> {
 	const pandocInput = normalizeMarkdownFencedBlocks(markdown);
 	const preamblePath = await ensurePdfPreamble();
 	const args = [
@@ -3075,61 +3038,17 @@ async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath
 	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
-	const generatedLatex = await new Promise<string>((resolve, reject) => {
-		const child = spawn(pandocCommand, args, { stdio: ["pipe", "pipe", "pipe"] });
-		const stdoutChunks: Buffer[] = [];
-		const stderrChunks: Buffer[] = [];
-		let settled = false;
-		const timeoutMs = getPdfRenderTimeoutMs();
-		const timeout = setTimeout(() => {
-			child.kill("SIGTERM");
-			fail(new Error(`pandoc LaTeX generation timed out after ${formatTimeoutMs(timeoutMs)}.`));
-		}, timeoutMs);
-		timeout.unref?.();
-
-		const fail = (error: Error) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			reject(error);
-		};
-
-		child.stdout.on("data", (chunk: Buffer | string) => {
-			stdoutChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-		});
-		child.stderr.on("data", (chunk: Buffer | string) => {
-			stderrChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-		});
-
-		child.once("error", (error) => {
-			const errno = error as NodeJS.ErrnoException;
-			if (errno.code === "ENOENT") {
-				fail(
-					new Error(
-						`pandoc was not found. Install pandoc or set PANDOC_PATH to the pandoc binary.`,
-					),
-				);
-				return;
-			}
-			fail(error);
-		});
-
-		child.once("close", (code) => {
-			if (settled) return;
-			if (code === 0) {
-				settled = true;
-				clearTimeout(timeout);
-				resolve(Buffer.concat(stdoutChunks).toString("utf-8"));
-				return;
-			}
-			const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
-			fail(new Error(`pandoc LaTeX generation failed with exit code ${code}${stderr ? `: ${stderr}` : ""}`));
-		});
-
-		child.stdin.end(pandocInput);
+	const result = await runPandocProcess(args, pandocInput, {
+		label: "pandoc LaTeX generation",
+		signal,
+		timeoutMs: getPdfRenderTimeoutMs(),
 	});
+	if (result.code !== 0) {
+		const stderr = result.stderr.toString("utf-8").trim();
+		throw new Error(`pandoc LaTeX generation failed with ${formatProcessExit(result.code, result.signal)}${stderr ? `: ${stderr}` : ""}`);
+	}
 
-	await compileLatexToPdf(rewriteGeneratedDiffHighlighting(generatedLatex), outputPath, resourcePath);
+	await compileLatexToPdf(rewriteGeneratedDiffHighlighting(result.stdout.toString("utf-8")), outputPath, resourcePath, signal);
 }
 
 class MermaidCliMissingError extends Error {}
@@ -3159,73 +3078,85 @@ function usesSupportedMermaidIconPack(source: string): boolean {
 	return /@\{[^\r\n}]*\bicon\s*:\s*["'](?:lucide|logos):/.test(source);
 }
 
-async function renderMermaidDiagramForPdf(source: string, outputPath: string): Promise<void> {
+async function hasCompletePdfStructure(filePath: string): Promise<boolean> {
+	let handle: Awaited<ReturnType<typeof open>> | undefined;
+	try {
+		handle = await open(filePath, "r");
+		const metadata = await handle.stat();
+		if (!metadata.isFile() || metadata.size < 8) return false;
+		const header = Buffer.alloc(Math.min(1024, metadata.size));
+		const tail = Buffer.alloc(Math.min(4096, metadata.size));
+		const headerRead = await handle.read(header, 0, header.length, 0);
+		const tailRead = await handle.read(tail, 0, tail.length, metadata.size - tail.length);
+		return header.subarray(0, headerRead.bytesRead).includes(Buffer.from("%PDF-"))
+			&& tail.subarray(0, tailRead.bytesRead).includes(Buffer.from("%%EOF"));
+	} catch {
+		return false;
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+}
+
+async function renderMermaidDiagramForPdf(source: string, outputPath: string, signal?: AbortSignal): Promise<void> {
 	const mermaidCommand = getMermaidCliCommand();
 	const mermaidTheme = getMermaidPdfTheme();
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-markdown-preview-mermaid-"));
 	const inputPath = join(tempDir, "diagram.mmd");
+	const renderedPath = join(tempDir, "diagram.pdf");
+	const stagingPath = `${outputPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 
+	throwIfPreviewCancelled(signal);
 	await mkdir(dirname(outputPath), { recursive: true });
 
 	try {
-		await writeFile(inputPath, source, "utf-8");
-		await new Promise<void>((resolve, reject) => {
-			const args = ["-i", inputPath, "-o", outputPath, "-t", mermaidTheme, "-f"];
-			if (usesSupportedMermaidIconPack(source)) {
-				args.push("--iconPacks", ...MERMAID_CLI_ICON_PACKS);
+		await writeFile(inputPath, source, { encoding: "utf-8", signal });
+		const args = ["-i", inputPath, "-o", renderedPath, "-t", mermaidTheme, "-f"];
+		if (usesSupportedMermaidIconPack(source)) {
+			args.push("--iconPacks", ...MERMAID_CLI_ICON_PACKS);
+		}
+		let result;
+		try {
+			result = await runBoundedProcess(mermaidCommand, args, {
+				label: "Mermaid CLI",
+				maxStderrBytes: MAX_RENDER_PROCESS_STDERR_BYTES,
+				maxStdoutBytes: MAX_RENDER_PROCESS_STDOUT_BYTES,
+				// npm exposes mmdc as a .cmd shim on Windows, including when it is
+				// discovered through PATH without an explicit extension.
+				windowsCmdShim: process.platform === "win32",
+				signal,
+				timeoutMs: getPdfRenderTimeoutMs(),
+			});
+		} catch (error) {
+			if (isSpawnNotFoundError(error)) {
+				throw new MermaidCliMissingError(
+					"Mermaid CLI (mmdc) not found. Install with `npm install -g @mermaid-js/mermaid-cli` or set MERMAID_CLI_PATH.",
+				);
 			}
-			const child = spawn(mermaidCommand, args, { stdio: ["ignore", "ignore", "pipe"] });
-			const stderrChunks: Buffer[] = [];
-			let settled = false;
-			const timeoutMs = getPdfRenderTimeoutMs();
-			const timeout = setTimeout(() => {
-				child.kill("SIGTERM");
-				fail(new Error(`Mermaid CLI timed out after ${formatTimeoutMs(timeoutMs)}.`));
-			}, timeoutMs);
-			timeout.unref?.();
-
-			const fail = (error: Error) => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timeout);
-				reject(error);
-			};
-
-			child.stderr.on("data", (chunk: Buffer | string) => {
-				stderrChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-			});
-
-			child.once("error", (error) => {
-				const errno = error as NodeJS.ErrnoException;
-				if (errno.code === "ENOENT") {
-					fail(
-						new MermaidCliMissingError(
-							"Mermaid CLI (mmdc) not found. Install with `npm install -g @mermaid-js/mermaid-cli` or set MERMAID_CLI_PATH.",
-						),
-					);
-					return;
-				}
-				fail(error);
-			});
-
-			child.once("close", (code) => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timeout);
-				if (code === 0) {
-					resolve();
-					return;
-				}
-				const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
-				reject(new Error(`Mermaid CLI failed with exit code ${code}${stderr ? `: ${stderr}` : ""}`));
-			});
-		});
+			rethrowRenderProcessError(error, signal);
+		}
+		if (result.code !== 0) {
+			const stderr = result.stderr.toString("utf-8").trim();
+			throw new Error(`Mermaid CLI failed with ${formatProcessExit(result.code, result.signal)}${stderr ? `: ${stderr}` : ""}`);
+		}
+		if (!await hasCompletePdfStructure(renderedPath)) throw new Error("Mermaid CLI did not produce a complete PDF.");
+		throwIfPreviewCancelled(signal);
+		await copyFile(renderedPath, stagingPath);
+		throwIfPreviewCancelled(signal);
+		try {
+			await rename(stagingPath, outputPath);
+		} catch (error) {
+			const systemError = error as NodeJS.ErrnoException;
+			if ((systemError.code === "EEXIST" || systemError.code === "EPERM") && await hasCompletePdfStructure(outputPath)) return;
+			await unlink(outputPath).catch(() => {});
+			await rename(stagingPath, outputPath);
+		}
 	} finally {
+		await unlink(stagingPath).catch(() => {});
 		await rm(tempDir, { recursive: true, force: true }).catch(() => {});
 	}
 }
 
-async function preprocessMermaidForPdf(markdown: string): Promise<MermaidPdfPreprocessResult> {
+async function preprocessMermaidForPdf(markdown: string, signal?: AbortSignal): Promise<MermaidPdfPreprocessResult> {
 	const mermaidRegex = /```mermaid[^\n]*\n([\s\S]*?)```/gi;
 	const matches: Array<{ start: number; end: number; raw: string; source: string; number: number }> = [];
 	let match: RegExpExecArray | null;
@@ -3260,12 +3191,13 @@ async function preprocessMermaidForPdf(markdown: string): Promise<MermaidPdfPrep
 	const mermaidTheme = getMermaidPdfTheme();
 
 	for (const block of matches) {
+		throwIfPreviewCancelled(signal);
 		if (renderedBySource.has(block.source)) continue;
 
 		const hash = createHash("sha256")
 			.update(RENDER_VERSION)
 			.update("\u0000")
-			.update("pdf-mermaid")
+			.update("pdf-mermaid-v2")
 			.update("\u0000")
 			.update(mermaidTheme)
 			.update("\u0000")
@@ -3274,8 +3206,11 @@ async function preprocessMermaidForPdf(markdown: string): Promise<MermaidPdfPrep
 		const outputPath = join(MERMAID_PDF_CACHE_DIR, `${hash}.pdf`);
 
 		if (existsSync(outputPath)) {
-			renderedBySource.set(block.source, outputPath);
-			continue;
+			if (await hasCompletePdfStructure(outputPath)) {
+				renderedBySource.set(block.source, outputPath);
+				continue;
+			}
+			await unlink(outputPath).catch(() => {});
 		}
 
 		if (missingCli) {
@@ -3284,9 +3219,12 @@ async function preprocessMermaidForPdf(markdown: string): Promise<MermaidPdfPrep
 		}
 
 		try {
-			await renderMermaidDiagramForPdf(block.source, outputPath);
+			await renderMermaidDiagramForPdf(block.source, outputPath, signal);
 			renderedBySource.set(block.source, outputPath);
 		} catch (error) {
+			if (signal?.aborted || (error instanceof BoundedProcessError && error.kind === "aborted")) {
+				rethrowRenderProcessError(error, signal);
+			}
 			if (error instanceof MermaidCliMissingError) {
 				missingCli = true;
 			}
@@ -3330,12 +3268,13 @@ async function renderPreviewPdfToFile(
 	resourcePath?: string,
 	isLatex?: boolean,
 	onWarning?: (message: string) => void,
+	signal?: AbortSignal,
 ): Promise<string> {
 	const markdownWithoutHtmlComments = isLatex ? markdown : stripMarkdownHtmlCommentsPreservingYamlFrontMatter(markdown);
 	const normalizedMarkdown = isLatex
 		? markdownWithoutHtmlComments
 		: normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments))));
-	const mermaidPrepared = isLatex ? { markdown: normalizedMarkdown, found: 0, replaced: 0, failed: 0, missingCli: false } : await preprocessMermaidForPdf(normalizedMarkdown);
+	const mermaidPrepared = isLatex ? { markdown: normalizedMarkdown, found: 0, replaced: 0, failed: 0, missingCli: false } : await preprocessMermaidForPdf(normalizedMarkdown, signal);
 
 	if (mermaidPrepared.missingCli) {
 		onWarning?.("Mermaid CLI (mmdc) not found; Mermaid blocks are kept as code in PDF. Install @mermaid-js/mermaid-cli or set MERMAID_CLI_PATH.");
@@ -3354,14 +3293,23 @@ async function renderPreviewPdfToFile(
 		.update(markdownForPdf)
 		.digest("hex");
 	const pdfPath = outputPath ?? join(CACHE_DIR, `${hash}.pdf`);
+	const stagingPath = getArtifactStagingPath(pdfPath);
 
+	throwIfPreviewCancelled(signal);
 	await mkdir(dirname(pdfPath), { recursive: true });
-	if (isLatex) {
-		await compileLatexToPdf(markdownForPdf, pdfPath, resourcePath);
-	} else if (hasMarkdownDiffFence(markdownForPdf)) {
-		await renderMarkdownToPdfViaGeneratedLatex(markdownForPdf, pdfPath, resourcePath);
-	} else {
-		await renderMarkdownToPdf(markdownForPdf, pdfPath, resourcePath);
+	try {
+		if (isLatex) {
+			await compileLatexToPdf(markdownForPdf, stagingPath, resourcePath, signal);
+		} else if (hasMarkdownDiffFence(markdownForPdf)) {
+			await renderMarkdownToPdfViaGeneratedLatex(markdownForPdf, stagingPath, resourcePath, signal);
+		} else {
+			await renderMarkdownToPdf(markdownForPdf, stagingPath, resourcePath, signal);
+		}
+		if (!await hasCompletePdfStructure(stagingPath)) throw new Error("PDF renderer did not produce a complete PDF.");
+		throwIfPreviewCancelled(signal);
+		await rename(stagingPath, pdfPath);
+	} finally {
+		await unlink(stagingPath).catch(() => {});
 	}
 	return pdfPath;
 }
@@ -4251,10 +4199,11 @@ async function renderPreviewHtmlDocument(
 	resourcePath?: string,
 	isLatex?: boolean,
 	fontSizePx?: number,
+	signal?: AbortSignal,
 ): Promise<{ html: string; normalizedMarkdown: string; fontSizePx: number }> {
 	const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
 	const { normalizedMarkdown, pandocMarkdown, annotationPlaceholders } = prepareBrowserPreviewMarkdown(markdown, isLatex);
-	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex);
+	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex, signal);
 	return {
 		html: buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx),
 		normalizedMarkdown,
@@ -4269,8 +4218,9 @@ async function renderPreviewHtmlToFile(
 	isLatex?: boolean,
 	fontSizePx?: number,
 	outputPath?: string,
+	signal?: AbortSignal,
 ): Promise<string> {
-	const rendered = await renderPreviewHtmlDocument(markdown, style, resourcePath, isLatex, fontSizePx);
+	const rendered = await renderPreviewHtmlDocument(markdown, style, resourcePath, isLatex, fontSizePx, signal);
 	const hash = createHash("sha256")
 		.update(RENDER_VERSION)
 		.update("\u0000")
@@ -4286,8 +4236,8 @@ async function renderPreviewHtmlToFile(
 		.digest("hex");
 	const htmlPath = outputPath ?? join(CACHE_DIR, `${hash}.html`);
 
-	await mkdir(dirname(htmlPath), { recursive: true });
-	await writeFile(htmlPath, rendered.html, "utf-8");
+	throwIfPreviewCancelled(signal);
+	await publishArtifactFiles([{ content: rendered.html, filePath: htmlPath }], signal);
 	return htmlPath;
 }
 
@@ -4333,10 +4283,10 @@ async function renderPreviewPngFiles(
 	const basePath = outputPath ?? join(CACHE_DIR, `${hash}.png`);
 	const paths = buildPagedPngOutputPaths(basePath, preview.pages.length);
 
-	await Promise.all(paths.map((filePath, index) => (async () => {
-		await mkdir(dirname(filePath), { recursive: true });
-		await writeFile(filePath, Buffer.from(preview.pages[index]!.base64Png, "base64"));
-	})()));
+	await publishArtifactFiles(paths.map((filePath, index) => ({
+		content: Buffer.from(preview.pages[index]!.base64Png, "base64"),
+		filePath,
+	})), signal);
 
 	return {
 		paths,
@@ -4597,6 +4547,7 @@ export default function (pi: ExtensionAPI) {
 		fontSizePx: number;
 		lastRenderKey: string;
 		pendingRenderKey?: string;
+		renderAbortController?: AbortController;
 		renderGeneration: number;
 		renderInFlight?: Promise<boolean>;
 		renderQueued: boolean;
@@ -4615,6 +4566,7 @@ export default function (pi: ExtensionAPI) {
 		sourceLabel: string;
 		requestedFontSizePx: number;
 		promise: Promise<void>;
+		renderAbortController?: AbortController;
 		server?: BrowserWatchServer;
 		fileSource?: FileBrowserWatchSource;
 	}
@@ -4735,7 +4687,20 @@ export default function (pi: ExtensionAPI) {
 		agentEndFallbackTimer = undefined;
 	};
 
+	const beginBrowserWatchRender = (owner: BrowserWatchState | ProvisionalBrowserWatch): AbortController => {
+		owner.renderAbortController?.abort();
+		const controller = new AbortController();
+		owner.renderAbortController = controller;
+		return controller;
+	};
+
+	const finishBrowserWatchRender = (owner: BrowserWatchState | ProvisionalBrowserWatch, controller: AbortController) => {
+		if (owner.renderAbortController === controller) owner.renderAbortController = undefined;
+	};
+
 	const invalidateBrowserWatch = (watch: BrowserWatchState) => {
+		watch.renderAbortController?.abort();
+		watch.renderAbortController = undefined;
 		watch.renderGeneration += 1;
 		watch.renderQueued = false;
 		watch.forceRenderQueued = false;
@@ -4781,6 +4746,8 @@ export default function (pi: ExtensionAPI) {
 		pendingBrowserWatchCleanups.delete(id);
 		if (id === RESPONSE_BROWSER_WATCH_ID) clearResponseWatchFallback();
 		if (activeWatch) invalidateBrowserWatch(activeWatch);
+		provisionalWatch?.renderAbortController?.abort();
+		if (provisionalWatch) provisionalWatch.renderAbortController = undefined;
 
 		const resources: BrowserWatchCleanupResource[] = [
 			...existingCleanups,
@@ -4835,6 +4802,10 @@ export default function (pi: ExtensionAPI) {
 		browserWatchOperationOwners.clear();
 		clearResponseWatchFallback();
 		for (const watch of activeWatches) invalidateBrowserWatch(watch);
+		for (const watch of provisionalWatches) {
+			watch.renderAbortController?.abort();
+			watch.renderAbortController = undefined;
+		}
 
 		const results = await Promise.allSettled(resources.map((resource) => cleanupBrowserWatchResources(resource.server, resource.source)));
 		const cleanupErrors: unknown[] = [];
@@ -4899,8 +4870,9 @@ export default function (pi: ExtensionAPI) {
 
 		activeWatch.pendingRenderKey = renderKey;
 		const renderGeneration = ++activeWatch.renderGeneration;
+		const renderController = beginBrowserWatchRender(activeWatch);
 		try {
-			const rendered = await renderPreviewHtmlDocument(response.markdown, style, activeWatch.resourcePath, false, activeWatch.fontSizePx);
+			const rendered = await renderPreviewHtmlDocument(response.markdown, style, activeWatch.resourcePath, false, activeWatch.fontSizePx, renderController.signal);
 			if (!isBrowserWatchActive(activeWatch) || activeWatch.renderGeneration !== renderGeneration || activeWatch.source.kind !== "responses") return false;
 			activeWatch.server.updateDocument(rendered.html, {
 				appendToHistory: response.responseKey !== activeWatch.source.lastResponseKey,
@@ -4916,6 +4888,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			return false;
 		} finally {
+			finishBrowserWatchRender(activeWatch, renderController);
 			if (activeWatch.pendingRenderKey === renderKey) activeWatch.pendingRenderKey = undefined;
 		}
 	};
@@ -4952,8 +4925,8 @@ export default function (pi: ExtensionAPI) {
 		return renderPromise;
 	};
 
-	const readBrowserFileWatchSnapshot = async (filePath: string) => {
-		const fileContent = await readFile(filePath, "utf-8");
+	const readBrowserFileWatchSnapshot = async (filePath: string, signal?: AbortSignal) => {
+		const fileContent = await readFile(filePath, { encoding: "utf-8", signal });
 		const prepared = prepareFilePreview(filePath, fileContent);
 		const contentHash = createHash("sha256").update(fileContent).digest("hex");
 		return { ...prepared, contentHash };
@@ -4974,47 +4947,39 @@ export default function (pi: ExtensionAPI) {
 	): Promise<boolean> => {
 		if (!isBrowserWatchActive(activeWatch) || activeWatch.source.kind !== "file") return false;
 		const refreshSequence = ++activeWatch.source.refreshSequence;
-
-		let snapshot: Awaited<ReturnType<typeof readBrowserFileWatchSnapshot>>;
+		const renderController = beginBrowserWatchRender(activeWatch);
+		let renderKey: string | undefined;
 		try {
-			snapshot = await readBrowserFileWatchSnapshot(activeWatch.source.filePath);
-		} catch (error) {
+			const snapshot = await readBrowserFileWatchSnapshot(activeWatch.source.filePath, renderController.signal);
 			if (
-				isBrowserWatchActive(activeWatch)
-				&& activeWatch.source.kind === "file"
-				&& activeWatch.source.refreshSequence === refreshSequence
-			) notifyBrowserFileWatchError(ctx, activeWatch, error);
-			return false;
-		}
-		if (
-			!isBrowserWatchActive(activeWatch)
-			|| activeWatch.source.kind !== "file"
-			|| activeWatch.source.refreshSequence !== refreshSequence
-		) return false;
+				!isBrowserWatchActive(activeWatch)
+				|| activeWatch.source.kind !== "file"
+				|| activeWatch.source.refreshSequence !== refreshSequence
+			) return false;
 
-		const style = getPreviewStyle(ctx.ui.theme);
-		const renderKey = getBrowserWatchRenderKey(
-			`file:${snapshot.contentHash}`,
-			snapshot.markdown,
-			style,
-			activeWatch.resourcePath,
-			activeWatch.fontSizePx,
-			snapshot.isLatex,
-		);
-		if (!force && renderKey === activeWatch.lastRenderKey) {
-			activeWatch.source.lastError = undefined;
-			return false;
-		}
+			const style = getPreviewStyle(ctx.ui.theme);
+			renderKey = getBrowserWatchRenderKey(
+				`file:${snapshot.contentHash}`,
+				snapshot.markdown,
+				style,
+				activeWatch.resourcePath,
+				activeWatch.fontSizePx,
+				snapshot.isLatex,
+			);
+			if (!force && renderKey === activeWatch.lastRenderKey) {
+				activeWatch.source.lastError = undefined;
+				return false;
+			}
 
-		activeWatch.pendingRenderKey = renderKey;
-		const renderGeneration = ++activeWatch.renderGeneration;
-		try {
+			activeWatch.pendingRenderKey = renderKey;
+			const renderGeneration = ++activeWatch.renderGeneration;
 			const rendered = await renderPreviewHtmlDocument(
 				snapshot.markdown,
 				style,
 				activeWatch.resourcePath,
 				snapshot.isLatex,
 				activeWatch.fontSizePx,
+				renderController.signal,
 			);
 			if (!isBrowserWatchActive(activeWatch) || activeWatch.renderGeneration !== renderGeneration || activeWatch.source.kind !== "file") return false;
 			activeWatch.server.updateDocument(rendered.html, {
@@ -5029,12 +4994,16 @@ export default function (pi: ExtensionAPI) {
 			scheduleBrowserFileWatchRefresh(ctx, activeWatch);
 			return true;
 		} catch (error) {
-			if (isBrowserWatchActive(activeWatch) && activeWatch.renderGeneration === renderGeneration) {
-				notifyBrowserFileWatchError(ctx, activeWatch, error);
-			}
+			if (
+				isBrowserWatchActive(activeWatch)
+				&& activeWatch.source.kind === "file"
+				&& activeWatch.source.refreshSequence === refreshSequence
+				&& !renderController.signal.aborted
+			) notifyBrowserFileWatchError(ctx, activeWatch, error);
 			return false;
 		} finally {
-			if (activeWatch.pendingRenderKey === renderKey) activeWatch.pendingRenderKey = undefined;
+			finishBrowserWatchRender(activeWatch, renderController);
+			if (renderKey && activeWatch.pendingRenderKey === renderKey) activeWatch.pendingRenderKey = undefined;
 		}
 	};
 
@@ -5130,8 +5099,13 @@ export default function (pi: ExtensionAPI) {
 			let html: string;
 			let renderKey: string;
 			if (response) {
-				const rendered = await renderPreviewHtmlDocument(response.markdown, style, resourcePath, false, previewFontSizePx);
-				html = rendered.html;
+				const renderController = beginBrowserWatchRender(provisional);
+				try {
+					const rendered = await renderPreviewHtmlDocument(response.markdown, style, resourcePath, false, previewFontSizePx, renderController.signal);
+					html = rendered.html;
+				} finally {
+					finishBrowserWatchRender(provisional, renderController);
+				}
 				renderKey = getBrowserWatchRenderKey(response.responseKey, response.markdown, style, resourcePath, previewFontSizePx);
 			} else {
 				html = buildBrowserHtmlFromPandocFragment(
@@ -5251,10 +5225,19 @@ export default function (pi: ExtensionAPI) {
 
 		let newWatch: BrowserWatchState | undefined;
 		const startPromise = (async () => {
-			const snapshot = await readBrowserFileWatchSnapshot(filePath);
+			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) return;
+			const renderController = beginBrowserWatchRender(provisional);
+			let snapshot: Awaited<ReturnType<typeof readBrowserFileWatchSnapshot>>;
+			let rendered: Awaited<ReturnType<typeof renderPreviewHtmlDocument>>;
 			const resourcePath = dirname(filePath);
 			const style = getPreviewStyle(ctx.ui.theme);
-			const rendered = await renderPreviewHtmlDocument(snapshot.markdown, style, resourcePath, snapshot.isLatex, previewFontSizePx);
+			try {
+				snapshot = await readBrowserFileWatchSnapshot(filePath, renderController.signal);
+				if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) return;
+				rendered = await renderPreviewHtmlDocument(snapshot.markdown, style, resourcePath, snapshot.isLatex, previewFontSizePx, renderController.signal);
+			} finally {
+				finishBrowserWatchRender(provisional, renderController);
+			}
 			const renderKey = getBrowserWatchRenderKey(
 				`file:${snapshot.contentHash}`,
 				snapshot.markdown,
@@ -5527,7 +5510,7 @@ export default function (pi: ExtensionAPI) {
 					return { content: [{ type: "text", text: "Preview export cancelled." }], details: undefined };
 				}
 
-				const input = await resolvePreviewInput(ctx, params);
+				const input = await resolvePreviewInput(ctx, params, signal);
 				const outputPath = params.outputPath?.trim() ? resolveUserPath(ctx, params.outputPath) : undefined;
 				const warnings: string[] = [];
 				const format = params.format;
@@ -5546,10 +5529,10 @@ export default function (pi: ExtensionAPI) {
 					const pdfPath = await renderPreviewPdfToFile(input.markdown, outputPath, input.resourcePath, input.isLatex, (message) => {
 						warnings.push(message);
 						onUpdate?.({ content: [{ type: "text", text: message }], details: undefined });
-					});
+					}, signal);
 					paths = [pdfPath];
 				} else if (format === "html") {
-					const htmlPath = await renderPreviewHtmlToFile(input.markdown, style, input.resourcePath, input.isLatex, params.fontSizePx, outputPath);
+					const htmlPath = await renderPreviewHtmlToFile(input.markdown, style, input.resourcePath, input.isLatex, params.fontSizePx, outputPath, signal);
 					paths = [htmlPath];
 				} else {
 					const pngResult = await renderPreviewPngFiles(input.markdown, style, outputPath, input.resourcePath, input.isLatex, params.fontSizePx, signal);
@@ -5558,6 +5541,7 @@ export default function (pi: ExtensionAPI) {
 					truncatedPages = pngResult.truncatedPages;
 				}
 
+				throwIfPreviewCancelled(signal);
 				if (params.open && paths.length > 0) {
 					const toOpen = format === "png" ? [paths[0]!] : paths;
 					for (const filePath of toOpen) {

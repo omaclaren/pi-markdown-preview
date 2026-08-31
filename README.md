@@ -121,7 +121,7 @@ Response watch mode is deliberately completion-level rather than token-streaming
 
 Up to eight browser preview watchers can run per Pi session: multiple canonical file paths plus at most one assistant-response watcher. Each has an independent loopback server, authentication token, history, resource root, render state, and cleanup lifecycle. Repeating the same source reopens its existing watcher rather than duplicating it, and file and response watchers may coexist. Use `--list` to inspect them, a path or `--responses` to stop one, and `--all` to stop every watcher. Bare `--stop` retains the convenient old behaviour when zero or one watcher exists but makes no change when several are running.
 
-Watch history starts with the initial preview and retains the latest 20 completed responses or successfully rendered file versions. Use the browser’s Back/Forward buttons or the **Previous**, **Next**, and **Latest** controls to move between them. **Option/Alt+Left** and **Option/Alt+Right** are shortcuts for Previous and Next when focus is outside an editable field. Auto-follow continues while the latest preview is open; when viewing an older one, the page stays put and marks **Latest (new)** as new responses or file versions arrive. Use `/preview --pick --browser` for assistant responses from before a response watcher started.
+Watch history starts with the initial preview and retains up to the latest 20 completed responses or successfully rendered file versions, subject to a 32 MiB aggregate HTML cap per watcher; the newest successful revision is always retained. Use the browser’s Back/Forward buttons or the **Previous**, **Next**, and **Latest** controls to move between them. **Option/Alt+Left** and **Option/Alt+Right** are shortcuts for Previous and Next when focus is outside an editable field. Auto-follow continues while the latest preview is open; when viewing an older one, the page stays put and marks **Latest (new)** as new responses or file versions arrive. Use `/preview --pick --browser` for assistant responses from before a response watcher started.
 
 ### LLM-callable artifact export
 
@@ -201,6 +201,8 @@ Set `PANDOC_PATH` if pandoc is not on your `PATH`:
 ```bash
 export PANDOC_PATH=/usr/local/bin/pandoc
 ```
+
+Pandoc HTML conversion is bounded to 30 seconds, 50 MiB of standard output, and 5 MiB of diagnostics so a broken subprocess cannot stall or exhaust a preview session. Stopping a browser watcher cancels its active Pandoc process tree.
 
 Set `PANDOC_PDF_ENGINE` to override the LaTeX engine used for PDF export (default: `xelatex`):
 

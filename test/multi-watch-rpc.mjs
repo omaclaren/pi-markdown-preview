@@ -216,12 +216,17 @@ try {
 	await writeFile(raceFile, "# Stop-during-start race\n");
 	await writeFile(pandocDelayFile, "delay");
 	const opensBeforeRace = (await openedUrls()).length;
-	const staleStart = sendCommand(`/preview-browser -w --file ${JSON.stringify(raceFile)}`);
+	let staleStartSettledAt = 0;
+	const staleStart = sendCommand(`/preview-browser -w --file ${JSON.stringify(raceFile)}`).finally(() => {
+		staleStartSettledAt = Date.now();
+	});
 	await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+	const stopIssuedAt = Date.now();
 	const targetedStop = sendCommand(`/preview-browser --stop --file ${JSON.stringify(raceFile)}`);
 	await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
 	const replacementStart = sendCommand(`/preview-browser -w --file ${JSON.stringify(raceFile)}`);
 	await Promise.all([staleStart, targetedStop, replacementStart]);
+	assert.ok(staleStartSettledAt - stopIssuedAt < 450, "Stopping a provisional watcher should cancel its in-flight Pandoc render rather than waiting for it.");
 	await rm(pandocDelayFile, { force: true });
 	await waitOpenCount(opensBeforeRace + 1);
 	await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));

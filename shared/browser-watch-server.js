@@ -11,6 +11,7 @@ const RESOURCE_PREFIX = "/__pi_markdown_preview_resource__/";
 const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const DEFAULT_HISTORY_LIMIT = 20;
+const DEFAULT_HISTORY_BYTE_LIMIT = 32 * 1024 * 1024;
 
 function escapeBrowserWatchHtmlText(value) {
 	return value
@@ -557,7 +558,7 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  *
  * @param {string} initialHtml
  * @param {string} resourceRoot
- * @param {{ historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string }} [options]
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const token = randomBytes(24).toString("base64url");
@@ -566,6 +567,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	const historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
 	if (!Number.isInteger(historyLimit) || historyLimit < 1) {
 		throw new Error("Browser preview watch history limit must be a positive integer.");
+	}
+	const historyByteLimit = options.historyByteLimit ?? DEFAULT_HISTORY_BYTE_LIMIT;
+	if (!Number.isSafeInteger(historyByteLimit) || historyByteLimit < 1) {
+		throw new Error("Browser preview watch history byte limit must be a positive safe integer.");
 	}
 	/** @type {Set<import("node:http").ServerResponse>} */
 	const eventClients = new Set();
@@ -579,9 +584,23 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			absoluteImages.set(imageId, { path: absolutePath, contentType });
 			return `${ABSOLUTE_IMAGE_PREFIX}${imageId}`;
 		});
-		return { revision: documentRevision, html: rewrittenHtml, absoluteImages };
+		return {
+			revision: documentRevision,
+			html: rewrittenHtml,
+			absoluteImages,
+			byteSize: Buffer.byteLength(rewrittenHtml, "utf8"),
+		};
 	};
 	let documents = [buildDocument(1, initialHtml)];
+	let historyBytes = documents[0].byteSize;
+	const pruneHistory = () => {
+		while (documents.length > historyLimit) documents.shift();
+		historyBytes = documents.reduce((total, document) => total + document.byteSize, 0);
+		while (documents.length > 1 && historyBytes > historyByteLimit) {
+			historyBytes -= documents[0].byteSize;
+			documents.shift();
+		}
+	};
 	let revision = 1;
 	let hasHistoryDocument = options.initialDocumentIsHistory !== false;
 	let port = 0;
@@ -797,6 +816,9 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		get historySize() {
 			return documents.length;
 		},
+		get historyBytes() {
+			return historyBytes;
+		},
 		updateDocument(html, { appendToHistory = true } = {}) {
 			if (closed) return documents[documents.length - 1].revision;
 			revision += 1;
@@ -807,7 +829,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				documents[documents.length - 1] = nextDocument;
 			}
 			if (appendToHistory) hasHistoryDocument = true;
-			if (documents.length > historyLimit) documents = documents.slice(-historyLimit);
+			pruneHistory();
 			for (const client of eventClients) {
 				if (client.writableEnded || client.destroyed) {
 					eventClients.delete(client);

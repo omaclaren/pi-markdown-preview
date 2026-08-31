@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, win32 as win32Path } from "node:path";
@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
 import { Check } from "typebox/value";
+import { BoundedProcessError, buildWindowsCmdCommandLine, isSpawnNotFoundError, runBoundedProcess } from "../shared/bounded-process.js";
 import {
 	createBrowserWatchServer,
 	getBrowserWatchAbsoluteImagePath,
@@ -24,6 +25,119 @@ import {
 
 const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
+const boundedProcessSrc = readFileSync(resolve(process.cwd(), "shared", "bounded-process.js"), "utf-8");
+assert.match(boundedProcessSrc, /child\.stdout\.on\("error"/);
+assert.match(boundedProcessSrc, /child\.stderr\.on\("error"/);
+assert.match(boundedProcessSrc, /process\.kill\(-processId, "SIGKILL"\)/, "POSIX cancellation should terminate the child process group.");
+assert.match(boundedProcessSrc, /spawnSync\("taskkill", \["\/pid", String\(processId\), "\/T", "\/F"\]/, "Windows cancellation should terminate the child process tree.");
+assert.equal(
+	buildWindowsCmdCommandLine("C:\\Program Files\\Pandoc & Tools\\pandoc.cmd", ["--output", "C:\\Preview Files\\result | final.pdf"]),
+	'""C:\\Program Files\\Pandoc & Tools\\pandoc.cmd" "--output" "C:\\Preview Files\\result | final.pdf""',
+	"Windows command-shim invocation should quote every argument and preserve shell metacharacters literally.",
+);
+assert.throws(() => buildWindowsCmdCommandLine("pandoc.cmd", ["%TEMP%\\result.pdf"]), /percent expansion/);
+
+const boundedProcessOptions = (overrides = {}) => ({
+	label: "regression child",
+	maxStderrBytes: 1024,
+	maxStdoutBytes: 1024,
+	timeoutMs: 5000,
+	...overrides,
+});
+const boundedSuccess = await runBoundedProcess(
+	process.execPath,
+	["-e", "process.stdout.write('out'); process.stderr.write('err')"],
+	boundedProcessOptions(),
+);
+assert.equal(boundedSuccess.code, 0);
+assert.equal(boundedSuccess.stdout.toString("utf8"), "out");
+assert.equal(boundedSuccess.stderr.toString("utf8"), "err");
+const earlyExit = await runBoundedProcess(
+	process.execPath,
+	["-e", "process.exit(7)"],
+	boundedProcessOptions({ input: Buffer.alloc(8 * 1024 * 1024) }),
+);
+assert.equal(earlyExit.code, 7, "An early child exit should report its status without an unhandled stdin EPIPE.");
+const closesStdinSuccessfully = () => runBoundedProcess(
+	process.execPath,
+	["-e", "process.stdin.destroy(); process.exit(0)"],
+	boundedProcessOptions({ input: Buffer.alloc(8 * 1024 * 1024) }),
+);
+if (process.versions.bun) {
+	// Bun currently reports a successful stdin flush when the child closes without
+	// reading; ensure the compatibility runtime at least observes the stream and
+	// does not crash. Real Pandoc consumes its input before returning success.
+	await closesStdinSuccessfully();
+} else {
+	await assert.rejects(
+		closesStdinSuccessfully(),
+		(error) => error instanceof BoundedProcessError && error.kind === "stdin",
+		"A child must not report success after closing stdin before its full input was delivered.",
+	);
+}
+await assert.rejects(
+	runBoundedProcess(process.execPath, ["-e", "setInterval(() => {}, 1000)"], boundedProcessOptions({ timeoutMs: 30 })),
+	(error) => error instanceof BoundedProcessError && error.kind === "timeout",
+	"Bounded subprocesses should be killed at their deadline.",
+);
+const descendantMarker = join(tmpdir(), `pi-markdown-preview-descendant-${process.pid}-${Date.now()}`);
+await rm(descendantMarker, { force: true });
+let treeCommand;
+let treeArgs;
+if (process.platform === "win32") {
+	const descendantSource = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(descendantMarker)}, 'survived'), 500)`;
+	const parentSource = [
+		"const { spawn } = require('node:child_process');",
+		`const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantSource)}], { stdio: 'inherit' });`,
+		"child.unref();",
+		"setInterval(() => {}, 1000);",
+	].join(" ");
+	treeCommand = process.execPath;
+	treeArgs = ["-e", parentSource];
+} else {
+	treeCommand = "/bin/sh";
+	treeArgs = [
+		"-c",
+		'(sleep 0.5; printf survived > "$1") & exit 0',
+		"bounded-process-tree",
+		descendantMarker,
+	];
+}
+await assert.rejects(
+	runBoundedProcess(treeCommand, treeArgs, boundedProcessOptions({ timeoutMs: 150 })),
+	(error) => error instanceof BoundedProcessError && error.kind === "timeout",
+	"Terminating a bounded process should terminate its subprocess tree.",
+);
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
+assert.equal(existsSync(descendantMarker), false, "A timed-out process must not leave a descendant running after its parent is killed.");
+await rm(descendantMarker, { force: true });
+const abortController = new AbortController();
+const abortedProcess = runBoundedProcess(
+	process.execPath,
+	["-e", "setInterval(() => {}, 1000)"],
+	boundedProcessOptions({ signal: abortController.signal }),
+);
+abortController.abort();
+await assert.rejects(
+	abortedProcess,
+	(error) => error instanceof BoundedProcessError && error.kind === "aborted",
+	"Bounded subprocesses should honor cancellation.",
+);
+await assert.rejects(
+	runBoundedProcess(process.execPath, ["-e", "process.stdout.write('x'.repeat(2048))"], boundedProcessOptions()),
+	(error) => error instanceof BoundedProcessError && error.kind === "stdout-limit",
+	"Bounded subprocesses should reject oversized stdout.",
+);
+await assert.rejects(
+	runBoundedProcess(process.execPath, ["-e", "process.stderr.write('x'.repeat(2048))"], boundedProcessOptions()),
+	(error) => error instanceof BoundedProcessError && error.kind === "stderr-limit",
+	"Bounded subprocesses should reject oversized stderr.",
+);
+await assert.rejects(
+	runBoundedProcess(join(tmpdir(), "pi-markdown-preview-missing-command"), [], boundedProcessOptions()),
+	(error) => isSpawnNotFoundError(error),
+	"Spawn failures should preserve ENOENT for actionable Pandoc guidance.",
+);
 
 assert.doesNotMatch(
 	src,
@@ -64,8 +178,10 @@ assert.ok(
 		&& src.includes("const canonicalPath = await realpath(filePath);")
 		&& src.includes("const MAX_BROWSER_WATCHES = 8;")
 		&& src.includes("if (activeWatch.renderInFlight) return activeWatch.renderInFlight;")
-		&& src.includes("if (responseOverride !== undefined) responseSource.queuedResponseOverride = responseOverride;"),
-	"Browser file watch should isolate canonical paths, retain failed cleanup ownership, coalesce rendering, and preserve explicit response fallbacks.",
+		&& src.includes("if (responseOverride !== undefined) responseSource.queuedResponseOverride = responseOverride;")
+		&& src.includes("readBrowserFileWatchSnapshot(activeWatch.source.filePath, renderController.signal)")
+		&& src.includes("readBrowserFileWatchSnapshot(filePath, renderController.signal)"),
+	"Browser file watch should isolate canonical paths, retain failed cleanup ownership, coalesce rendering, preserve explicit response fallbacks, and cancel both active and provisional reads.",
 );
 assert.match(
 	src,
@@ -131,14 +247,43 @@ assert.ok(
 	src.includes("--pdf-engine-opt=-interaction=nonstopmode") && src.includes("--pdf-engine-opt=-halt-on-error"),
 	"PDF export should pass non-interactive LaTeX engine options when using LaTeX engines.",
 );
-assert.match(
-	src,
-	/child\.stdout\.on\("data", \(chunk: Buffer \| string\) => \{\s*stdoutChunks\.push/s,
-	"PDF subprocess stdout should be drained so verbose LaTeX output cannot block the command.",
+assert.match(boundedProcessSrc, /child\.stdout\.on\("data"/, "Render subprocess stdout should be drained and bounded.");
+assert.match(boundedProcessSrc, /child\.stderr\.on\("data"/, "Render subprocess stderr should be drained and bounded.");
+assert.ok(
+	src.includes("PI_MARKDOWN_PREVIEW_PDF_TIMEOUT_MS")
+		&& src.includes('label: "pandoc PDF export"')
+		&& src.includes("runPandocProcess(args, pandocInput"),
+	"PDF export should use the configurable timeout through the bounded Pandoc runner.",
 );
 assert.ok(
-	src.includes("PI_MARKDOWN_PREVIEW_PDF_TIMEOUT_MS") && src.includes("pandoc PDF export timed out"),
-	"PDF export should have a configurable timeout instead of hanging indefinitely.",
+	src.includes("DEFAULT_PANDOC_RENDER_TIMEOUT_MS = 30000")
+		&& src.includes("MAX_RENDER_PROCESS_STDOUT_BYTES = 50 * 1024 * 1024")
+		&& src.includes("MAX_RENDER_PROCESS_STDERR_BYTES = 5 * 1024 * 1024"),
+	"HTML and PDF Pandoc subprocesses should have explicit time and output bounds.",
+);
+assert.ok(
+	src.includes('windowsCmdShim: process.platform === "win32"')
+		&& src.includes("windowsCmdShim: needsWindowsCommandShell(pandocCommand)")
+		&& src.includes("windowsCmdShim: needsWindowsCommandShell(engine)"),
+	"Windows .cmd/.bat wrappers should use a command shell in every bounded render path.",
+);
+assert.ok(
+	src.includes("renderPreviewPdfToFile(input.markdown, outputPath")
+		&& src.includes("}, signal);")
+		&& src.includes("renderPreviewHtmlToFile(input.markdown, style, input.resourcePath, input.isLatex, params.fontSizePx, outputPath, signal)")
+		&& src.includes("await publishArtifactFiles([{ content: rendered.html, filePath: htmlPath }], signal);")
+		&& src.includes("await publishArtifactFiles(paths.map((filePath, index) => ({")
+		&& src.includes("const stagingPath = getArtifactStagingPath(pdfPath);")
+		&& src.includes("throwIfPreviewCancelled(signal);\n\t\t\t\tif (params.open"),
+	"preview_export should propagate cancellation, publish HTML/PDF/PNG through staging files, and refuse to open a cancelled artifact.",
+);
+assert.ok(
+	src.includes("const stagingPath = `${outputPath}.${process.pid}.${randomBytes(6).toString(\"hex\")}.tmp`;")
+		&& src.includes("if (!await hasCompletePdfStructure(renderedPath))")
+		&& src.includes('Buffer.from("%%EOF")')
+		&& src.includes('.update("pdf-mermaid-v2")')
+		&& src.includes("await rename(stagingPath, outputPath);"),
+	"Mermaid PDF cache entries should be validated and published atomically from a staging file.",
 );
 
 assert.match(
@@ -948,6 +1093,29 @@ async function assertBrowserWatchServer() {
 		/positive integer/,
 		"Browser watch should reject an invalid history bound.",
 	);
+	await assert.rejects(
+		createBrowserWatchServer(initialHtml, resourceRoot, { historyByteLimit: 0 }),
+		/positive safe integer/,
+		"Browser watch should reject an invalid history byte bound.",
+	);
+	const boundedHistoryHtml = (revision) => `<p>${"x".repeat(128)}${revision}</p>`;
+	const twoDocumentByteLimit = Buffer.byteLength(boundedHistoryHtml(1), "utf8") * 2;
+	const byteBoundedServer = await createBrowserWatchServer(boundedHistoryHtml(1), resourceRoot, {
+		historyByteLimit: twoDocumentByteLimit,
+		historyLimit: 20,
+	});
+	try {
+		byteBoundedServer.updateDocument(boundedHistoryHtml(2));
+		byteBoundedServer.updateDocument(boundedHistoryHtml(3));
+		assert.deepEqual(byteBoundedServer.revisions, [2, 3], "History byte pruning should evict the oldest successful document first.");
+		assert.equal(byteBoundedServer.historySize, 2);
+		assert.ok(byteBoundedServer.historyBytes <= twoDocumentByteLimit);
+		byteBoundedServer.updateDocument(`<p>${"y".repeat(twoDocumentByteLimit * 2)}</p>`);
+		assert.deepEqual(byteBoundedServer.revisions, [4], "The latest revision should remain available even when it alone exceeds the history byte cap.");
+		assert.ok(byteBoundedServer.historyBytes > twoDocumentByteLimit);
+	} finally {
+		await byteBoundedServer.close();
+	}
 
 	const server = await createBrowserWatchServer(initialHtml, resourceRoot);
 	try {
