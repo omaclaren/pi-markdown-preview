@@ -3794,6 +3794,8 @@ body {
   border-radius: 8px;
   padding: 12px 14px;
   overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 #preview-root code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;

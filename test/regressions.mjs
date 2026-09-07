@@ -363,6 +363,7 @@ assert.match(src, /const ANNOTATION_HELPERS_SOURCE = readFileSync\(new URL\("\.\
 assert.match(src, /function prepareBrowserPreviewMarkdown\s*\(/, "Missing browser preview annotation preparation helper.");
 assert.match(src, /prepareMarkdownForPandocPreview\(normalizedMarkdown, PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX\)/, "Browser preview should replace prose annotations with placeholders before pandoc.");
 assert.match(src, /buildBrowserHtmlFromPandocFragment\(fragmentHtml, style, resourcePath, annotationPlaceholders(?:,\s*(?:previewFontSizePx|fontSizePx))?\)/, "Browser preview HTML builder should receive annotation placeholders.");
+assert.match(src, /#preview-root pre \{[\s\S]*?white-space: pre-wrap;[\s\S]*?overflow-wrap: anywhere;/, "Browser code fences should wrap while preserving source indentation and newlines.");
 
 assert.match(src, /function escapeLatexText\s*\(/, "Missing PDF annotation LaTeX escaping helper.");
 assert.match(src, /function getMathPattern\s*\(/, "Missing shared PDF annotation math-pattern helper.");
@@ -1494,6 +1495,100 @@ async function assertPreviewPageLayoutCollection() {
 }
 
 await assertPreviewPageLayoutCollection();
+
+async function assertPreviewExportHtmlBrowserWrapping() {
+	const fixtureMarkdown = [
+		"Prose with a long token: " + "G".repeat(180) + " and more prose.",
+		"",
+		"```",
+		"export fence line 1",
+		"    export fence line 2 with spaces",
+		"\texport fence line 3 with a tab",
+		"export fence line 4 " + "H".repeat(120),
+		"```",
+		"",
+		"```ts",
+		"const exportHighlighted = \"" + "I".repeat(120) + "\";",
+		"```",
+		"",
+		"```diff",
+		"- export removed " + "J".repeat(120),
+		"+ export added " + "K".repeat(120),
+		"```",
+	].join("\n");
+	const exportArtifactDir = await mkdtemp(join(tmpdir(), "pi-markdown-preview-export-"));
+	try {
+		const registrations = collectExtensionRegistrations();
+		const previewExportTool = registrations.toolDefinitions.find((definition) => definition.name === "preview_export");
+		assert.ok(previewExportTool, "preview_export should be registered in the modified checkout.");
+		const ctx = { cwd: process.cwd(), ui: { theme: undefined } };
+		const updates = [];
+		const outputPath = join(exportArtifactDir, "exported.html");
+		const result = await previewExportTool.execute("wrap-export-test", {
+			format: "html",
+			source: "markdown",
+			markdown: fixtureMarkdown,
+			outputPath,
+			fontSizePx: 15,
+		}, undefined, (update) => {
+			const text = update.content?.[0]?.type === "text" ? update.content[0].text : "";
+			if (text) updates.push(text);
+		}, ctx);
+		assert.match(result.content[0].type === "text" ? result.content[0].text : "", /Exported HTML preview from provided markdown\./);
+		assert.equal(result.details?.format, "html");
+		assert.equal(result.details?.paths?.length, 1);
+		assert.equal(result.details?.paths?.[0], outputPath);
+		assert.equal(result.details?.mimeType, "text/html");
+		assert.equal(result.details?.opened, false);
+		assert.ok(updates.some((line) => /Rendering HTML preview/.test(line)), "preview_export should report its render progress.");
+		const { executablePath, args } = getPreviewBrowserLaunchOptions();
+		const browser = await puppeteer.launch({ headless: true, executablePath, args });
+		try {
+			const page = await browser.newPage();
+			const expectedParagraphText = fixtureMarkdown.split("\n\n")[0];
+			const expectedPreText = [
+				"export fence line 1\n    export fence line 2 with spaces\n    export fence line 3 with a tab\nexport fence line 4 " + "H".repeat(120),
+				"const exportHighlighted = \"" + "I".repeat(120) + "\";",
+				"- export removed " + "J".repeat(120) + "\n+ export added " + "K".repeat(120),
+			];
+			for (const width of [1200, 600, 320]) {
+				await page.setViewport({ width, height: 1800, deviceScaleFactor: 1 });
+				await page.goto(pathToFileURL(outputPath).href, { waitUntil: "domcontentloaded" });
+				await page.waitForFunction(() => window.__mermaidDone === true, { timeout: 15000 });
+				const metrics = await page.evaluate(() => {
+					const root = document.getElementById("preview-root");
+					const paragraph = root?.querySelector("p");
+					const preBlocks = Array.from(root?.querySelectorAll("pre") ?? []);
+					return {
+						documentWidth: document.documentElement.scrollWidth,
+						viewportWidth: window.innerWidth,
+						paragraphText: paragraph?.textContent ?? "",
+						preBlocks: preBlocks.map((pre) => ({
+							text: pre.textContent ?? "",
+							clientWidth: pre.clientWidth,
+							scrollWidth: pre.scrollWidth,
+							whiteSpace: getComputedStyle(pre).whiteSpace,
+							overflowWrap: getComputedStyle(pre).overflowWrap,
+						})),
+					};
+				});
+				assert.equal(metrics.paragraphText, expectedParagraphText, `Exported prose text should be preserved at ${width}px.`);
+				assert.equal(metrics.preBlocks.length, 3, `Expected three exported code fences at ${width}px.`);
+				assert.ok(metrics.documentWidth <= metrics.viewportWidth + 1, `The exported preview should not overflow horizontally at ${width}px.`);
+				assert.ok(metrics.preBlocks.every((block) => block.whiteSpace === "pre-wrap"), `Exported code fences should wrap with preserved whitespace at ${width}px.`);
+				assert.ok(metrics.preBlocks.every((block) => block.overflowWrap === "anywhere"), `Exported code fences should break long tokens at ${width}px.`);
+				assert.ok(metrics.preBlocks.every((block, index) => block.text === expectedPreText[index]), `Exported code fence text should be preserved at ${width}px.`);
+				assert.ok(metrics.preBlocks.every((block) => block.scrollWidth <= block.clientWidth + 1), `Exported code fences should not require horizontal scrolling at ${width}px.`);
+			}
+		} finally {
+			await browser.close();
+		}
+	} finally {
+		await rm(exportArtifactDir, { recursive: true, force: true });
+	}
+}
+
+await assertPreviewExportHtmlBrowserWrapping();
 
 async function assertSinglePagePdfFigureRendering() {
 	const { executablePath, args } = getPreviewBrowserLaunchOptions();
