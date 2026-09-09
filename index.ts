@@ -2215,7 +2215,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 		for (const [index, clip] of pageClips.entries()) {
 			if (signal?.aborted) throw new Error("Preview rendering cancelled.");
 
-			const pageScreenshot = (await browserPage.screenshot({
+			const pageScreenshot = Buffer.from(await browserPage.screenshot({
 				type: "png",
 				...(pageCount > 1 ? {
 					clip: {
@@ -2225,7 +2225,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 						height: clip.height,
 					},
 				} : {}),
-			})) as Buffer;
+			}));
 
 			pages.push({
 				base64Png: pageScreenshot.toString("base64"),
