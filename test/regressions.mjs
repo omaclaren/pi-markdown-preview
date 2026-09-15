@@ -163,6 +163,11 @@ assert.ok(
 		&& src.includes("allocateImageIdIfAvailable?.()"),
 	"Kitty image IDs should be feature-detected and omitted when the host does not expose an allocator.",
 );
+assert.match(
+	src,
+	/const pageScreenshot = Buffer\.from\(await browserPage\.screenshot\(/,
+	"Puppeteer screenshots must be converted from Uint8Array before base64 encoding.",
+);
 const stringEnumSource = src.slice(src.indexOf("function stringEnum"), src.indexOf("type ThemeMode"));
 assert.ok(
 	stringEnumSource.includes("return Type.String({") && !stringEnumSource.includes("return Type.Unsafe({"),
