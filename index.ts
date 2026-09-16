@@ -81,8 +81,9 @@ const MERMAID_PDF_CACHE_DIR = join(CACHE_DIR, "mermaid-pdf");
 const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";
 const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-helpers.js", import.meta.url), "utf-8");
 const PDF_FIGURE_HELPERS_SOURCE = readFileSync(new URL("./client/pdf-figure-renderer.js", import.meta.url), "utf-8");
+const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-controls.js", import.meta.url), "utf-8");
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
-const RENDER_VERSION = "v29";
+const RENDER_VERSION = "v34";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
 const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
@@ -2110,11 +2111,11 @@ function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean): {
 	};
 }
 
-async function renderPreview(markdown: string, style: PreviewStyle, signal?: AbortSignal, resourcePath?: string, skipCache?: boolean, isLatex?: boolean, fontSizePx?: number): Promise<RenderPreviewResult> {
+async function renderPreview(markdown: string, style: PreviewStyle, signal?: AbortSignal, resourcePath?: string, skipCache?: boolean, isLatex?: boolean, fontSizePx?: number, wrapCode = false): Promise<RenderPreviewResult> {
 	const { normalizedMarkdown, pandocMarkdown, annotationPlaceholders } = prepareBrowserPreviewMarkdown(markdown, isLatex);
 	const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_TERMINAL_PREVIEW_FONT_SIZE_PX);
 	const deviceScaleFactor = getTerminalDeviceScaleFactor();
-	const cacheKey = buildRenderCacheKey(`${style.cacheKey}|fontSize=${previewFontSizePx}|scale=${deviceScaleFactor}`, resourcePath, isLatex);
+	const cacheKey = buildRenderCacheKey(`${style.cacheKey}|fontSize=${previewFontSizePx}|scale=${deviceScaleFactor}|wrapCode=${wrapCode}`, resourcePath, isLatex);
 
 	// Check cache for the full render (keyed on full markdown content).
 	const cached = skipCache ? undefined : await readCachedPage(normalizedMarkdown, cacheKey);
@@ -2128,7 +2129,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 			const pageCached = i === 0 ? cached : await readCachedPage(pageKey, cacheKey);
 			if (!pageCached) {
 				// Cache is incomplete; re-render.
-				return renderPreview(markdown, style, signal, resourcePath, true, isLatex, previewFontSizePx);
+				return renderPreview(markdown, style, signal, resourcePath, true, isLatex, previewFontSizePx, wrapCode);
 			}
 			pages.push({
 				base64Png: pageCached.buffer.toString("base64"),
@@ -2143,7 +2144,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 	await mkdir(CACHE_DIR, { recursive: true });
 
 	const fragmentHtml = await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex, signal);
-	const html = buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx);
+	const html = buildBrowserHtmlFromPandocFragment(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx, {}, false, { wrapCode, controls: false });
 
 	let browserPage: Page | undefined;
 	let tempHtmlPath: string | undefined;
@@ -2257,6 +2258,9 @@ class MarkdownPreviewOverlay {
 	private statusLine: string | undefined;
 	private isRefreshing = false;
 	private isOpeningBrowser = false;
+	private wrapCode = false;
+	private disposed = false;
+	private renderController: AbortController | undefined;
 	private imageIdsByPage = new Map<number, number>();
 	private readonly useKittyImageDeletion = getCapabilities().images === "kitty"
 		&& allocateImageIdIfAvailable !== undefined;
@@ -2266,7 +2270,7 @@ class MarkdownPreviewOverlay {
 		private theme: Theme,
 		private preview: RenderPreviewResult,
 		private done: () => void,
-		private refresh: () => Promise<RenderPreviewResult>,
+		private refresh: (wrapCode: boolean, signal: AbortSignal, skipCache: boolean) => Promise<RenderPreviewResult>,
 		private openInBrowser: () => Promise<void>,
 	) {
 		this.rebuild();
@@ -2306,7 +2310,7 @@ class MarkdownPreviewOverlay {
 
 		const controls: string[] = [];
 		if (this.preview.pages.length > 1) controls.push("←/→ page");
-		controls.push(`${keyHint("tui.select.cancel", "close")}`, "r refresh", "o open browser");
+		controls.push(`${keyHint("tui.select.cancel", "close")}`, "r refresh", `w wrap code: ${this.wrapCode ? "on" : "off"}`, "o open browser");
 		this.container.addChild(new Text(this.theme.fg("dim", controls.join(" • ")), 0, 0));
 
 		const page = this.currentPage();
@@ -2333,8 +2337,9 @@ class MarkdownPreviewOverlay {
 	}
 
 	handleInput(data: string): void {
+		if (this.disposed) return;
 		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-			this.clearRenderedImages();
+			this.dispose();
 			this.done();
 			return;
 		}
@@ -2357,7 +2362,7 @@ class MarkdownPreviewOverlay {
 			return;
 		}
 
-		if (matchesKey(data, "o") && !this.isOpeningBrowser) {
+		if (matchesKey(data, "o") && !this.isOpeningBrowser && !this.isRefreshing) {
 			this.isOpeningBrowser = true;
 			this.statusLine = this.theme.fg("warning", "Opening browser preview...");
 			this.rebuild();
@@ -2365,13 +2370,16 @@ class MarkdownPreviewOverlay {
 
 			void this.openInBrowser()
 				.then(() => {
+					if (this.disposed) return;
 					this.statusLine = this.theme.fg("success", "Opened preview in browser.");
 				})
 				.catch((error) => {
+					if (this.disposed) return;
 					const message = error instanceof Error ? error.message : String(error);
 					this.statusLine = this.theme.fg("error", `Browser open failed: ${message}`);
 				})
 				.finally(() => {
+					if (this.disposed) return;
 					this.isOpeningBrowser = false;
 					this.rebuild();
 					this.tui.requestRender();
@@ -2379,24 +2387,39 @@ class MarkdownPreviewOverlay {
 			return;
 		}
 
-		if (matchesKey(data, "r") && !this.isRefreshing) {
+		const toggleWrap = matchesKey(data, "w");
+		if ((toggleWrap || matchesKey(data, "r")) && !this.isRefreshing && !this.isOpeningBrowser) {
+			const wrapCode = toggleWrap ? !this.wrapCode : this.wrapCode;
+			const controller = new AbortController();
+			this.renderController = controller;
 			this.isRefreshing = true;
-			this.statusLine = this.theme.fg("warning", "Refreshing preview for current theme...");
+			this.statusLine = this.theme.fg("warning", toggleWrap
+				? `Rendering with code wrapping ${wrapCode ? "on" : "off"}...`
+				: "Refreshing preview for current theme...");
 			this.rebuild();
 			this.tui.requestRender();
 
-			void this.refresh()
+			// Toggle renders can reuse their own cache; explicit refresh always
+			// bypasses it. Commit the setting only after a successful render.
+			void this.refresh(wrapCode, controller.signal, !toggleWrap)
 				.then((preview) => {
+					if (this.disposed) return;
 					this.clearRenderedImages();
 					this.preview = preview;
+					this.wrapCode = wrapCode;
 					this.pageIndex = Math.min(this.pageIndex, Math.max(0, preview.pages.length - 1));
-					this.statusLine = this.theme.fg("success", `Refreshed (${preview.themeMode} mode).`);
+					this.statusLine = this.theme.fg("success", toggleWrap
+						? `Code wrapping ${wrapCode ? "on" : "off"}.`
+						: `Refreshed (${preview.themeMode} mode).`);
 				})
 				.catch((error) => {
+					if (this.disposed) return;
 					const message = error instanceof Error ? error.message : String(error);
 					this.statusLine = this.theme.fg("error", `Refresh failed: ${message}`);
 				})
 				.finally(() => {
+					if (this.disposed) return;
+					this.renderController = undefined;
 					this.isRefreshing = false;
 					this.rebuild();
 					this.tui.requestRender();
@@ -2414,6 +2437,10 @@ class MarkdownPreviewOverlay {
 	}
 
 	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.renderController?.abort();
+		this.renderController = undefined;
 		this.clearRenderedImages();
 	}
 }
@@ -2574,9 +2601,9 @@ export async function openPreview(ctx: ExtensionCommandContext, markdownOverride
 			theme,
 			initialPreview,
 			done,
-			async () => {
+			async (wrapCode, signal, skipCache) => {
 				const style = getPreviewStyle(ctx.ui.theme);
-				const refreshed = await renderPreview(markdown, style, undefined, resourcePath, true, isLatex, previewFontSizePx);
+				const refreshed = await renderPreview(markdown, style, signal, resourcePath, skipCache, isLatex, previewFontSizePx, wrapCode);
 				return refreshed;
 			},
 			async () => {
@@ -3696,6 +3723,7 @@ function buildBrowserHtmlFromPandocFragment(
 	fontSizePx?: number,
 	inlinePdfData: Record<string, string> = {},
 	pdfFigureRenderingEnabled = false,
+	codeWrapping: { wrapCode?: boolean; controls?: boolean } = {},
 ): string {
 	const palette = style.palette;
 	const preparedFragmentHtml = markPandocPdfEmbeds(fragmentHtml);
@@ -3728,6 +3756,7 @@ function buildBrowserHtmlFromPandocFragment(
 	const baseTag = resourcePath ? `\n<base href="${pathToFileURL(resourcePath + "/").href}" />` : "";
 	const annotationHelpersScript = ANNOTATION_HELPERS_SOURCE.replace(/<\/script/gi, "<\\/script");
 	const pdfFigureHelpersScript = PDF_FIGURE_HELPERS_SOURCE.replace(/<\/script/gi, "<\\/script");
+	const codeWrapControlsScript = CODE_WRAP_CONTROLS_SOURCE.replace(/<\/script/gi, "<\\/script");
 	const annotationPlaceholdersJson = JSON.stringify(annotationPlaceholders).replace(/</g, "\\u003c");
 	const inlinePdfDataJson = JSON.stringify(inlinePdfData).replace(/</g, "\\u003c");
 	return `<!doctype html>
@@ -3794,6 +3823,95 @@ body {
   border-radius: 8px;
   padding: 12px 14px;
   overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+#preview-root[data-wrap-code="true"] pre,
+#preview-root pre[data-wrap-code="true"] {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#preview-root pre[data-wrap-code="false"] {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+#preview-root .preview-code-toolbar,
+#preview-root .preview-code-block-controls {
+  display: flex;
+  justify-content: flex-end;
+  user-select: none;
+}
+#preview-root .preview-code-toolbar { margin-bottom: 0.3em; }
+#preview-root .preview-code-block { position: relative; margin: max(12px, 0.85em) 0; min-width: 0; }
+#preview-root .preview-code-block > pre { margin: 0; }
+/* Straddle the border: no control row, and the lower half fits in the code padding. */
+#preview-root .preview-code-block-controls {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  gap: 2px;
+  transform: translateY(-50%);
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+/* Pointer-acquired focus must not keep a button visible after mouseleave. */
+#preview-root .preview-code-block:hover > .preview-code-block-controls,
+#preview-root .preview-code-block-controls:has(> button:focus-visible) {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none), (any-pointer: coarse) {
+  #preview-root .preview-code-block-controls { opacity: 1; pointer-events: auto; }
+}
+#preview-root .preview-code-toolbar button,
+#preview-root .preview-code-block-controls button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  font: 500 12px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  min-height: 24px;
+  padding: 2px 6px;
+}
+#preview-root .preview-code-block-controls button {
+  background: var(--card);
+  border-color: var(--border-muted);
+  height: 24px;
+  padding-inline: 3px;
+  white-space: nowrap;
+}
+#preview-root [data-code-copy-block] { flex: 0 0 52px; width: 52px; }
+#preview-root [data-code-copy-block][aria-busy="true"] { cursor: progress; }
+#preview-root .preview-code-copy-status,
+.preview-code-copy-buffer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: pre;
+  pointer-events: none;
+}
+#preview-root .preview-code-toolbar button:hover,
+#preview-root .preview-code-toolbar button:focus-visible,
+#preview-root .preview-code-block-controls button:hover,
+#preview-root .preview-code-block-controls button:focus-visible {
+  background: var(--panel-2);
+  border-color: var(--border-muted);
+  color: var(--text);
+}
+#preview-root .preview-code-toolbar button:focus-visible,
+#preview-root .preview-code-block-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Keep even the focus ring inside the badge, away from the first code line. */
+#preview-root .preview-code-block-controls button:focus-visible { outline-offset: -2px; }
+@media print {
+  #preview-root .preview-code-toolbar,
+  #preview-root .preview-code-block-controls,
+  .preview-code-copy-buffer { display: none; }
 }
 #preview-root code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -3985,12 +4103,15 @@ body {
 </style>
 </head>
 <body>
-  <article id="preview-root">${preparedFragmentHtml}</article>
+  <article id="preview-root" data-wrap-code="${codeWrapping.wrapCode === true}">${preparedFragmentHtml}</article>
   <script>
 ${annotationHelpersScript}
   </script>
   <script>
 ${pdfFigureHelpersScript}
+  </script>
+  <script>
+${codeWrapControlsScript}
   </script>
   <script type="module">
   (async () => {
@@ -4389,6 +4510,9 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
       await renderAnnotationMarkerMath(root);
       await renderMathFallback(root);
       await renderPdfFigures(root);
+      if (${codeWrapping.controls !== false}) {
+        window.PiMarkdownPreviewCodeWrap?.installCodeWrapControls(root);
+      }
       await waitForFonts();
       await waitForPaint();
     } finally {

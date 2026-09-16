@@ -208,8 +208,8 @@ assert.match(
 );
 assert.match(
 	src,
-	/const cacheKey = buildRenderCacheKey\(`\$\{style\.cacheKey\}\|fontSize=\$\{previewFontSizePx\}\|scale=\$\{deviceScaleFactor\}`,[\s\S]*?resourcePath,[\s\S]*?isLatex\)/,
-	"renderPreview should scope cache by style/resourcePath/isLatex/fontSize/deviceScaleFactor.",
+	/const cacheKey = buildRenderCacheKey\(`\$\{style\.cacheKey\}\|fontSize=\$\{previewFontSizePx\}\|scale=\$\{deviceScaleFactor\}\|wrapCode=\$\{wrapCode\}`,[\s\S]*?resourcePath,[\s\S]*?isLatex\)/,
+	"renderPreview should scope cache by style/resourcePath/isLatex/fontSize/deviceScaleFactor/wrapCode.",
 );
 assert.ok(
 	src.includes("truncatedPages: cached.truncatedPages === true")
@@ -367,7 +367,8 @@ assert.match(src, /const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANN
 assert.match(src, /const ANNOTATION_HELPERS_SOURCE = readFileSync\(new URL\("\.\/client\/annotation-helpers\.js", import\.meta\.url\), "utf-8"\);/, "Browser preview should embed the annotation helper script.");
 assert.match(src, /function prepareBrowserPreviewMarkdown\s*\(/, "Missing browser preview annotation preparation helper.");
 assert.match(src, /prepareMarkdownForPandocPreview\(normalizedMarkdown, PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX\)/, "Browser preview should replace prose annotations with placeholders before pandoc.");
-assert.match(src, /buildBrowserHtmlFromPandocFragment\(fragmentHtml, style, resourcePath, annotationPlaceholders(?:,\s*(?:previewFontSizePx|fontSizePx))?\)/, "Browser preview HTML builder should receive annotation placeholders.");
+assert.match(src, /buildBrowserHtmlFromPandocFragment\(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx, \{\}, false, \{ wrapCode, controls: false \}\)/, "Terminal HTML should receive annotation placeholders and wrapping without browser controls.");
+assert.match(src, /#preview-root pre \{[^}]*white-space: pre;[^}]*overflow-wrap: normal;/, "Code blocks should retain fixed-width layout by default.");
 
 assert.match(src, /function escapeLatexText\s*\(/, "Missing PDF annotation LaTeX escaping helper.");
 assert.match(src, /function getMathPattern\s*\(/, "Missing shared PDF annotation math-pattern helper.");
@@ -1359,7 +1360,7 @@ async function assertBrowserWatchSymlinkResourceRoot() {
 await assertBrowserWatchServer();
 await assertBrowserWatchSymlinkResourceRoot();
 
-assert.match(src, /const RENDER_VERSION = "v29";/, "Single-page PDF figure rendering should invalidate older browser preview caches.");
+assert.match(src, /const RENDER_VERSION = "v34";/, "Code block controls should invalidate older preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(src, /const PDFJS_BROWSER_VERSION = "6\.3\.289";/, "Browser PDF rendering should pin an exact PDF.js release.");
 assert.ok(
@@ -1499,6 +1500,8 @@ async function assertPreviewPageLayoutCollection() {
 }
 
 await assertPreviewPageLayoutCollection();
+
+await import("./code-wrap.mjs");
 
 async function assertSinglePagePdfFigureRendering() {
 	const { executablePath, args } = getPreviewBrowserLaunchOptions();

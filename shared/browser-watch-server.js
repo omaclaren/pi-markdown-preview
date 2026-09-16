@@ -216,13 +216,20 @@ function getHtmlSecurityHeaders(scriptNonce) {
  * preview document.
  *
  * @param {string} html
- * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string }} navigation
+ * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string, wrapScope?: string }} navigation
  * @param {string} [scriptNonce]
  */
 export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	let watchedHtml = BASE_TAG_PATTERN.test(html) ? html.replace(BASE_TAG_PATTERN, "") : html;
 	if (!/<link\s+[^>]*rel=(?:"icon"|'icon')[^>]*>/i.test(watchedHtml)) {
 		watchedHtml = watchedHtml.replace(/<\/head>/i, '<link rel="icon" href="data:," />\n</head>');
+	}
+
+	if (navigation.wrapScope) {
+		const wrapScopeMeta = `<meta name="pi-markdown-preview-wrap-scope" content="${escapeBrowserWatchHtmlAttribute(navigation.wrapScope)}" />`;
+		watchedHtml = /<\/head>/i.test(watchedHtml)
+			? watchedHtml.replace(/<\/head>/i, `${wrapScopeMeta}\n</head>`)
+			: `${wrapScopeMeta}\n${watchedHtml}`;
 	}
 
 	const revision = String(navigation.revision);
@@ -252,6 +259,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
   color: var(--text, CanvasText);
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   font: 600 12px/1.2 system-ui, sans-serif;
   gap: 0.15rem;
   max-width: calc(100vw - 1rem);
@@ -278,6 +287,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 }
 #pi-markdown-preview-watch-nav a:hover,
 #pi-markdown-preview-watch-nav button:hover { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
+#pi-markdown-preview-watch-nav a:focus-visible,
+#pi-markdown-preview-watch-nav button:focus-visible { outline: 2px solid var(--accent, Highlight); outline-offset: 1px; }
+#pi-markdown-preview-watch-nav [hidden] { display: none; }
 #pi-markdown-preview-watch-nav a[aria-disabled="true"],
 #pi-markdown-preview-watch-nav button:disabled { opacity: 0.38; pointer-events: none; }
 #pi-markdown-preview-watch-latest.pi-markdown-preview-watch-new { color: var(--accent, LinkText); }
@@ -300,7 +312,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   padding: 0.5rem;
   position: fixed;
   right: 0.6rem;
-  top: 3.25rem;
+  top: calc(var(--pi-preview-watch-nav-height, 2rem) + 1.2rem);
   width: min(620px, calc(100vw - 1.2rem));
 }
 #pi-markdown-preview-watch-share-panel[hidden] { display: none; }
@@ -314,12 +326,14 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   min-width: 8rem;
   padding: 0.4rem 0.5rem;
 }
-@media (max-width: 640px) {
-  #pi-markdown-preview-watch-nav { bottom: 0.5rem; left: 0.5rem; right: auto; top: auto; }
+@media screen and (max-width: 640px) {
+  body { padding-bottom: calc(var(--pi-preview-watch-nav-height, 3rem) + 1rem); }
+  #pi-markdown-preview-watch-nav { border-radius: 10px; bottom: 0.5rem; left: 0.5rem; right: auto; top: auto; }
   #pi-markdown-preview-watch-nav a,
   #pi-markdown-preview-watch-nav button,
   #pi-markdown-preview-watch-nav span { padding-inline: 0.38rem; }
-  #pi-markdown-preview-watch-share-panel { bottom: 3.25rem; left: 0.5rem; right: auto; top: auto; }
+  #pi-markdown-preview-watch-source { flex-basis: 100%; max-width: 100%; }
+  #pi-markdown-preview-watch-share-panel { bottom: calc(var(--pi-preview-watch-nav-height, 3rem) + 1rem); left: 0.5rem; right: auto; top: auto; }
 }
 @media print { #pi-markdown-preview-watch-nav { display: none; } }
 </style>`;
@@ -336,6 +350,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1} of ${revisions.length}`}</span>
   <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
   <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
+  <button data-watch-control="wrap-code" type="button" hidden></button>
   <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser">Copy link</button>
   <div id="pi-markdown-preview-watch-share-panel" data-watch-control="share-panel" role="dialog" aria-label="Transferable preview link" hidden>
     <span>Copy this link:</span>
@@ -352,6 +367,16 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   let revisions = ${JSON.stringify(revisions)};
   const followingLatest = revision === revisions[revisions.length - 1];
   const navigation = document.currentScript?.previousElementSibling;
+  // Wrapping controls and narrow screens can make the toolbar multi-row.
+  // Keep the share panel and the document's bottom clearance below its actual height.
+  const updateNavigationHeight = () => {
+    if (navigation) document.documentElement.style.setProperty('--pi-preview-watch-nav-height', Math.ceil(navigation.getBoundingClientRect().height) + 'px');
+  };
+  const navigationResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(updateNavigationHeight) : null;
+  if (navigation) navigationResizeObserver?.observe(navigation);
+  updateNavigationHeight();
+  window.addEventListener('resize', updateNavigationHeight);
+  window.addEventListener('load', updateNavigationHeight, { once: true });
   const previousLink = navigation?.querySelector('[data-watch-control="previous"]');
   const countLabel = navigation?.querySelector('[data-watch-control="count"]');
   const nextLink = navigation?.querySelector('[data-watch-control="next"]');
@@ -512,7 +537,11 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     updateNavigation(nextRevisions, true);
   });
   events.addEventListener('stopped', () => events.close());
-  window.addEventListener('pagehide', () => events.close(), { once: true });
+  window.addEventListener('pagehide', () => {
+    events.close();
+    navigationResizeObserver?.disconnect();
+    window.removeEventListener('resize', updateNavigationHeight);
+  }, { once: true });
   window.addEventListener('pageshow', (event) => { if (event.persisted) window.location.reload(); });
 })();
 </script>`;
@@ -563,6 +592,8 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const token = randomBytes(24).toString("base64url");
+	// Public UI-state scope, deliberately unrelated to the authentication token.
+	const wrapScope = randomBytes(16).toString("hex");
 	const lexicalResourceRoot = resolve(resourceRoot);
 	const resolvedResourceRoot = await realpath(lexicalResourceRoot);
 	const historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
@@ -664,6 +695,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				revisions: documents.map((document) => document.revision),
 				isWaiting: !hasHistoryDocument,
 				sourceLabel: options.sourceLabel,
+				wrapScope,
 			}, scriptNonce);
 			res.writeHead(200, {
 				...getHtmlSecurityHeaders(scriptNonce),

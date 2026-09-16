@@ -33,6 +33,7 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 - **Mermaid diagrams** — renders ` ```mermaid` code blocks as SVG diagrams in terminal/browser previews, and as high-quality vector diagrams in PDF export when Mermaid CLI is available
 - **LaTeX/math support** — renders `$inline$`, `$$display$$`, `\(...\)`, and `\[...\]` math via MathML with selective MathJax fallback for pandoc-unsupported browser/terminal equations, or native LaTeX (PDF)
 - **Syntax highlighting** — fenced code blocks in markdown and standalone code files are rendered with theme-aware syntax colouring via pandoc. Supports 50+ languages including TypeScript, Python, Rust, Go, C/C++, Julia, and more.
+- **Code wrapping controls** — preserve fixed-width layout by default; toggle wrapping for the whole terminal preview with `w`, or use global and per-block buttons in the browser. No special Markdown annotations are needed.
 - **Annotation marker highlighting** — inline `[an: ...]` markers are highlighted in terminal/browser/PDF previews as note-only chips (`...`, without the `[an: ]` wrapper) outside code blocks; long notes wrap correctly in PDF instead of running off the page
 - **Theme-aware** — matches your pi theme (dark/light inference, export page/card colours, Markdown colours, accent colours, syntax colours)
 - **Response picker** — select any past assistant response to preview, not just the latest
@@ -182,9 +183,21 @@ npm run check:readme-commands
 | Key | Action |
 |-----|--------|
 | `←` / `→` | Navigate pages |
-| `r` | Refresh (re-render with current theme) |
+| `r` | Refresh (re-render with current theme, keeping the wrapping choice) |
+| `w` | Toggle code wrapping for this terminal preview (re-renders the images) |
 | `o` | Open current preview in browser |
 | `Esc` | Close preview |
+
+### Code wrapping and copying
+
+Code blocks start **unwrapped** so diagrams and column-aligned output retain their layout. In a browser, long lines scroll within the code block. Terminal previews and PNG files are static images, so content beyond a block's width cannot be scrolled there.
+
+- **Terminal viewer:** press `w` to toggle wrapping for all code blocks. The help line shows `wrap code: off/on`. The viewer keeps the previous images and setting if rendering fails; `Esc` also cancels an in-progress render. The choice lasts only until that viewer closes. This is an interactive key, not an argument: `--watch` / `-w` still means browser watch mode.
+- **Browser:** use **Wrap all code: off/on/mixed** at the top, or hover over a code block to reveal **Wrap / Unwrap** on its upper-right border. Per-block buttons also appear when reached with `Tab`, stay visible on touch devices, and do not add a row or cover the code text. The global button wraps all blocks when they are unwrapped or mixed, and unwraps all when they are wrapped; it clears individual exceptions. There is no bare-key browser shortcut.
+- **Copy code:** **Copy** sits beside the per-block wrapping button and copies plain code text, including indentation and logical line breaks, regardless of wrapping. It briefly shows **Copied** on success or **Failed** if clipboard access is unavailable; failures leave manual selection/copy available. Neither button labels nor visual line wrapping are included in the copied text.
+- **Watch mode:** the global control is **Wrap: off/on/mixed** in the existing navigation toolbar, rather than a separate button above the document. The global browser choice survives refreshes and revision navigation in the same tab using session storage. Per-block exceptions reset on each loaded revision. Independent watchers and fresh one-shot documents start unwrapped. If browser storage is disabled, the buttons still work, but the choice does not survive reloads.
+
+Wrapping changes presentation, not code text or authored line breaks. Buttons stay outside the code and are omitted from terminal/PNG rendering and browser printing. Browser and terminal choices are independent; opening a separate browser preview starts unwrapped. PDF export uses the separate Pandoc/LaTeX pipeline and is unchanged. Standalone PNG exports also retain the default unwrapped layout rather than inheriting a viewer's temporary state.
 
 ## Configuration
 
