@@ -1360,7 +1360,7 @@ async function assertBrowserWatchSymlinkResourceRoot() {
 await assertBrowserWatchServer();
 await assertBrowserWatchSymlinkResourceRoot();
 
-assert.match(src, /const RENDER_VERSION = "v34";/, "Code block controls should invalidate older preview caches.");
+assert.match(src, /const RENDER_VERSION = "v35";/, "Safe sub/sup rendering should invalidate older preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(src, /const PDFJS_BROWSER_VERSION = "6\.3\.289";/, "Browser PDF rendering should pin an exact PDF.js release.");
 assert.ok(
@@ -1502,6 +1502,7 @@ async function assertPreviewPageLayoutCollection() {
 await assertPreviewPageLayoutCollection();
 
 await import("./code-wrap.mjs");
+await import("./document-updates.mjs");
 
 async function assertSinglePagePdfFigureRendering() {
 	const { executablePath, args } = getPreviewBrowserLaunchOptions();

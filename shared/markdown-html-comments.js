@@ -223,6 +223,20 @@ function collectMarkdownHtmlCommentRanges(source) {
 	return commentRanges;
 }
 
+/** Literal contexts for narrow inline-markup compatibility, not a raw-HTML allowlist. */
+export function collectMarkdownLiteralRanges(source) {
+	const frontMatter = splitValidYamlFrontMatter(source)?.frontMatter;
+	return mergeRanges([
+		...collectProtectedMarkdownRanges(source),
+		...collectProtectedMarkdownRanges(maskHtmlTags(source)),
+		// Never rewrite markup inside another tag's attributes. Bare sup/sub
+		// delimiters are the only tags the compatibility pass may interpret.
+		...collectHtmlTags(source).filter(({ start, end }) => !/^<\/?(?:sup|sub)>$/i.test(source.slice(start, end))),
+		...collectMarkdownHtmlCommentRanges(source),
+		...(frontMatter ? [{ start: 0, end: frontMatter.length }] : []),
+	]);
+}
+
 function blankCommentTextPreservingLineEndings(comment) {
 	return comment.replace(/[^\r\n]/g, "");
 }

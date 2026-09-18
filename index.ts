@@ -34,6 +34,7 @@ import {
 } from "./shared/annotation-scanner.js";
 import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
+import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
 
 // Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
 // A namespace lookup avoids an ESM load failure and falls back to rendering without targeted deletion.
@@ -83,7 +84,7 @@ const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-help
 const PDF_FIGURE_HELPERS_SOURCE = readFileSync(new URL("./client/pdf-figure-renderer.js", import.meta.url), "utf-8");
 const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-controls.js", import.meta.url), "utf-8");
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
-const RENDER_VERSION = "v34";
+const RENDER_VERSION = "v35";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
 const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
@@ -1226,65 +1227,6 @@ function normalizeMathDelimiters(markdown: string): string {
 	return out.join("\n");
 }
 
-function normalizeSubSupTagsInSegment(markdown: string): string {
-	let normalized = markdown.replace(/<sub>([^<\n]+)<\/sub>/gi, (_match, content: string) => `~${content}~`);
-	normalized = normalized.replace(/<sup>([^<\n]+)<\/sup>/gi, (_match, content: string) => `^${content}^`);
-	return normalized;
-}
-
-function normalizeSubSupTags(markdown: string): string {
-	const lines = markdown.split("\n");
-	const out: string[] = [];
-	let plainBuffer: string[] = [];
-	let inFence = false;
-	let fenceChar: "`" | "~" | undefined;
-	let fenceLength = 0;
-
-	const flushPlain = () => {
-		if (plainBuffer.length === 0) return;
-		out.push(normalizeSubSupTagsInSegment(plainBuffer.join("\n")));
-		plainBuffer = [];
-	};
-
-	for (const line of lines) {
-		const trimmed = line.trimStart();
-		const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
-
-		if (fenceMatch) {
-			const marker = fenceMatch[1]!;
-			const markerChar = marker[0] as "`" | "~";
-			const markerLength = marker.length;
-
-			if (!inFence) {
-				flushPlain();
-				inFence = true;
-				fenceChar = markerChar;
-				fenceLength = markerLength;
-				out.push(line);
-				continue;
-			}
-
-			if (fenceChar === markerChar && markerLength >= fenceLength) {
-				inFence = false;
-				fenceChar = undefined;
-				fenceLength = 0;
-			}
-
-			out.push(line);
-			continue;
-		}
-
-		if (inFence) {
-			out.push(line);
-		} else {
-			plainBuffer.push(line);
-		}
-	}
-
-	flushPlain();
-	return out.join("\n");
-}
-
 function escapeLatexTextFragment(text: string): string {
 	return String(text ?? "")
 		.replace(/\\/g, "\\textbackslash{}")
@@ -2095,7 +2037,7 @@ function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean): {
 	annotationPlaceholders: PreviewAnnotationPlaceholder[];
 } {
 	const markdownWithoutHtmlComments = isLatex ? markdown : stripMarkdownHtmlCommentsPreservingYamlFrontMatter(markdown);
-	const normalizedMarkdown = isLatex ? markdownWithoutHtmlComments : normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments)));
+	const normalizedMarkdown = isLatex ? markdownWithoutHtmlComments : normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments))));
 	if (isLatex || !hasMarkdownAnnotationMarkers(normalizedMarkdown)) {
 		return { normalizedMarkdown, pandocMarkdown: normalizedMarkdown, annotationPlaceholders: [] };
 	}
@@ -4517,6 +4459,7 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
       await waitForPaint();
     } finally {
       window.__mermaidDone = true;
+      window.dispatchEvent(new Event('pi-markdown-preview-ready'));
     }
   })();
   </script>
@@ -5586,6 +5529,7 @@ export default function (pi: ExtensionAPI) {
 			const server = await createBrowserWatchServer(rendered.html, resourcePath, {
 				initialDocumentIsHistory: true,
 				sourceLabel: provisional.sourceLabel,
+				preserveReadingPosition: true,
 			});
 			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
 				await server.close();

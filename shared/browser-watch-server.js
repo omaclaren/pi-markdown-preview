@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, isAbsolute, posix as posixPath, relative, resolve, win32 as win32Path } from "node:path";
@@ -10,6 +10,7 @@ const SHARE_PATH = "/__pi_markdown_preview_share__";
 const RESOURCE_PREFIX = "/__pi_markdown_preview_resource__/";
 const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
+const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-position.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_HISTORY_BYTE_LIMIT = 32 * 1024 * 1024;
 
@@ -216,7 +217,7 @@ function getHtmlSecurityHeaders(scriptNonce) {
  * preview document.
  *
  * @param {string} html
- * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string, wrapScope?: string }} navigation
+ * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string, wrapScope?: string, preserveReadingPosition?: boolean }} navigation
  * @param {string} [scriptNonce]
  */
 export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
@@ -232,6 +233,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 			: `${wrapScopeMeta}\n${watchedHtml}`;
 	}
 
+	const preserveReadingPosition = navigation.preserveReadingPosition === true && Boolean(navigation.wrapScope);
 	const revision = String(navigation.revision);
 	const revisions = navigation.revisions.map(String);
 	const isWaiting = navigation.isWaiting === true;
@@ -362,7 +364,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const watchScript = `<script>
 (() => {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
-  window.scrollTo(0, 0);
+  if (!window.location.hash) window.scrollTo(0, 0);
+  const readingPosition = ${preserveReadingPosition ? `window.PiMarkdownPreviewReadingPosition.install(document.getElementById('preview-root'), ${JSON.stringify(navigation.wrapScope)})` : "undefined"};
   const revision = ${JSON.stringify(revision)};
   let revisions = ${JSON.stringify(revisions)};
   const followingLatest = revision === revisions[revisions.length - 1];
@@ -485,6 +488,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const navigateTo = (value, replace = false) => {
     if (navigating) return false;
     navigating = true;
+    readingPosition?.save();
     events.close();
     if (replace) window.location.replace(value);
     else window.location.assign(value);
@@ -546,7 +550,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 })();
 </script>`;
 
-	const watchUi = `${watchNavigation}\n${watchScript}`;
+	const readingPositionScript = preserveReadingPosition ? `<script>${READING_POSITION_SOURCE}</script>\n` : "";
+	const watchUi = `${readingPositionScript}${watchNavigation}\n${watchScript}`;
 	const completeHtml = /<\/body>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/body>/i, `${watchUi}\n</body>`)
 		: `${watchedHtml}\n${watchUi}`;
@@ -588,7 +593,7 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  *
  * @param {string} initialHtml
  * @param {string} resourceRoot
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string }} [options]
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const token = randomBytes(24).toString("base64url");
@@ -696,6 +701,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				isWaiting: !hasHistoryDocument,
 				sourceLabel: options.sourceLabel,
 				wrapScope,
+				preserveReadingPosition: options.preserveReadingPosition,
 			}, scriptNonce);
 			res.writeHead(200, {
 				...getHtmlSecurityHeaders(scriptNonce),

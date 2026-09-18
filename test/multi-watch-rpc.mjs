@@ -139,6 +139,7 @@ try {
 	let urls = await waitOpenCount(1);
 	const oneSession = await bootstrap(urls[0]);
 	assert.match(oneSession.html, /<title>one\.md — Markdown Preview<\/title>/);
+	assert.match(oneSession.html, /PiMarkdownPreviewReadingPosition\.install/, "Real file-watch commands should enable reading-position preservation.");
 	assert.match(oneSession.html, /data-watch-control="source"[^>]*>one\.md<\/span>/);
 
 	await command(`/preview-browser -w --file ${JSON.stringify(two)}`);
@@ -160,6 +161,7 @@ try {
 	urls = await waitOpenCount(5);
 	const responseSession = await bootstrap(urls[4]);
 	assert.match(responseSession.html, /<title>Assistant responses — Markdown Preview<\/title>/);
+	assert.doesNotMatch(responseSession.html, /PiMarkdownPreviewReadingPosition/, "Response-watch commands must not inherit file scroll restoration.");
 	assert.equal(new Set([oneSession.origin, twoSession.origin, responseSession.origin]).size, 3);
 
 	const beforeList = notifications.length;
