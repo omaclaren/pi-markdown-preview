@@ -1,0 +1,117 @@
+#pi-markdown-preview-watch-nav {
+  align-items: center;
+  background: var(--card, Canvas);
+  border: 1px solid var(--panel-border, ButtonBorder);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  color: var(--text, CanvasText);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  font: 600 12px/1.2 system-ui, sans-serif;
+  gap: 0.15rem;
+  max-width: calc(100vw - 1rem);
+  padding: 0.2rem 0.3rem;
+  position: fixed;
+  right: 0.6rem;
+  top: 0.6rem;
+  z-index: 2147483647;
+}
+#pi-markdown-preview-watch-nav a,
+#pi-markdown-preview-watch-nav button {
+  align-items: center;
+  border-radius: 6px;
+  color: inherit;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0.35rem 0.55rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+#pi-markdown-preview-watch-nav button {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+#pi-markdown-preview-watch-nav > button { border-radius: 999px; }
+#pi-markdown-preview-watch-nav a:hover,
+#pi-markdown-preview-watch-nav button:hover { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
+#pi-markdown-preview-watch-nav a:focus-visible,
+#pi-markdown-preview-watch-nav button:focus-visible { outline: 2px solid var(--accent, Highlight); outline-offset: 1px; }
+/* Only pointer focus restored across a document load: keyboard input/blur
+   removes this marker. Ordinary focus-visible and per-block controls are intact. */
+#pi-markdown-preview-watch-nav [data-watch-restored-pointer-focus]:focus-visible { outline: none; }
+#pi-markdown-preview-watch-nav [hidden] { display: none; }
+#pi-markdown-preview-watch-nav a[aria-disabled="true"],
+#pi-markdown-preview-watch-nav button[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+#pi-markdown-preview-watch-nav a[aria-disabled="true"] { pointer-events: none; }
+#pi-markdown-preview-watch-copy-link { min-width: 7em; }
+#pi-markdown-preview-watch-toggle { gap: 0.35rem; }
+#pi-markdown-preview-watch-count { color: var(--muted, GrayText); font-variant-numeric: tabular-nums; }
+#pi-markdown-preview-watch-toggle[aria-expanded="true"] .pi-preview-watch-chevron { transform: rotate(180deg); }
+#pi-markdown-preview-watch-new,
+#pi-markdown-preview-watch-latest.pi-markdown-preview-watch-new { color: var(--accent, LinkText); }
+#pi-markdown-preview-watch-new { font-size: 0.9em; }
+#pi-markdown-preview-watch-controls,
+#pi-markdown-preview-watch-share-panel {
+  background: var(--card, Canvas);
+  border: 1px solid var(--panel-border, ButtonBorder);
+  border-radius: 10px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.16);
+  max-height: calc(100vh - var(--pi-preview-watch-nav-height, 3rem) - 1.5rem);
+  max-height: calc(100dvh - var(--pi-preview-watch-nav-height, 3rem) - 1.5rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0.6rem;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.4rem);
+}
+#pi-markdown-preview-watch-controls { width: min(24rem, calc(100vw - 1.2rem)); }
+#pi-markdown-preview-watch-source {
+  color: var(--muted, GrayText);
+  display: block;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  padding: 0.15rem 0.35rem 0.55rem;
+}
+.pi-preview-watch-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+#pi-markdown-preview-watch-share-panel {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  width: min(620px, calc(100vw - 1.2rem));
+}
+#pi-markdown-preview-watch-share-panel > span { flex-basis: 100%; }
+#pi-markdown-preview-watch-share-panel input {
+  background: var(--panel-2, Field);
+  border: 1px solid var(--panel-border, ButtonBorder);
+  border-radius: 6px;
+  color: inherit;
+  flex: 1;
+  font: 500 12px/1.3 ui-monospace, monospace;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+}
+@media screen {
+  /* Watch-only spacing: no changes to one-shot, terminal, PNG or PDF output. */
+  #preview-root > :is(h1, h2, h3, h4, h5, h6):first-child { margin-top: 0; }
+}
+@media screen and (max-width: 640px) {
+  body { padding-bottom: calc(var(--pi-preview-watch-nav-height, 3rem) + 1rem); }
+  #pi-markdown-preview-watch-nav { bottom: 0.5rem; left: 0.5rem; right: auto; top: auto; }
+  #pi-markdown-preview-watch-controls,
+  #pi-markdown-preview-watch-share-panel { bottom: calc(100% + 0.4rem); left: 0; right: auto; top: auto; }
+}
+@media (any-pointer: coarse) {
+  #pi-markdown-preview-watch-nav a,
+  #pi-markdown-preview-watch-nav button { min-height: 44px; }
+}
+@media print { #pi-markdown-preview-watch-nav { display: none; } }

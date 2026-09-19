@@ -9,6 +9,7 @@ import puppeteer from "puppeteer-core";
 import ts from "typescript";
 import { normalizeSubSupTags } from "../shared/markdown-sub-sup.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
+import { openWatchControls } from "./watch-controls.mjs";
 
 const affiliation = "Alan Li<sup>1</sup>, Oliver Maclaren<sup>1,2</sup>\n\n<sup>1</sup> Department\n\nH<sub>2</sub>O";
 assert.equal(normalizeSubSupTags(affiliation), "Alan Li^1^, Oliver Maclaren^1,2^\n\n^1^ Department\n\nH~2~O");
@@ -116,6 +117,7 @@ try {
 	};
 	await page.goto(file.url, { waitUntil: 'domcontentloaded' });
 	await ready();
+	await openWatchControls(page);
 	await page.click('[data-watch-control="wrap-code"]');
 	await scrollToTarget();
 	const initialTop = await top();
@@ -128,6 +130,7 @@ try {
 	await ready();
 	await assertPosition(initialTop, 'Manual reload of the same file should also preserve position.');
 	// Previous/Next are still the same file; history browsing must not auto-follow.
+	await openWatchControls(page);
 	await Promise.all([page.waitForNavigation({ waitUntil: 'domcontentloaded' }), page.click('[data-watch-control="previous"]')]);
 	await ready();
 	await assertPosition(initialTop, 'Same-file revision navigation should retain the reading position.');
@@ -136,6 +139,7 @@ try {
 	await page.waitForFunction(() => document.querySelector('[data-watch-control="latest"]').textContent.includes('(new)'));
 	assert.equal(page.url(), olderUrl);
 	await assertPosition(initialTop, 'A new revision must not disturb an older page being read.');
+	await openWatchControls(page);
 	await Promise.all([page.waitForNavigation({ waitUntil: 'domcontentloaded' }), page.click('[data-watch-control="latest"]')]);
 	await ready();
 	await assertPosition(initialTop);

@@ -10,6 +10,7 @@ import ts from "typescript";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 import { assertCodeCopy } from "./code-copy.mjs";
+import { assertWatchControls, openWatchControls } from "./watch-controls.mjs";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-markdown-preview-code-wrap-"));
 const modulePath = resolve(`.pi-markdown-preview-code-wrap-test-${process.pid}.mjs`);
@@ -232,6 +233,7 @@ try {
 	await touchPage.close();
 
 	const html = await readFile(outputPath, "utf8");
+	await assertWatchControls({ browser, html, resourceRoot: scratch, buildHtml: fragment => preview.buildBrowserHtmlFromPandocFragment(fragment, preview.getPreviewStyle()) });
 	const server = await createBrowserWatchServer(html, scratch, { sourceLabel: "test/code-wrapping.md — " + "long source label ".repeat(8) });
 	servers.push(server);
 	await assertCodeCopy({ browser, fileUrl: pathToFileURL(outputPath).href, watchUrl: server.url, expectedText, assertFloatingControls });
@@ -272,6 +274,7 @@ try {
 			&& [...panel.children].every(item => item.getBoundingClientRect().right <= box.right);
 	}), "The share panel should remain above the multi-row toolbar and inside a narrow viewport.");
 	await page.click('[data-watch-control="share-close"]');
+	await openWatchControls(page);
 	await page.focus("[data-code-wrap-all]");
 	await page.keyboard.press("Space");
 	assert.equal(await page.$eval('[data-code-wrap-all]', button => button.textContent), "Wrap: on");
@@ -286,6 +289,7 @@ try {
 	let value = await metrics();
 	assert.equal(value.globalState, "true", "Watch revisions retain the tab's global choice, not its previous block exceptions.");
 	assert.ok(value.blocks.every(block => block.override === null && block.whiteSpace === "pre-wrap"));
+	await openWatchControls(page);
 	await page.click("#pi-markdown-preview-watch-previous");
 	await page.waitForFunction(() => window.location.search === "?revision=1" && window.__mermaidDone === true);
 	assert.equal((await metrics()).globalState, "true", "Watch history uses the same tab-local global choice.");
@@ -307,6 +311,7 @@ try {
 	});
 	await page.reload({ waitUntil: "domcontentloaded" });
 	await ready();
+	await openWatchControls(page);
 	await page.click("[data-code-wrap-all]");
 	assert.equal((await metrics()).globalState, "true", "Wrapping must still work with browser storage denied.");
 	otherServer.updateDocument(preview.buildBrowserHtmlFromPandocFragment('<p>Only <code>inline code</code>.</p>', preview.getPreviewStyle()));

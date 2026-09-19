@@ -7,6 +7,7 @@ import { join, resolve, win32 as win32Path } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
+import { openWatchControls } from "./watch-controls.mjs";
 import { Check } from "typebox/value";
 import { BoundedProcessError, buildWindowsCmdCommandLine, isSpawnNotFoundError, runBoundedProcess } from "../shared/bounded-process.js";
 import {
@@ -1130,7 +1131,7 @@ async function assertBrowserWatchServer() {
 	assert.doesNotMatch(preparedHtml, /<base\s/i, "Watch HTML should remove the file base so anchors remain in-page and relative resources use the authenticated local server.");
 	assert.match(preparedHtml, /EventSource/, "Watch HTML should subscribe for completion notifications.");
 	assert.match(preparedHtml, /const revision = "7";/, "Watch HTML should identify its rendered revision.");
-	assert.match(preparedHtml, />2 of 3</, "Watch HTML should identify the selected response within bounded history.");
+	assert.match(preparedHtml, />2\/3</, "Watch HTML should identify the selected response within bounded history.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-previous"[^>]*href="\/?\?revision=5"/, "Watch HTML should link to the previous rendered response.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-next"[^>]*href="\/?\?revision=9"/, "Watch HTML should link to the next rendered response.");
 	assert.match(preparedHtml, /aria-keyshortcuts="Alt\+ArrowLeft"/, "Watch HTML should advertise the previous-revision keyboard shortcut.");
@@ -1280,7 +1281,7 @@ async function assertBrowserWatchServer() {
 		const historicalResponse = await fetch(new URL("/?revision=1", watchUrl.origin), { headers: { cookie } });
 		const historicalBody = await historicalResponse.text();
 		assert.match(historicalBody, /Initial response/, "Historical revision URLs should retain earlier rendered responses.");
-		assert.match(historicalBody, />1 of 2</, "Historical pages should expose their position in watch history.");
+		assert.match(historicalBody, />1\/2</, "Historical pages should expose their position in watch history.");
 		const updatedResponse = await fetch(watchUrl.origin, { headers: { cookie } });
 		assert.equal(updatedResponse.status, 200);
 		assert.match(await updatedResponse.text(), /Updated response/, "The root watch URL should serve the latest canonical document.");
@@ -1696,11 +1697,11 @@ async function assertBrowserWatchReload() {
 		await page.goto(server.url, { waitUntil: "domcontentloaded" });
 		await page.waitForFunction(() => window.location.search === "?revision=1");
 		assert.equal(await page.evaluate(() => window.previewTrustedScriptRan), true, "Nonce-bearing preview scripts should run under the watch CSP.");
-		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "1 of 1");
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "1/1");
 
 		server.updateDocument('<!doctype html><html><head></head><body><p>Second watch document</p></body></html>');
 		await page.waitForFunction(() => window.location.search === "?revision=2" && document.body.textContent?.includes("Second watch document"));
-		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "2 of 2");
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "2/2");
 
 		await page.goBack({ waitUntil: "domcontentloaded" });
 		await page.waitForFunction(() => window.location.search === "?revision=1" && document.body.textContent?.includes("Initial watch document"));
@@ -1714,9 +1715,11 @@ async function assertBrowserWatchReload() {
 		assert.equal(await page.evaluate(() => window.location.search), "?revision=1", "A historical response should not auto-follow a newly rendered response.");
 		assert.match(await page.$eval("body", (element) => element.textContent ?? ""), /Initial watch document/);
 
+		await openWatchControls(page);
 		await page.click("#pi-markdown-preview-watch-next");
 		await page.waitForFunction(() => window.location.search === "?revision=2" && document.body.textContent?.includes("Second watch document"));
-		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "2 of 3");
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "2/3");
+		await openWatchControls(page);
 		await page.click("#pi-markdown-preview-watch-latest");
 		await page.waitForFunction(() => window.location.search === "?revision=3" && document.body.textContent?.includes("Third watch document"));
 
@@ -1766,7 +1769,7 @@ async function assertBrowserWatchReload() {
 		server.updateDocument('<!doctype html><html><head></head><body><p>Newest watch document</p></body></html>');
 		await autoNavigationRequest.continue();
 		await page.waitForFunction(() => window.location.search === "?revision=5" && document.body.textContent?.includes("Newest watch document"));
-		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "5 of 5");
+		assert.equal(await page.$eval("#pi-markdown-preview-watch-count", (element) => element.textContent), "5/5");
 		page.off("request", onRequest);
 		await page.setRequestInterception(false);
 

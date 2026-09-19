@@ -11,6 +11,7 @@ const RESOURCE_PREFIX = "/__pi_markdown_preview_resource__/";
 const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-position.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_HISTORY_BYTE_LIMIT = 32 * 1024 * 1024;
 
@@ -250,95 +251,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const latestRevision = revisions[revisions.length - 1] ?? revision;
 	const linkAttributes = (targetRevision) => targetRevision === undefined
 		? 'aria-disabled="true" tabindex="-1"'
-		: `href="/?revision=${encodeURIComponent(targetRevision)}" aria-disabled="false"`;
+		: `href="/?revision=${encodeURIComponent(targetRevision)}" aria-disabled="false" tabindex="0"`;
 
-	const watchStyle = `<style id="pi-markdown-preview-watch-style">
-#pi-markdown-preview-watch-nav {
-  align-items: center;
-  background: var(--card, Canvas);
-  border: 1px solid var(--panel-border, ButtonBorder);
-  border-radius: 999px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-  color: var(--text, CanvasText);
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  font: 600 12px/1.2 system-ui, sans-serif;
-  gap: 0.15rem;
-  max-width: calc(100vw - 1rem);
-  padding: 0.3rem 0.4rem;
-  position: fixed;
-  right: 0.6rem;
-  top: 0.6rem;
-  z-index: 2147483647;
-}
-#pi-markdown-preview-watch-nav a,
-#pi-markdown-preview-watch-nav button,
-#pi-markdown-preview-watch-nav span {
-  border-radius: 999px;
-  color: inherit;
-  padding: 0.3rem 0.5rem;
-  text-decoration: none;
-  white-space: nowrap;
-}
-#pi-markdown-preview-watch-nav button {
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  font: inherit;
-}
-#pi-markdown-preview-watch-nav a:hover,
-#pi-markdown-preview-watch-nav button:hover { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
-#pi-markdown-preview-watch-nav a:focus-visible,
-#pi-markdown-preview-watch-nav button:focus-visible { outline: 2px solid var(--accent, Highlight); outline-offset: 1px; }
-#pi-markdown-preview-watch-nav [hidden] { display: none; }
-#pi-markdown-preview-watch-nav a[aria-disabled="true"],
-#pi-markdown-preview-watch-nav button:disabled { opacity: 0.38; pointer-events: none; }
-#pi-markdown-preview-watch-latest.pi-markdown-preview-watch-new { color: var(--accent, LinkText); }
-#pi-markdown-preview-watch-count { color: var(--muted, GrayText); font-variant-numeric: tabular-nums; }
-#pi-markdown-preview-watch-source {
-  color: var(--muted, GrayText);
-  max-width: min(32vw, 24rem);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#pi-markdown-preview-watch-share-panel {
-  align-items: center;
-  background: var(--card, Canvas);
-  border: 1px solid var(--panel-border, ButtonBorder);
-  border-radius: 10px;
-  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.24);
-  display: flex;
-  gap: 0.35rem;
-  max-width: calc(100vw - 1.2rem);
-  padding: 0.5rem;
-  position: fixed;
-  right: 0.6rem;
-  top: calc(var(--pi-preview-watch-nav-height, 2rem) + 1.2rem);
-  width: min(620px, calc(100vw - 1.2rem));
-}
-#pi-markdown-preview-watch-share-panel[hidden] { display: none; }
-#pi-markdown-preview-watch-share-panel input {
-  background: var(--panel-2, Field);
-  border: 1px solid var(--panel-border, ButtonBorder);
-  border-radius: 6px;
-  color: inherit;
-  flex: 1;
-  font: 500 12px/1.3 ui-monospace, monospace;
-  min-width: 8rem;
-  padding: 0.4rem 0.5rem;
-}
-@media screen and (max-width: 640px) {
-  body { padding-bottom: calc(var(--pi-preview-watch-nav-height, 3rem) + 1rem); }
-  #pi-markdown-preview-watch-nav { border-radius: 10px; bottom: 0.5rem; left: 0.5rem; right: auto; top: auto; }
-  #pi-markdown-preview-watch-nav a,
-  #pi-markdown-preview-watch-nav button,
-  #pi-markdown-preview-watch-nav span { padding-inline: 0.38rem; }
-  #pi-markdown-preview-watch-source { flex-basis: 100%; max-width: 100%; }
-  #pi-markdown-preview-watch-share-panel { bottom: calc(var(--pi-preview-watch-nav-height, 3rem) + 1rem); left: 0.5rem; right: auto; top: auto; }
-}
-@media print { #pi-markdown-preview-watch-nav { display: none; } }
-</style>`;
+	const watchStyle = `<style id="pi-markdown-preview-watch-style">${WATCH_CONTROLS_STYLE}</style>`;
 	watchedHtml = /<\/head>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/head>/i, `${watchStyle}\n</head>`)
 		: `${watchStyle}\n${watchedHtml}`;
@@ -346,14 +261,23 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const sourceControl = sourceLabel
 		? `<span id="pi-markdown-preview-watch-source" data-watch-control="source" title="${escapeBrowserWatchHtmlAttribute(sourceLabel)}">${escapeBrowserWatchHtmlText(sourceLabel)}</span>`
 		: "";
-	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Rendered preview history">
-  ${sourceControl}
-  <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
-  <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1} of ${revisions.length}`}</span>
-  <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
-  <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
-  <button data-watch-control="wrap-code" type="button" hidden></button>
+	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser">Copy link</button>
+  <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
+    <span>Preview ·</span>
+    <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
+    <span id="pi-markdown-preview-watch-new" data-watch-control="new" hidden>New</span>
+    <span class="pi-preview-watch-chevron" aria-hidden="true">▾</span>
+  </button>
+  <div id="pi-markdown-preview-watch-controls" data-watch-control="controls" role="group" aria-label="Preview history and wrapping" hidden>
+    ${sourceControl}
+    <div class="pi-preview-watch-actions">
+      <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
+      <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
+      <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
+      <button data-watch-control="wrap-code" type="button" hidden></button>
+    </div>
+  </div>
   <div id="pi-markdown-preview-watch-share-panel" data-watch-control="share-panel" role="dialog" aria-label="Transferable preview link" hidden>
     <span>Copy this link:</span>
     <input data-watch-control="share-input" aria-label="Authenticated preview link" readonly />
@@ -370,8 +294,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   let revisions = ${JSON.stringify(revisions)};
   const followingLatest = revision === revisions[revisions.length - 1];
   const navigation = document.currentScript?.previousElementSibling;
-  // Wrapping controls and narrow screens can make the toolbar multi-row.
-  // Keep the share panel and the document's bottom clearance below its actual height.
+  // Measure only the compact bar. Absolutely positioned panels never reserve
+  // document space or move the bar; narrow/touch layouts still need clearance.
   const updateNavigationHeight = () => {
     if (navigation) document.documentElement.style.setProperty('--pi-preview-watch-nav-height', Math.ceil(navigation.getBoundingClientRect().height) + 'px');
   };
@@ -388,6 +312,105 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const sharePanel = navigation?.querySelector('[data-watch-control="share-panel"]');
   const shareInput = navigation?.querySelector('[data-watch-control="share-input"]');
   const shareCloseButton = navigation?.querySelector('[data-watch-control="share-close"]');
+  const controlsToggle = navigation?.querySelector('[data-watch-control="toggle"]');
+  const controlsPanel = navigation?.querySelector('[data-watch-control="controls"]');
+  const newBadge = navigation?.querySelector('[data-watch-control="new"]');
+  // One-shot, tab-local handoff across this watcher's document navigations.
+  // Never carry the sharing dialog or authenticated URLs into saved UI state.
+  const controlsStateKey = ${navigation.wrapScope ? JSON.stringify("pi-markdown-preview:watch-controls:" + navigation.wrapScope) : "null"};
+  let savedControls;
+  try {
+    if (controlsStateKey) {
+      savedControls = JSON.parse(sessionStorage.getItem(controlsStateKey) || 'null');
+      sessionStorage.removeItem(controlsStateKey);
+    }
+  } catch { /* Storage denial must not break navigation or the controls. */ }
+  let navigating = false;
+  const pointerFocusAttribute = 'data-watch-restored-pointer-focus';
+  let restoredPointerFocus;
+  const clearRestoredPointerFocus = () => {
+    restoredPointerFocus?.removeAttribute(pointerFocusAttribute);
+    restoredPointerFocus = undefined;
+  };
+  const saveControls = (focusControl, keyboard = false) => {
+    if (!controlsStateKey) return;
+    try {
+      if (controlsPanel && !controlsPanel.hidden) {
+        const focused = focusControl || (navigation.contains(document.activeElement) ? document.activeElement : null);
+        sessionStorage.setItem(controlsStateKey, JSON.stringify({
+          open: true,
+          focus: focused?.getAttribute('data-watch-control'),
+          focusVisible: keyboard || Boolean(focused?.matches(':focus-visible') && !focused.hasAttribute(pointerFocusAttribute)),
+          scrollTop: controlsPanel.scrollTop,
+        }));
+      } else sessionStorage.removeItem(controlsStateKey);
+    } catch {}
+  };
+  let interactionVersion = 0;
+  const openControls = () => {
+    if (!controlsPanel || !controlsToggle) return;
+    controlsPanel.hidden = false;
+    controlsToggle.setAttribute('aria-expanded', 'true');
+    controlsToggle.title = 'Hide preview controls';
+  };
+  const closeControls = () => {
+    if (controlsPanel) controlsPanel.hidden = true;
+    controlsToggle?.setAttribute('aria-expanded', 'false');
+    if (controlsToggle) controlsToggle.title = 'Show preview controls';
+  };
+  const closeShare = () => {
+    if (sharePanel) sharePanel.hidden = true;
+    if (shareInput) shareInput.value = '';
+  };
+  const dismissPanels = (returnFocus = false) => {
+    const trigger = sharePanel && !sharePanel.hidden ? copyLinkButton : controlsPanel && !controlsPanel.hidden ? controlsToggle : null;
+    interactionVersion += 1;
+    closeControls();
+    closeShare();
+    if (returnFocus) trigger?.focus({ preventScroll: true });
+  };
+  controlsToggle?.addEventListener('click', () => {
+    const open = controlsPanel?.hidden;
+    dismissPanels();
+    if (open) openControls();
+  });
+  const onOutsidePointer = (event) => {
+    if (!navigation?.contains(event.target)) dismissPanels();
+  };
+  const onPanelEscape = (event) => {
+    if (event.key !== 'Escape' || event.defaultPrevented || (controlsPanel?.hidden && sharePanel?.hidden)) return;
+    event.preventDefault();
+    dismissPanels(true);
+  };
+  window.addEventListener('pointerdown', onOutsidePointer);
+  window.addEventListener('keydown', onPanelEscape);
+  navigation?.addEventListener('focusout', () => {
+    // A microtask can run before native Tab focus reaches its destination.
+    // Defer one task, also allowing the synchronous copy fallback to restore focus.
+    window.setTimeout(() => { if (!navigating && !navigation.contains(document.activeElement)) dismissPanels(); }, 0);
+  });
+  if (savedControls?.open === true) {
+    openControls();
+    if (savedControls.focus) {
+      const control = [previousLink, nextLink, latestLink, controlsToggle].find(element =>
+        element?.getAttribute('data-watch-control') === savedControls.focus && element.getAttribute('aria-disabled') !== 'true');
+      // A boundary can disable the button just used; keep keyboard access via
+      // the trigger instead. preventScroll leaves document restoration alone.
+      const target = control || controlsToggle;
+      if (target && savedControls.focusVisible === false) {
+        // A new document treats programmatic focus as keyboard focus. Retain
+        // the tab-order position without inventing a ring after a mouse/touch
+        // click. Only this restored control is affected; real keyboard input
+        // or blur immediately returns it to the browser's native styling.
+        restoredPointerFocus = target;
+        target.setAttribute(pointerFocusAttribute, '');
+        target.addEventListener('blur', clearRestoredPointerFocus, { once: true });
+        window.addEventListener('keydown', clearRestoredPointerFocus, true);
+      }
+      target?.focus({ preventScroll: true });
+    }
+    if (controlsPanel && Number.isFinite(savedControls.scrollTop)) controlsPanel.scrollTop = savedControls.scrollTop;
+  }
   const revisionUrl = (value) => '/?revision=' + encodeURIComponent(value);
   const latestUrl = () => '/' + window.location.hash;
   const withCurrentHash = (value) => {
@@ -396,30 +419,48 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     return target.href;
   };
   const copyWithFallback = (value) => {
+    const activeElement = document.activeElement;
+    const selection = window.getSelection();
+    const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange()) : [];
     const textarea = document.createElement('textarea');
     textarea.value = value;
     textarea.setAttribute('readonly', '');
     textarea.style.position = 'fixed';
     textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
-    textarea.select();
-    const copied = document.execCommand('copy');
-    textarea.remove();
-    return copied;
+    try {
+      document.body.appendChild(textarea);
+      textarea.select();
+      return document.execCommand('copy');
+    } catch { return false; }
+    finally {
+      textarea.remove();
+      if (selection) {
+        selection.removeAllRanges();
+        for (const range of ranges) selection.addRange(range);
+      }
+      if (activeElement?.isConnected && document.activeElement !== activeElement) activeElement.focus({ preventScroll: true });
+    }
   };
   const showTransferableLink = (value) => {
     if (!sharePanel || !shareInput) return;
+    closeControls();
     shareInput.value = value;
     sharePanel.hidden = false;
-    shareInput.focus();
+    shareInput.focus({ preventScroll: true });
     shareInput.select();
   };
-  shareCloseButton?.addEventListener('click', () => {
-    if (sharePanel) sharePanel.hidden = true;
-    if (shareInput) shareInput.value = '';
-  });
+  shareCloseButton?.addEventListener('click', () => dismissPanels(true));
+  let copying = false;
+  let copyFeedbackTimer;
   copyLinkButton?.addEventListener('click', async () => {
-    copyLinkButton.disabled = true;
+    if (copying) return;
+    dismissPanels();
+    const copyInteraction = interactionVersion;
+    copying = true;
+    clearTimeout(copyFeedbackTimer);
+    copyLinkButton.textContent = 'Copy link';
+    copyLinkButton.setAttribute('aria-disabled', 'true');
+    copyLinkButton.setAttribute('aria-busy', 'true');
     try {
       const response = await fetch(${JSON.stringify(SHARE_PATH)} + '?revision=' + encodeURIComponent(revision));
       if (!response.ok) throw new Error('Could not create a transferable preview link');
@@ -432,19 +473,19 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
           copied = true;
         } catch {}
       }
-      if (!copied) copied = copyWithFallback(transferableUrl.href);
+      if (!copied && copyInteraction === interactionVersion) copied = copyWithFallback(transferableUrl.href);
       if (copied) copyLinkButton.textContent = 'Copied';
-      else {
+      else if (copyInteraction === interactionVersion) {
         showTransferableLink(transferableUrl.href);
         copyLinkButton.textContent = 'Select link';
-      }
+      } else copyLinkButton.textContent = 'Copy failed';
     } catch {
       copyLinkButton.textContent = 'Copy failed';
     } finally {
-      window.setTimeout(() => {
-        copyLinkButton.textContent = 'Copy link';
-        copyLinkButton.disabled = false;
-      }, 1400);
+      copying = false;
+      copyLinkButton.removeAttribute('aria-disabled');
+      copyLinkButton.removeAttribute('aria-busy');
+      copyFeedbackTimer = window.setTimeout(() => { copyLinkButton.textContent = 'Copy link'; }, 1400);
     }
   });
   const canonicalUrl = revisionUrl(revision) + window.location.hash;
@@ -470,12 +511,16 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     if (currentIndex < 0) {
       setLink(previousLink, undefined);
       setLink(nextLink, revisions[0]);
-      if (countLabel) countLabel.textContent = 'History expired';
+      if (countLabel) countLabel.textContent = 'Expired';
     } else {
       setLink(previousLink, revisions[currentIndex - 1]);
       setLink(nextLink, revisions[currentIndex + 1]);
-      if (countLabel) countLabel.textContent = (currentIndex + 1) + ' of ' + revisions.length;
+      if (countLabel) countLabel.textContent = (currentIndex + 1) + '/' + revisions.length;
     }
+    const hasNewRevision = hasNewResponse && revision !== latestRevision;
+    if (newBadge) newBadge.hidden = !hasNewRevision;
+    const position = currentIndex < 0 ? 'revision no longer retained' : 'revision ' + (currentIndex + 1) + ' of ' + revisions.length;
+    controlsToggle?.setAttribute('aria-label', 'Preview controls, ' + position + (hasNewRevision ? ', new revision available' : ''));
     setLink(latestLink, revision === latestRevision ? undefined : latestRevision);
     if (latestLink) {
       latestLink.textContent = hasNewResponse && revision !== latestRevision ? 'Latest (new)' : 'Latest';
@@ -484,34 +529,34 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   };
   const initialLatestRevision = revisions[revisions.length - 1] || revision;
   const events = new EventSource(${JSON.stringify(`${EVENTS_PATH}?revision=`)} + encodeURIComponent(revision) + '&latest=' + encodeURIComponent(initialLatestRevision));
-  let navigating = false;
-  const navigateTo = (value, replace = false) => {
+  const navigateTo = (value, replace = false, focusControl, keyboard = false) => {
     if (navigating) return false;
     navigating = true;
+    saveControls(focusControl, keyboard);
     readingPosition?.save();
     events.close();
     if (replace) window.location.replace(value);
     else window.location.assign(value);
     return true;
   };
-  const navigateToLink = (link) => {
+  const navigateToLink = (link, keyboard = false) => {
     const href = link?.getAttribute('href');
-    return href ? navigateTo(withCurrentHash(href)) : false;
+    return href ? navigateTo(withCurrentHash(href), false, link, keyboard) : false;
   };
   previousLink?.addEventListener('click', (event) => {
     if (!previousLink.getAttribute('href')) return;
     event.preventDefault();
-    navigateToLink(previousLink);
+    navigateToLink(previousLink, event.detail === 0);
   });
   nextLink?.addEventListener('click', (event) => {
     if (!nextLink.getAttribute('href')) return;
     event.preventDefault();
-    navigateToLink(nextLink);
+    navigateToLink(nextLink, event.detail === 0);
   });
   latestLink?.addEventListener('click', (event) => {
     if (!latestLink.getAttribute('href')) return;
     event.preventDefault();
-    navigateTo(latestUrl());
+    navigateTo(latestUrl(), false, latestLink, event.detail === 0);
   });
   window.addEventListener('keydown', (event) => {
     if (event.defaultPrevented || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -522,7 +567,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     else if (event.key === 'ArrowRight') link = nextLink;
     else return;
     event.preventDefault();
-    navigateToLink(link);
+    navigateToLink(link, true);
   });
   events.addEventListener('reload', (event) => {
     let state;
@@ -542,9 +587,15 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   });
   events.addEventListener('stopped', () => events.close());
   window.addEventListener('pagehide', () => {
+    if (!navigating) saveControls();
+    navigating = true;
     events.close();
     navigationResizeObserver?.disconnect();
     window.removeEventListener('resize', updateNavigationHeight);
+    window.removeEventListener('pointerdown', onOutsidePointer);
+    window.removeEventListener('keydown', onPanelEscape);
+    window.removeEventListener('keydown', clearRestoredPointerFocus, true);
+    clearTimeout(copyFeedbackTimer);
   }, { once: true });
   window.addEventListener('pageshow', (event) => { if (event.persisted) window.location.reload(); });
 })();

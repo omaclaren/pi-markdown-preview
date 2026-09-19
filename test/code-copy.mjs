@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { openWatchControls } from "./watch-controls.mjs";
 
 // Exercise the browser's click/focus/selection paths, but intercept clipboard
 // writes so the regression suite never reads or changes the user's clipboard.
@@ -59,6 +60,7 @@ export async function assertCodeCopy({ browser, fileUrl, watchUrl, expectedText,
 			for (let index = 0; index < expectedText.length; index++) await clickCopy(index);
 			assert.deepEqual(await copiedTexts(), expectedText, "Plain, highlighted, diff, and diagram blocks must copy text only, without controls.");
 			assert.deepEqual(await geometry(), unwrappedGeometry, "Copy -> Copied must not move buttons or document content.");
+			await openWatchControls(page);
 			await page.click("[data-code-wrap-all]");
 			const wrappedGeometry = await geometry();
 			for (let index = 0; index < expectedText.length; index++) await clickCopy(index);
