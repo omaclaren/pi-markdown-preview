@@ -1504,6 +1504,7 @@ await assertPreviewPageLayoutCollection();
 
 await import("./code-wrap.mjs");
 await import("./document-updates.mjs");
+await import("./watch-lifecycle.mjs");
 
 async function assertSinglePagePdfFigureRendering() {
 	const { executablePath, args } = getPreviewBrowserLaunchOptions();

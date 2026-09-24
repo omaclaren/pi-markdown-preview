@@ -48,6 +48,12 @@
 #pi-markdown-preview-watch-nav button[aria-disabled="true"] { opacity: 0.45; cursor: default; }
 #pi-markdown-preview-watch-nav a[aria-disabled="true"] { pointer-events: none; }
 #pi-markdown-preview-watch-copy-link { min-width: 7em; }
+#pi-markdown-preview-watch-status {
+  color: var(--warn, #b86e00);
+  font-weight: 600;
+  padding: 0.35rem 0.55rem;
+  white-space: nowrap;
+}
 #pi-markdown-preview-watch-toggle { gap: 0.35rem; }
 #pi-markdown-preview-watch-count { color: var(--muted, GrayText); font-variant-numeric: tabular-nums; }
 #pi-markdown-preview-watch-toggle[aria-expanded="true"] .pi-preview-watch-chevron { transform: rotate(180deg); }

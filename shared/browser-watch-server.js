@@ -240,7 +240,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const isWaiting = navigation.isWaiting === true;
 	const sourceLabel = navigation.sourceLabel?.trim();
 	if (sourceLabel) {
-		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — Markdown Preview`);
+		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — ${navigation.titleSuffix || "Markdown Preview"}`);
 		watchedHtml = /<title\b[^>]*>[\s\S]*?<\/title>/i.test(watchedHtml)
 			? watchedHtml.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, `<title>${escapedTitle}</title>`)
 			: watchedHtml.replace(/<\/head>/i, `<title>${escapedTitle}</title>\n</head>`);
@@ -262,6 +262,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		? `<span id="pi-markdown-preview-watch-source" data-watch-control="source" title="${escapeBrowserWatchHtmlAttribute(sourceLabel)}">${escapeBrowserWatchHtmlText(sourceLabel)}</span>`
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
+  <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
   <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser">Copy link</button>
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
     <span>Preview ·</span>
@@ -272,9 +273,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   <div id="pi-markdown-preview-watch-controls" data-watch-control="controls" role="group" aria-label="Preview history and wrapping" hidden>
     ${sourceControl}
     <div class="pi-preview-watch-actions">
-      <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
+      <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left; add Shift for the oldest)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
       <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
-      <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
+      <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" title="Latest revision (Option/Alt+Shift+Right)" aria-keyshortcuts="Alt+Shift+ArrowRight" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
       <button data-watch-control="wrap-code" type="button" hidden></button>
     </div>
   </div>
@@ -292,6 +293,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const readingPosition = ${preserveReadingPosition ? `window.PiMarkdownPreviewReadingPosition.install(document.getElementById('preview-root'), ${JSON.stringify(navigation.wrapScope)})` : "undefined"};
   const revision = ${JSON.stringify(revision)};
   let revisions = ${JSON.stringify(revisions)};
+  // Identifies this server run: revision numbers restart when a server does.
+  const instance = ${JSON.stringify(String(navigation.instance ?? ""))};
   const followingLatest = revision === revisions[revisions.length - 1];
   const navigation = document.currentScript?.previousElementSibling;
   // Measure only the compact bar. Absolutely positioned panels never reserve
@@ -527,14 +530,56 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       latestLink.classList.toggle('pi-markdown-preview-watch-new', hasNewResponse && revision !== latestRevision);
     }
   };
-  const initialLatestRevision = revisions[revisions.length - 1] || revision;
-  const events = new EventSource(${JSON.stringify(`${EVENTS_PATH}?revision=`)} + encodeURIComponent(revision) + '&latest=' + encodeURIComponent(initialLatestRevision));
+  // A server started on a fixed port can come back after a restart, so its
+  // pages keep trying to reconnect. Other servers never return once stopped.
+  const reconnectAfterStop = ${navigation.reconnectAfterStop === true ? "true" : "false"};
+  const statusLine = navigation?.querySelector('[data-watch-control="status"]');
+  const setStatus = (text) => {
+    if (!statusLine) return;
+    statusLine.textContent = text || '';
+    statusLine.hidden = !text;
+  };
+  let events;
+  let reconnectTimer;
+  let reconnectDelay = 1000;
+  const eventsUrl = () => ${JSON.stringify(`${EVENTS_PATH}?revision=`)} + encodeURIComponent(revision) + '&latest=' + encodeURIComponent(revisions[revisions.length - 1] || revision) + '&instance=' + encodeURIComponent(instance);
+  const scheduleReconnect = () => {
+    if (!reconnectAfterStop || navigating) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = window.setTimeout(connectEvents, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+  };
+  const connectEvents = () => {
+    if (navigating) return;
+    const source = new EventSource(eventsUrl());
+    events = source;
+    source.addEventListener('open', () => {
+      reconnectDelay = 1000;
+      setStatus('');
+    });
+    source.addEventListener('error', () => {
+      if (navigating || events !== source) return;
+      // CONNECTING: the browser retries by itself. CLOSED: it has given up.
+      if (source.readyState === EventSource.CLOSED) {
+        setStatus(reconnectAfterStop ? 'Disconnected · retrying…' : 'Disconnected · this page no longer updates');
+        scheduleReconnect();
+      } else setStatus('Disconnected · retrying…');
+    });
+    source.addEventListener('reload', onReload);
+    source.addEventListener('stopped', () => {
+      source.close();
+      if (events !== source) return;
+      setStatus(reconnectAfterStop ? 'Preview stopped · reconnects when it restarts' : 'Preview stopped · this page no longer updates');
+      scheduleReconnect();
+    });
+  };
   const navigateTo = (value, replace = false, focusControl, keyboard = false) => {
     if (navigating) return false;
     navigating = true;
     saveControls(focusControl, keyboard);
     readingPosition?.save();
-    events.close();
+    clearTimeout(reconnectTimer);
+    events?.close();
     if (replace) window.location.replace(value);
     else window.location.assign(value);
     return true;
@@ -559,20 +604,32 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     navigateTo(latestUrl(), false, latestLink, event.detail === 0);
   });
   window.addEventListener('keydown', (event) => {
-    if (event.defaultPrevented || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.defaultPrevented || !event.altKey || event.ctrlKey || event.metaKey) return;
     const target = event.target;
     if (target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
-    let link;
-    if (event.key === 'ArrowLeft') link = previousLink;
-    else if (event.key === 'ArrowRight') link = nextLink;
-    else return;
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     event.preventDefault();
-    navigateToLink(link, true);
+    if (event.shiftKey) {
+      // Shift jumps to the ends of the retained history.
+      if (event.key === 'ArrowRight') {
+        if (latestLink?.getAttribute('href')) navigateTo(latestUrl(), false, latestLink, true);
+        return;
+      }
+      const oldest = revisions[0];
+      if (oldest !== undefined && oldest !== revision && !${JSON.stringify(isWaiting)}) navigateTo(withCurrentHash(revisionUrl(oldest)), false, previousLink, true);
+      return;
+    }
+    navigateToLink(event.key === 'ArrowLeft' ? previousLink : nextLink, true);
   });
-  events.addEventListener('reload', (event) => {
+  function onReload(event) {
     let state;
     try { state = JSON.parse(event.data); } catch { return; }
     if (!state || !Array.isArray(state.revisions) || state.revisions.length === 0) return;
+    if (state.instance && instance && state.instance !== instance) {
+      // A restarted server: this page's revision numbers belong to the old run.
+      if (!navigating) navigateTo(latestUrl(), true);
+      return;
+    }
     const nextRevisions = state.revisions.map(String);
     const nextLatestRevision = nextRevisions[nextRevisions.length - 1];
     if (nextLatestRevision === revision) {
@@ -584,12 +641,13 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       return;
     }
     updateNavigation(nextRevisions, true);
-  });
-  events.addEventListener('stopped', () => events.close());
+  }
+  connectEvents();
   window.addEventListener('pagehide', () => {
     if (!navigating) saveControls();
     navigating = true;
-    events.close();
+    clearTimeout(reconnectTimer);
+    events?.close();
     navigationResizeObserver?.disconnect();
     window.removeEventListener('resize', updateNavigationHeight);
     window.removeEventListener('pointerdown', onOutsidePointer);
@@ -644,12 +702,29 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  *
  * @param {string} initialHtml
  * @param {string} resourceRoot
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean }} [options]
+ * Optional `port` and `token` let a caller restart a watch at the same address:
+ * open pages then reconnect by themselves instead of going stale. `port`
+ * failing to bind rejects (e.g. EADDRINUSE) so the caller can fall back to 0.
+ *
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, port?: number, token?: string, titleSuffix?: string, expiredHint?: string }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
-	const token = randomBytes(24).toString("base64url");
-	// Public UI-state scope, deliberately unrelated to the authentication token.
-	const wrapScope = randomBytes(16).toString("hex");
+	const fixedPort = options.port ?? 0;
+	if (!Number.isInteger(fixedPort) || fixedPort < 0 || fixedPort > 65535) {
+		throw new Error("Browser preview watch port must be an integer from 0 to 65535.");
+	}
+	if (options.token !== undefined && (typeof options.token !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(options.token))) {
+		throw new Error("Browser preview watch token must be 32-256 URL-safe characters.");
+	}
+	const token = options.token ?? randomBytes(24).toString("base64url");
+	// Public UI-state scope, deliberately unrelated to the authentication token:
+	// random, or a one-way derivation when a caller reuses a token across restarts
+	// (so wrapping and reading-position state survive the restart too).
+	const wrapScope = options.token === undefined
+		? randomBytes(16).toString("hex")
+		: createHmac("sha256", token).update("ui-state-scope").digest("hex").slice(0, 32);
+	const instance = randomBytes(8).toString("hex");
+	const expiredHint = typeof options.expiredHint === "string" ? options.expiredHint.trim() : "Re-run /preview-browser --watch.";
 	const lexicalResourceRoot = resolve(resourceRoot);
 	const resolvedResourceRoot = await realpath(lexicalResourceRoot);
 	const historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
@@ -696,6 +771,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	let cookieName = "";
 
 	const getRevisionState = () => ({
+		instance,
 		revision: documents[documents.length - 1].revision,
 		revisions: documents.map((document) => document.revision),
 	});
@@ -732,7 +808,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		if (requestUrl.pathname === "/") {
 			const queryToken = requestUrl.searchParams.get("token") ?? "";
 			if (queryToken !== token && !hasWatchCookie(req)) {
-				respondText(res, 403, "Invalid or expired preview watch token. Re-run /preview-browser --watch.");
+				respondText(res, 403, `Invalid or expired preview watch token.${expiredHint ? ` ${expiredHint}` : ""}`);
 				return;
 			}
 
@@ -751,8 +827,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				revisions: documents.map((document) => document.revision),
 				isWaiting: !hasHistoryDocument,
 				sourceLabel: options.sourceLabel,
+				titleSuffix: options.titleSuffix,
 				wrapScope,
 				preserveReadingPosition: options.preserveReadingPosition,
+				reconnectAfterStop: fixedPort !== 0,
+				instance,
 			}, scriptNonce);
 			res.writeHead(200, {
 				...getHtmlSecurityHeaders(scriptNonce),
@@ -799,13 +878,16 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				Connection: "keep-alive",
 			});
 			res.write(": connected\n\n");
+			// Reconnect promptly after a restart on the same port.
+			res.write("retry: 1500\n\n");
 			eventClients.add(res);
 			const removeClient = () => eventClients.delete(res);
 			req.once("close", removeClient);
 			res.once("close", removeClient);
 
 			const clientLatestRevision = Number(requestUrl.searchParams.get("latest"));
-			if (!Number.isInteger(clientLatestRevision) || clientLatestRevision !== documents[documents.length - 1].revision) {
+			if (!Number.isInteger(clientLatestRevision) || clientLatestRevision !== documents[documents.length - 1].revision
+				|| requestUrl.searchParams.get("instance") !== instance) {
 				sendRevisionState(res);
 			}
 			return;
@@ -897,7 +979,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		};
 		server.once("error", onError);
 		server.once("listening", onListening);
-		server.listen(0, "127.0.0.1");
+		server.listen(fixedPort, "127.0.0.1");
 	});
 
 	const address = server.address();
