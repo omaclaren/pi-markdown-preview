@@ -35,6 +35,7 @@ import {
 import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
+import { readLinkedDocument } from "./shared/read-linked-document.js";
 
 // Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
 // A namespace lookup avoids an ESM load failure and falls back to rendering without targeted deletion.
@@ -4467,6 +4468,14 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
 </html>`;
 }
 
+// Linked documents are click-to-open snapshots, not additional file watchers.
+async function renderBrowserWatchLinkedDocument(path: string, style: PreviewStyle, fontSizePx: number, signal: AbortSignal): Promise<string> {
+	const content = await readLinkedDocument(path, signal);
+	signal.throwIfAborted();
+	const prepared = prepareFilePreview(path, content);
+	return (await renderPreviewHtmlDocument(prepared.markdown, style, dirname(path), prepared.isLatex, fontSizePx, signal)).html;
+}
+
 async function renderPreviewHtmlDocument(
 	markdown: string,
 	style: PreviewStyle,
@@ -5400,6 +5409,7 @@ export default function (pi: ExtensionAPI) {
 			const server = await createBrowserWatchServer(html, resourcePath, {
 				initialDocumentIsHistory: !!response,
 				sourceLabel: provisional.sourceLabel,
+				renderLocalDocument: (path, signal) => renderBrowserWatchLinkedDocument(path, getPreviewStyle(ctx.ui.theme), newWatch?.fontSizePx ?? provisional.requestedFontSizePx, signal),
 			});
 			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
 				await server.close();
@@ -5530,6 +5540,7 @@ export default function (pi: ExtensionAPI) {
 				initialDocumentIsHistory: true,
 				sourceLabel: provisional.sourceLabel,
 				preserveReadingPosition: true,
+				renderLocalDocument: (path, signal) => renderBrowserWatchLinkedDocument(path, getPreviewStyle(ctx.ui.theme), newWatch?.fontSizePx ?? provisional.requestedFontSizePx, signal),
 			});
 			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
 				await server.close();

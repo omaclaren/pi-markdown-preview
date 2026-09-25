@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,7 @@ if (process.platform === "win32") {
 }
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const root = await mkdtemp(join(tmpdir(), "pi-markdown-preview-multi-watch-"));
+const root = await realpath(await mkdtemp(join(tmpdir(), "pi-markdown-preview-multi-watch-")));
 const bin = join(root, "bin");
 const openLog = join(root, "open.log");
 const fakeCmuxPath = join(bin, "cmux");
@@ -29,8 +30,23 @@ await writeFile(openLog, "");
 
 const one = join(root, "one.md");
 const two = join(root, "two.md");
-await writeFile(one, "# One\n\nVersion one\n");
+await mkdir(join(root, "docs"));
+const report = join(root, "docs", "linked report.md");
+await writeFile(report, "# Linked report\n\n## Details\n\n[Code](example.py)\n\n![Figure](figure.svg)\n");
+await writeFile(join(root, "docs", "example.py"), "print('nested code')\n");
+await writeFile(join(root, "docs", "figure.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"></svg>');
+await writeFile(join(root, "too-large.md"), "x".repeat(2 * 1024 * 1024 + 1));
+await writeFile(join(root, "binary.txt"), Buffer.from([0, 1, 2]));
+await writeFile(one, "# One\n\nVersion one\n\n[Report](<docs/linked report.md#details>)\n\n[Large](too-large.md) [Binary](binary.txt)\n");
 await writeFile(two, "# Two\n\nIndependent\n");
+// Seed a real assistant response without calling a model or using user logs.
+const session = SessionManager.create(root, join(root, "sessions"));
+session.appendMessage({ role: "user", content: "Show the report", timestamp: Date.now() });
+session.appendMessage({
+	role: "assistant", content: [{ type: "text", text: `[Absolute report](<${report}#details>)\n\n[Relative report](<docs/linked report.md>)` }],
+	api: "openai-responses", provider: "openai", model: "test-fixture", stopReason: "stop", timestamp: Date.now(),
+	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+});
 
 const env = {
 	...process.env,
@@ -42,10 +58,10 @@ const env = {
 	PMP_PANDOC_DELAY_FILE: pandocDelayFile,
 	PMP_REAL_PANDOC: realPandocPath,
 };
-const piCommand = join(repo, "node_modules", ".bin", "pi");
+const piCommand = process.env.PI_MARKDOWN_PREVIEW_TEST_PI_COMMAND || join(repo, "node_modules", ".bin", "pi");
 const child = spawn(piCommand, [
 	"--mode", "rpc",
-	"--no-session",
+	"--session", session.getSessionFile(),
 	"--no-extensions",
 	"--no-skills",
 	"--no-prompt-templates",
@@ -141,15 +157,33 @@ try {
 	assert.match(oneSession.html, /<title>one\.md — Markdown Preview<\/title>/);
 	assert.match(oneSession.html, /PiMarkdownPreviewReadingPosition\.install/, "Real file-watch commands should enable reading-position preservation.");
 	assert.match(oneSession.html, /data-watch-control="source"[^>]*>one\.md<\/span>/);
+	const documentLinks = page => [...page.matchAll(/<a\b[^>]*href="(\/__pi_markdown_preview_document__\/[^ "]+)"/g)].map(match => match[1].replaceAll("&amp;", "&"));
+	const linkedPage = async (watch, link) => {
+		const response = await fetch(new URL(link, watch.origin), { headers: { cookie: watch.cookie } });
+		assert.equal(response.status, 200);
+		return await response.text();
+	};
+	const fileLinks = documentLinks(oneSession.html);
+	assert.equal(fileLinks.length, 3, "real file watch must rewrite supported document links");
+	assert.equal(new URL(fileLinks[0], oneSession.origin).hash, "#details");
+	const linked = await linkedPage(oneSession, fileLinks[0]);
+	assert.ok(linked.includes('<h1 id="linked-report">Linked report</h1>'));
+	assert.ok(linked.includes("--preview-font-size: 15px"));
+	assert.ok((await linkedPage(oneSession, documentLinks(linked)[0])).includes("nested code"));
+	const image = /<img\b[^>]*src="([^"]+)"/.exec(linked)[1];
+	assert.equal((await fetch(new URL(image, oneSession.origin), { headers: { cookie: oneSession.cookie } })).status, 200);
+	assert.equal((await fetch(new URL(fileLinks[0], oneSession.origin))).status, 403);
+	for (const [index, status] of [[1, 413], [2, 415]]) assert.equal((await fetch(new URL(fileLinks[index], oneSession.origin), { headers: { cookie: oneSession.cookie } })).status, status);
 
 	await command(`/preview-browser -w --file ${JSON.stringify(two)}`);
 	urls = await waitOpenCount(2);
 	const twoSession = await bootstrap(urls[1]);
 	assert.notEqual(oneSession.origin, twoSession.origin);
 
-	await command(`/preview-browser -w --file ${JSON.stringify(one)}`);
+	await command(`/preview-browser -w --font-size 18 --file ${JSON.stringify(one)}`);
 	urls = await waitOpenCount(3);
 	assert.equal(new URL(urls[2]).origin, oneSession.origin, "The same file should reopen its existing server.");
+	assert.ok((await linkedPage(oneSession, fileLinks[0])).includes("--preview-font-size: 18px"), "linked previews use the watcher's current font size");
 
 	const oneAlias = join(root, "one-alias.md");
 	await symlink(one, oneAlias);
@@ -157,12 +191,16 @@ try {
 	urls = await waitOpenCount(4);
 	assert.equal(new URL(urls[3]).origin, oneSession.origin, "A symlink alias should reopen the canonical watcher.");
 
-	await command("/preview-browser -w");
+	await command("/preview-browser -w --font-size 19");
 	urls = await waitOpenCount(5);
 	const responseSession = await bootstrap(urls[4]);
 	assert.match(responseSession.html, /<title>Assistant responses — Markdown Preview<\/title>/);
 	assert.doesNotMatch(responseSession.html, /PiMarkdownPreviewReadingPosition/, "Response-watch commands must not inherit file scroll restoration.");
 	assert.equal(new Set([oneSession.origin, twoSession.origin, responseSession.origin]).size, 3);
+	const responseLinks = documentLinks(responseSession.html);
+	assert.equal(responseLinks.length, 2, "real response watch must rewrite absolute and relative links");
+	assert.equal(new URL(responseLinks[0], responseSession.origin).pathname, new URL(responseLinks[1], responseSession.origin).pathname);
+	assert.ok((await linkedPage(responseSession, responseLinks[0])).includes("--preview-font-size: 19px"));
 
 	const beforeList = notifications.length;
 	await command("/preview-browser --list");
@@ -171,12 +209,13 @@ try {
 	assert.match(listNotice?.message ?? "", /assistant responses/);
 	assert.ok(listNotice?.message.includes(one));
 
+	const beforeEditRevision = revisionOf(await getPage(oneSession));
 	await writeFile(one, "# One\n\nVersion two\n");
 	const oneUpdated = await waitFor(async () => {
 		const html = await getPage(oneSession);
-		return revisionOf(html) >= 2 && html.includes("Version two") ? html : undefined;
+		return revisionOf(html) > beforeEditRevision && html.includes("Version two") ? html : undefined;
 	}, "first file update");
-	assert.equal(revisionOf(oneUpdated), 2);
+	assert.equal(revisionOf(oneUpdated), beforeEditRevision + 1);
 	assert.equal(revisionOf(await getPage(twoSession)), 1, "The second file must not change with the first.");
 	assert.equal(revisionOf(await getPage(responseSession)), 1, "The response watcher must not change with a file.");
 

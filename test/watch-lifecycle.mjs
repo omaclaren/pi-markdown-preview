@@ -11,7 +11,7 @@ import puppeteer from "puppeteer-core";
 import ts from "typescript";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
-const eventsPath = "/__pi_markdown_preview_events__";
+const eventsPath = "/__pi_markdown_preview_state__";
 const conflictStatus = "Disconnected · different preview";
 const traceStatus = page => page.evaluate(() => {
 	const status = document.querySelector('[data-watch-control="status"]');
@@ -22,7 +22,7 @@ const traceStatus = page => page.evaluate(() => {
 const waitForClientCount = async (server, count) => {
 	const deadline = Date.now() + 5000;
 	while (server.clientCount !== count && Date.now() < deadline) await new Promise(done => setTimeout(done, 20));
-	assert.equal(server.clientCount, count, "Expected live SSE connection count.");
+	assert.equal(server.clientCount, count, "Expected recent polling viewer count.");
 };
 const doc = text => `<!doctype html><html><head><meta charset="utf-8"><title>t</title></head><body><main id="preview-root"><p id="body">${text}</p></main></body></html>`;
 const freePort = () => new Promise((resolvePort, reject) => {
@@ -100,12 +100,12 @@ try {
 	assert.equal(await bodyText(), "three");
 	assert.equal(await status(), null, "No status while connected.");
 
-	// A stopped server without a fixed port never returns: say so, once.
+	// Polling detects unavailable servers without holding a permanent connection.
 	await waitForClientCount(history, 1);
 	await history.close();
 	assert.equal(history.clientCount, 0);
 	await page.waitForFunction(() => !document.querySelector('[data-watch-control="status"]').hidden);
-	assert.equal(await status(), "Preview stopped · this page no longer updates");
+	assert.equal(await status(), "Disconnected · preview unavailable");
 
 	// Fixed port and token: the page reconnects to the restarted server and
 	// follows its (renumbered) latest revision.
@@ -116,13 +116,13 @@ try {
 	await page.goto(first.url, { waitUntil: "domcontentloaded" });
 	const firstEventsUrl = new URL((await firstEvents).url());
 	assert.match(firstEventsUrl.searchParams.get("identity"), /^[a-f\d]{64}$/);
-	assert.ok(!firstEventsUrl.href.includes(token), "The SSE URL must not expose the authentication token.");
+	assert.ok(!firstEventsUrl.href.includes(token), "The polling URL must not expose the authentication token.");
 	assert.ok(!(await (await fetch(first.url)).text()).includes(token), "The page must not embed the authentication token.");
-	assert.equal((await fetch(firstEventsUrl)).status, 403, "Public identity alone must not authorize an SSE connection.");
+	assert.equal((await fetch(firstEventsUrl)).status, 403, "Public identity alone must not authorize a state request.");
 	assert.equal(await bodyText(), "before restart");
 	await waitForClientCount(first, 1);
 	await first.close();
-	await page.waitForFunction(() => /reconnects when it restarts/.test(document.querySelector('[data-watch-control="status"]').textContent));
+	await page.waitForFunction(() => /Disconnected.*retrying/.test(document.querySelector('[data-watch-control="status"]').textContent));
 	const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20_000 });
 	const second = await serve(doc("after restart"), { port, token });
 	const restartedResponse = await navigation;
@@ -155,15 +155,15 @@ try {
 		new URL(response.url()).pathname === eventsPath && response.status() !== 403, { timeout: 20_000 });
 	await otherPage.goto(replacement.url, { waitUntil: "domcontentloaded" });
 	const refused = await oldTabReconnect;
-	assert.equal(refused.status(), 200, "SSE rejection must communicate its reason in an event, not an opaque HTTP error.");
-	assert.match(refused.headers()["content-type"], /text\/event-stream/);
+	assert.equal(refused.status(), 409, "Polling can report an identity conflict directly in HTTP.");
+	assert.match(refused.headers()["content-type"], /text\/plain/);
 	const rejection = await page.evaluate(async url => {
 		const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
 		return { status: response.status, body: await response.text() };
 	}, refused.url());
-	assert.deepEqual(rejection, { status: 200, body: "event: identity-mismatch\ndata: {}\n\n" },
-		"Rejection must terminate without exposing document state or registering a live client.");
-	assert.equal((await fetch(refused.url())).status, 403, "Even a rejection event still requires cookie authentication.");
+	assert.deepEqual(rejection, { status: 409, body: "A different preview watcher owns this address." },
+		"Rejection must terminate without exposing document state or registering a viewer.");
+	assert.equal((await fetch(refused.url())).status, 403, "Even a rejection still requires cookie authentication.");
 	await page.waitForFunction(text => document.querySelector('[data-watch-control="status"]').textContent === text, {}, conflictStatus);
 	await traceStatus(page);
 	for (let retry = 0; retry < 2; retry++) {
@@ -172,13 +172,13 @@ try {
 		assert.equal(await status(), conflictStatus, "Repeated identity rejections must retain the specific reason.");
 	}
 	assert.ok((await page.evaluate(() => window.__watchStatusChanges)).every(text => text === conflictStatus),
-		"A retry's open event must not briefly clear the conflict message.");
+		"Starting another poll must not briefly clear the conflict message.");
 	const oldIdentity = new URL(refused.url()).searchParams.get("identity");
 	assert.match(oldIdentity, /^[a-f\d]{64}$/, "Pages send a non-secret, token-derived identity, not the token.");
 	assert.notEqual(oldIdentity, token);
 	assert.equal(await bodyText(), "original", "Cookie replacement must not retarget an existing tab.");
 	assert.equal(await page.evaluate(async identity => (await fetch('/?identity=' + identity)).status, oldIdentity), 409,
-		"Bound HTTP navigations must reject a cookie/port switch after SSE validation too.");
+		"Bound HTTP navigations must reject a cookie/port switch after state validation too.");
 	// Stub both clipboard paths: a failed assertion must never write to the
 	// user's clipboard, even if the sharing request regresses to the wrong watch.
 	await page.evaluate(() => {
@@ -230,9 +230,9 @@ try {
 	assert.equal(await bodyText(), "generated token, restarted");
 
 	// Check the page-side identity guard independently of the server's query
-	// check: a handshake or reload with a missing/wrong identity must not
-	// navigate, even if it claims a fresh instance and matching revision number.
-	for (const [eventType, responseIdentity] of [["reload", undefined], ["reload", "f".repeat(64)], ["connected", undefined], ["connected", "f".repeat(64)]]) {
+	// check: state with a missing/wrong identity must not navigate, even if it
+	// claims a fresh instance and matching revision number.
+	for (const responseIdentity of [undefined, "f".repeat(64)]) {
 		const guardedPage = await browser.newPage();
 		guardedPage.on("pageerror", error => errors.push(String(error)));
 		await guardedPage.setRequestInterception(true);
@@ -240,7 +240,7 @@ try {
 		guardedPage.on("request", request => {
 			if (request.isNavigationRequest() && request.frame() === guardedPage.mainFrame()) navigations += 1;
 			const action = new URL(request.url()).pathname === eventsPath
-				? request.respond({ status: 200, contentType: "text/event-stream", body: `event: ${eventType}\ndata: ${JSON.stringify({ identity: responseIdentity, instance: "different-run", revision: 1, revisions: [1] })}\n\n` })
+				? request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ identity: responseIdentity, instance: "different-run", revision: 1, revisions: [1] }) })
 				: request.continue();
 			void action.catch(() => {}); // Closing the test page can cancel requests.
 		});
@@ -251,8 +251,8 @@ try {
 		await guardedPage.close();
 	}
 
-	// A known conflict survives both failed HTTP retries and an open SSE stream
-	// that has not identified itself yet. Then recover on the SAME server run
+	// A known conflict survives both failed HTTP retries and malformed state.
+	// Then recover on the SAME server run
 	// and revision: no page navigation/reload can incidentally clear the message.
 	const retryServer = await serve(doc("retry status"), { port: await freePort() });
 	const retryPage = await browser.newPage();
@@ -265,9 +265,9 @@ try {
 		if (request.isNavigationRequest() && request.frame() === retryPage.mainFrame()) retryNavigations += 1;
 		let action;
 		if (new URL(request.url()).pathname !== eventsPath) action = request.continue();
-		else if (++attempts === 1) action = request.respond({ status: 200, contentType: "text/event-stream", body: `event: reload\ndata: ${JSON.stringify({ identity: "f".repeat(64), instance: "different-run", revisions: [1] })}\n\n` });
+		else if (++attempts === 1) action = request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ identity: "f".repeat(64), instance: "different-run", revisions: [1] }) });
 		else if (attempts === 2) action = request.respond({ status: 403, body: "Unavailable" });
-		else if (attempts === 3) action = request.respond({ status: 200, contentType: "text/event-stream", body: "retry: 100\n\nevent: connected\ndata: not-json\n\n" });
+		else if (attempts === 3) action = request.respond({ status: 200, contentType: "application/json", body: "not-json" });
 		else { heldReconnect = request; return; }
 		void action.catch(() => {});
 	});
@@ -276,11 +276,11 @@ try {
 	await traceStatus(retryPage);
 	const retryDeadline = Date.now() + 15_000;
 	while (!heldReconnect && Date.now() < retryDeadline) await new Promise(done => setTimeout(done, 20));
-	assert.ok(heldReconnect, "Expected retries after both the HTTP error and the unidentified SSE stream.");
+	assert.ok(heldReconnect, "Expected retries after both the HTTP error and malformed state.");
 	assert.equal(attempts, 4);
 	assert.equal(await retryPage.$eval('[data-watch-control="status"]', element => element.hidden ? null : element.textContent), conflictStatus);
 	assert.ok((await retryPage.evaluate(() => window.__watchStatusChanges)).every(text => text === conflictStatus),
-		"Neither generic errors nor an unverified open may erase the last known conflict.");
+		"Neither generic errors nor malformed state may erase the last known conflict.");
 	await heldReconnect.continue();
 	await waitForClientCount(retryServer, 1);
 	await retryPage.waitForFunction(() => document.querySelector('[data-watch-control="status"]').hidden);
@@ -289,8 +289,40 @@ try {
 	await retryPage.close();
 	await waitForClientCount(retryServer, 0);
 
+	// More than six same-origin tabs used to exhaust HTTP/1 slots with SSE,
+	// leaving later document requests stuck loading. Every poll must finish.
+	const many = await serve(doc("many tabs, first"));
+	many.updateDocument(doc("many tabs, second"));
+	const tabs = [], legacyRequests = [];
+	try {
+		for (let n = 0; n < 10; n++) {
+			const tab = await browser.newPage();
+			tabs.push(tab);
+			tab.on("pageerror", error => errors.push(String(error)));
+			tab.on("request", request => { if (new URL(request.url()).pathname === "/__pi_markdown_preview_events__") legacyRequests.push(request.url()); });
+			await tab.goto(many.url, { waitUntil: "load", timeout: 5000 });
+		}
+		assert.deepEqual(legacyRequests, [], "New pages never start permanent streams.");
+		await waitForClientCount(many, 10);
+		const last = tabs.at(-1);
+		await last.bringToFront();
+		await last.click('[data-watch-control="toggle"]');
+		await Promise.all([last.waitForNavigation({ waitUntil: "load", timeout: 5000 }), last.click('[data-watch-control="previous"]')]);
+		assert.equal(await last.$eval("#body", el => el.textContent), "many tabs, first");
+		many.updateDocument(doc("many tabs, third"));
+		await last.waitForFunction(() => !document.querySelector('[data-watch-control="new"]').hidden);
+		assert.equal(await last.$eval("#body", el => el.textContent), "many tabs, first", "A historical tab stays put.");
+		await Promise.all([last.waitForNavigation({ waitUntil: "load", timeout: 5000 }), last.click('[data-watch-control="latest"]')]);
+		assert.equal(await last.$eval("#body", el => el.textContent), "many tabs, third");
+		const update = last.waitForNavigation({ waitUntil: "load", timeout: 5000 });
+		many.updateDocument(doc("many tabs, fourth"));
+		await update;
+		assert.equal(await last.$eval("#body", el => el.textContent), "many tabs, fourth");
+	} finally { await Promise.all(tabs.map(tab => tab.close())); }
+	await waitForClientCount(many, 0);
+
 	assert.deepEqual(errors, []);
-	console.log("Watch shortcuts, persistent status, identity isolation and restart reconnection checks passed.");
+	console.log("Watch polling, multi-tab navigation, persistent status, identity isolation and restart reconnection checks passed.");
 } finally {
 	await browser?.close();
 	await Promise.allSettled(servers.map(server => server.close()));

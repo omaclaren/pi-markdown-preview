@@ -2,13 +2,18 @@ import { createHmac, randomBytes } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import { extname, isAbsolute, posix as posixPath, relative, resolve, win32 as win32Path } from "node:path";
+import { basename, dirname, extname, isAbsolute, posix as posixPath, relative, resolve, win32 as win32Path } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Keep SSE for pages served by older versions; new pages use finite polls.
 const EVENTS_PATH = "/__pi_markdown_preview_events__";
+const STATE_PATH = "/__pi_markdown_preview_state__";
+const POLL_INTERVAL_MS = 200;
+const VIEWER_TTL_MS = 5_000;
 const SHARE_PATH = "/__pi_markdown_preview_share__";
 const RESOURCE_PREFIX = "/__pi_markdown_preview_resource__/";
 const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
+const DOCUMENT_PREFIX = "/__pi_markdown_preview_document__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-position.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
@@ -177,6 +182,54 @@ export function rewriteBrowserWatchLocalMediaSources(html, resourceRoot, routeFo
 		const suffixIndex = decodedSource.search(/[?#]/);
 		const suffix = suffixIndex < 0 ? "" : escapeBrowserWatchHtmlAttribute(decodedSource.slice(suffixIndex));
 		return `${prefix}${quote}${routeForMedia(absolutePath, contentType)}${suffix}${quote}`;
+	});
+}
+
+// Deliberately text-only: HTML is rendered as code by the host, never served raw.
+const DOCUMENT_EXTENSIONS = new Set(("md markdown mdx rmd qmd tex latex txt text log csv tsv json jsonc jsonl yaml yml toml ini xml "
+	+ "ts tsx mts cts js jsx mjs cjs py r jl rb rs go java kt swift c h cpp cxx cc hpp cs sh bash zsh fish ps1 sql html htm css scss sass less lua pl hs clj ex exs erl diff patch").split(" "));
+const DOCUMENT_BASENAMES = new Set(["readme", "license", "licence", "makefile", "dockerfile"]);
+
+/** @param {string} path */
+export function isBrowserWatchDocumentPath(path) {
+	return DOCUMENT_EXTENSIONS.has(extname(path).slice(1).toLowerCase()) || DOCUMENT_BASENAMES.has(basename(path).toLowerCase());
+}
+
+/**
+ * Rewrite only authored local document links. Pure anchors, network URLs and
+ * unsupported files stay unchanged. No filesystem access occurs until a click.
+ *
+ * @param {string} html
+ * @param {string} resourceRoot
+ * @param {(absolutePath: string) => string} routeForDocument
+ * @param {NodeJS.Platform} [platform]
+ */
+export function rewriteBrowserWatchLocalDocumentLinks(html, resourceRoot, routeForDocument, platform = process.platform) {
+	// Skip raw text/comments and consume every tag's quoted attributes as whole
+	// values: title="see <a href='private.md'>" is text, not an authored link.
+	const tags = /<(script|style|textarea|title)\b[^>]*>[\s\S]*?<\/\1\s*>|<!--[\s\S]*?-->|<[a-z][\w:-]*(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+	const attributes = /\s+([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+	return html.replace(tags, tag => {
+		if (!/^<a\b/i.test(tag)) return tag;
+		const href = [...tag.matchAll(attributes)].find(match => match[1].toLowerCase() === "href");
+		if (!href) return tag;
+		const source = href[2] ?? href[3] ?? href[4] ?? "";
+		const decoded = decodeHtmlImageSource(source.trim());
+		if (!decoded || decoded.startsWith("#") || decoded.startsWith("?")) return tag;
+		const path = getBrowserWatchLocalMediaPath(source, resourceRoot, platform);
+		if (!path || !isBrowserWatchDocumentPath(path)) return tag;
+		const fragment = decoded.includes("#") ? decoded.slice(decoded.indexOf("#")) : "";
+		const target = escapeBrowserWatchHtmlAttribute(routeForDocument(path) + fragment);
+		let replacedHref = false;
+		return tag.replace(attributes, (attribute, name) => {
+			name = name.toLowerCase();
+			if (name === "href") {
+				if (replacedHref) return "";
+				replacedHref = true;
+				return ` href="${target}"`;
+			}
+			return ["target", "rel", "download"].includes(name) ? "" : attribute;
+		}).replace(/>$/, ' target="_blank" rel="noopener noreferrer">');
 	});
 }
 
@@ -537,33 +590,28 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       latestLink.classList.toggle('pi-markdown-preview-watch-new', hasNewResponse && revision !== latestRevision);
     }
   };
-  // A server started on a fixed port can come back after a restart, so its
-  // pages keep trying to reconnect. Other servers never return once stopped.
+  // A fixed address can return after a restart. A failed poll cannot distinguish
+  // shutdown from a temporary network failure, so retry either kind of server.
   const reconnectAfterStop = ${navigation.reconnectAfterStop === true ? "true" : "false"};
   const statusLine = navigation?.querySelector('[data-watch-control="status"]');
   // Keep the known reason separate from transport state. A failed retry or an
-  // open but unverified stream does not establish that the conflict is gone.
+  // unverified response does not establish that the conflict is gone.
   let identityConflict = false;
   const setStatus = (text = '') => {
     if (!statusLine) return;
     statusLine.textContent = identityConflict ? 'Disconnected · different preview' : text;
     statusLine.hidden = !statusLine.textContent;
   };
-  let events;
+  // One short request at a time: duplicate tabs must not occupy all six
+  // HTTP/1 connections with permanent streams and block document navigation.
+  const viewerId = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
+  const stateUrl = withIdentity(${JSON.stringify(STATE_PATH)} + '?client=' + viewerId);
+  let pollRequest;
   let reconnectTimer;
   let reconnectDelay = 1000;
-  const eventsUrl = () => ${JSON.stringify(`${EVENTS_PATH}?revision=`)} + encodeURIComponent(revision) + '&latest=' + encodeURIComponent(revisions[revisions.length - 1] || revision) + '&instance=' + encodeURIComponent(instance) + (identity ? '&identity=' + encodeURIComponent(identity) : '');
-  const scheduleReconnect = () => {
-    if (!reconnectAfterStop || navigating) return;
-    clearTimeout(reconnectTimer);
-    reconnectTimer = window.setTimeout(connectEvents, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 5000);
-  };
   const rejectIdentity = () => {
     identityConflict = true;
-    events?.close();
     setStatus();
-    scheduleReconnect();
   };
   const confirmIdentity = (state) => {
     if (!state || typeof state !== 'object') return false;
@@ -576,47 +624,50 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     setStatus();
     return true;
   };
-  const connectEvents = () => {
-    if (navigating) return;
-    const source = new EventSource(eventsUrl());
-    events = source;
-    source.addEventListener('connected', (event) => {
-      if (navigating || events !== source) return;
-      let state;
-      try { state = JSON.parse(event.data); } catch { return; }
-      confirmIdentity(state);
-    });
-    source.addEventListener('identity-mismatch', () => {
-      if (!navigating && events === source) rejectIdentity();
-    });
-    source.addEventListener('error', () => {
-      if (navigating || events !== source) return;
-      // CONNECTING: the browser retries by itself. CLOSED: it has given up.
-      if (source.readyState === EventSource.CLOSED) {
-        setStatus(reconnectAfterStop ? 'Disconnected · retrying…' : 'Disconnected · this page no longer updates');
-        scheduleReconnect();
-      } else setStatus('Disconnected · retrying…');
-    });
-    source.addEventListener('reload', (event) => {
-      if (!navigating && events === source) onReload(event);
-    });
-    source.addEventListener('stopped', () => {
-      source.close();
-      if (navigating || events !== source) return;
-      setStatus(reconnectAfterStop ? 'Preview stopped · reconnects when it restarts' : 'Preview stopped · this page no longer updates');
-      scheduleReconnect();
-    });
+  const pollState = async () => {
+    if (navigating || pollRequest) return;
+    clearTimeout(reconnectTimer);
+    const controller = new AbortController();
+    pollRequest = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
+    let verified = false;
+    try {
+      const response = await fetch(stateUrl, { cache: 'no-store', signal: controller.signal });
+      if (navigating) return;
+      if (response.status === 409) { rejectIdentity(); return; }
+      if (!response.ok) throw new Error('Preview unavailable');
+      const state = await response.json();
+      if (navigating) return;
+      if (!state || !Array.isArray(state.revisions) || state.revisions.length === 0) throw new Error('Invalid preview state');
+      if (!confirmIdentity(state)) return;
+      verified = true;
+      onRevisionState(state);
+    } catch {
+      if (!navigating) setStatus(reconnectAfterStop ? 'Disconnected · retrying…' : 'Disconnected · preview unavailable');
+    } finally {
+      clearTimeout(timeout);
+      pollRequest = undefined;
+      if (!navigating) {
+        const delay = verified ? (document.hidden ? 1000 : ${POLL_INTERVAL_MS}) : reconnectDelay;
+        if (!verified) reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+        reconnectTimer = window.setTimeout(pollState, delay);
+      }
+    }
   };
+  const stopPolling = () => {
+    clearTimeout(reconnectTimer);
+    pollRequest?.abort();
+  };
+  const onVisibilityChange = () => { if (!document.hidden) void pollState(); };
   const navigateTo = (value, replace = false, focusControl, keyboard = false) => {
     if (navigating) return false;
     // Bind the HTTP navigation too: the cookie/port can change after a valid
-    // SSE message but before this request reaches the server.
+    // state check but before this request reaches the server.
     value = withIdentity(value);
     navigating = true;
     saveControls(focusControl, keyboard);
     readingPosition?.save();
-    clearTimeout(reconnectTimer);
-    events?.close();
+    stopPolling();
     if (replace) window.location.replace(value);
     else window.location.assign(value);
     return true;
@@ -658,17 +709,16 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     }
     navigateToLink(event.key === 'ArrowLeft' ? previousLink : nextLink, true);
   });
-  function onReload(event) {
-    let state;
-    try { state = JSON.parse(event.data); } catch { return; }
-    if (!state || !Array.isArray(state.revisions) || state.revisions.length === 0) return;
-    if (!confirmIdentity(state)) return;
+  function onRevisionState(state) {
     if (state.instance && instance && state.instance !== instance) {
       // The same watcher restarted: revision numbers belong to the old run.
       if (!navigating) navigateTo(latestUrl(), true);
       return;
     }
     const nextRevisions = state.revisions.map(String);
+    // An unchanged poll is only a heartbeat. In particular, keep the initial
+    // Waiting label until the first real response replaces that document.
+    if (nextRevisions.length === revisions.length && nextRevisions.every((value, index) => value === revisions[index])) return;
     const nextLatestRevision = nextRevisions[nextRevisions.length - 1];
     if (nextLatestRevision === revision) {
       updateNavigation(nextRevisions, false);
@@ -680,12 +730,15 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     }
     updateNavigation(nextRevisions, true);
   }
-  connectEvents();
+  void pollState();
+  document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('pagehide', () => {
     if (!navigating) saveControls();
     navigating = true;
-    clearTimeout(reconnectTimer);
-    events?.close();
+    stopPolling();
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    // Best effort; a short server-side lease also covers crashes/suspended tabs.
+    try { navigator.sendBeacon(stateUrl + '&closed=1'); } catch {}
     navigationResizeObserver?.disconnect();
     window.removeEventListener('resize', updateNavigationHeight);
     window.removeEventListener('pointerdown', onOutsidePointer);
@@ -744,7 +797,9 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  * open pages then reconnect by themselves instead of going stale. `port`
  * failing to bind rejects (e.g. EADDRINUSE) so the caller can fall back to 0.
  *
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, port?: number, token?: string, titleSuffix?: string, expiredHint?: string }} [options]
+ * `renderLocalDocument` opts into linked, read-only document previews. The host
+ * must return trusted renderer HTML, bound its reads, and respect cancellation.
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal) => Promise<string> }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const fixedPort = options.port ?? 0;
@@ -779,9 +834,16 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	}
 	/** @type {Set<import("node:http").ServerResponse>} */
 	const eventClients = new Set();
-	const buildDocument = (documentRevision, html) => {
+	/** @type {Map<string, number>} */
+	const pollingClients = new Map();
+	const prunePollingClients = () => {
+		const cutoff = Date.now() - VIEWER_TTL_MS;
+		for (const [id, lastSeen] of pollingClients) if (lastSeen < cutoff) pollingClients.delete(id);
+	};
+	const buildDocument = (documentRevision, html, root = lexicalResourceRoot) => {
 		const absoluteImages = new Map();
-		const rewrittenHtml = rewriteBrowserWatchLocalMediaSources(html, lexicalResourceRoot, (absolutePath, contentType) => {
+		const documentLinks = new Map();
+		let rewrittenHtml = rewriteBrowserWatchLocalMediaSources(html, root, (absolutePath, contentType) => {
 			const imageId = createHmac("sha256", token)
 				.update("absolute-image\0")
 				.update(absolutePath)
@@ -789,14 +851,25 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			absoluteImages.set(imageId, { path: absolutePath, contentType });
 			return `${ABSOLUTE_IMAGE_PREFIX}${imageId}`;
 		});
+		if (options.renderLocalDocument) rewrittenHtml = rewriteBrowserWatchLocalDocumentLinks(rewrittenHtml, root, path => {
+			const id = createHmac("sha256", token).update("local-document\0").update(path).digest("hex");
+			documentLinks.set(id, path);
+			return `${DOCUMENT_PREFIX}${id}?identity=${identity}`;
+		});
 		return {
 			revision: documentRevision,
 			html: rewrittenHtml,
 			absoluteImages,
+			documentLinks,
 			byteSize: Buffer.byteLength(rewrittenHtml, "utf8"),
 		};
 	};
 	let documents = [buildDocument(1, initialHtml)];
+	/** Recently opened document snapshots retain their exact media/link routes. */
+	const linkedDocuments = new Map();
+	/** @type {Map<string, { promise: Promise<ReturnType<typeof buildDocument>>, controller: AbortController }>} */
+	const pendingDocuments = new Map();
+	const retainedDocuments = () => [...documents, ...linkedDocuments.values()];
 	let historyBytes = documents[0].byteSize;
 	const pruneHistory = () => {
 		while (documents.length > historyLimit) documents.shift();
@@ -847,7 +920,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		const requestedIdentity = requestUrl.searchParams.get("identity");
 		const identityMatches = requestedIdentity === null || requestedIdentity === identity;
 		const method = req.method ?? "GET";
-		if (method !== "GET" && method !== "HEAD") {
+		const releasingViewer = requestUrl.pathname === STATE_PATH && method === "POST" && requestUrl.searchParams.get("closed") === "1";
+		if (method !== "GET" && method !== "HEAD" && !releasingViewer) {
 			respondText(res, 405, "Method not allowed");
 			return;
 		}
@@ -902,7 +976,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		}
 		// A second tab can replace the port-scoped cookie. Its authorization
 		// must not retarget an existing page or count it as a different watcher.
-		if ((requestUrl.pathname === SHARE_PATH || requestUrl.pathname === EVENTS_PATH) && !identityMatches) {
+		if ((requestUrl.pathname === SHARE_PATH || requestUrl.pathname === EVENTS_PATH || requestUrl.pathname === STATE_PATH || requestUrl.pathname.startsWith(DOCUMENT_PREFIX)) && !identityMatches) {
 			if (requestUrl.pathname === EVENTS_PATH && method === "GET") {
 				// EventSource hides HTTP error status/body from the page. Send a
 				// terminal rejection event instead, with no document state and no
@@ -910,6 +984,26 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/event-stream; charset=utf-8" });
 				res.end("event: identity-mismatch\ndata: {}\n\n");
 			} else respondText(res, 409, "A different preview watcher owns this address.");
+			return;
+		}
+
+		if (requestUrl.pathname === STATE_PATH) {
+			prunePollingClients();
+			const client = requestUrl.searchParams.get("client") ?? "";
+			if (client && !/^[a-f\d]{32}$/.test(client)) {
+				respondText(res, 400, "Invalid viewer id.");
+				return;
+			}
+			if (releasingViewer) {
+				req.resume(); // Discard any beacon body without retaining it.
+				pollingClients.delete(client);
+				res.writeHead(204, NON_HTML_SECURITY_HEADERS);
+				res.end();
+				return;
+			}
+			if (client && method === "GET") pollingClients.set(client, Date.now());
+			res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" });
+			res.end(method === "HEAD" ? undefined : JSON.stringify(getRevisionState()));
 			return;
 		}
 
@@ -960,14 +1054,79 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			return;
 		}
 
+		if (requestUrl.pathname.startsWith(DOCUMENT_PREFIX)) {
+			const id = requestUrl.pathname.slice(DOCUMENT_PREFIX.length);
+			const path = /^[a-f\d]{64}$/.test(id) ? retainedDocuments().map(doc => doc.documentLinks.get(id)).find(Boolean) : undefined;
+			if (!path || !options.renderLocalDocument) {
+				respondText(res, 404, "Document link is not available in retained previews.");
+				return;
+			}
+			try {
+				const canonicalPath = await realpath(path);
+				if (!isBrowserWatchDocumentPath(canonicalPath) || !(await stat(canonicalPath)).isFile()) {
+					respondText(res, 415, "Only linked text/code documents can be previewed.");
+					return;
+				}
+				if (closed || req.aborted || res.destroyed) return;
+				if (method === "HEAD") {
+					res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/html; charset=utf-8" });
+					res.end();
+					return;
+				}
+				let pending = pendingDocuments.get(id);
+				if (!pending) {
+					if (pendingDocuments.size >= 4) {
+						respondText(res, 503, "Several documents are rendering. Please try again shortly.");
+						return;
+					}
+					const controller = new AbortController();
+					const render = options.renderLocalDocument;
+					const promise = (async () => {
+						const html = await render(canonicalPath, controller.signal);
+						controller.signal.throwIfAborted();
+						const document = buildDocument(0, html, dirname(canonicalPath));
+						linkedDocuments.delete(id);
+						linkedDocuments.set(id, document);
+						let bytes = [...linkedDocuments.values()].reduce((sum, doc) => sum + doc.byteSize, 0);
+						while (linkedDocuments.size > historyLimit || (linkedDocuments.size > 1 && bytes > historyByteLimit)) {
+							const oldest = linkedDocuments.keys().next().value;
+							bytes -= linkedDocuments.get(oldest).byteSize;
+							linkedDocuments.delete(oldest);
+						}
+						return document;
+					})();
+					pending = { promise, controller };
+					pendingDocuments.set(id, pending);
+					promise.then(() => pendingDocuments.delete(id), () => pendingDocuments.delete(id));
+				}
+				const document = await pending.promise;
+				if (closed || req.aborted || res.destroyed) return;
+				const nonce = randomBytes(18).toString("base64url");
+				const title = escapeBrowserWatchHtmlText(`${basename(canonicalPath)} — ${options.titleSuffix || "Markdown Preview"}`);
+				const html = document.html.replace(BASE_TAG_PATTERN, "")
+					.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, () => `<title>${title}</title>`)
+					.replace(/<script(?=[\s>])/gi, `<script nonce="${nonce}"`);
+				res.writeHead(200, { ...getHtmlSecurityHeaders(nonce), "Content-Type": "text/html; charset=utf-8" });
+				res.end(html);
+			} catch (error) {
+				if (closed || req.aborted || res.destroyed) return;
+				const status = ["ENOENT", "ENOTDIR"].includes(error?.code) ? 404 : ["EACCES", "EPERM"].includes(error?.code) ? 403
+					: [413, 415].includes(error?.statusCode) ? error.statusCode : 500;
+				respondText(res, status, status === 404 ? "Linked document was not found." : status === 403 ? "Linked document is not readable."
+					: status === 413 || status === 415 ? error.message : "Could not render the linked document.");
+			}
+			return;
+		}
+
 		let resourcePath;
 		let contentType;
 		if (requestUrl.pathname.startsWith(ABSOLUTE_IMAGE_PREFIX)) {
 			const imageId = requestUrl.pathname.slice(ABSOLUTE_IMAGE_PREFIX.length);
 			let allowedImage;
 			if (/^[a-f\d]{64}$/.test(imageId)) {
-				for (let index = documents.length - 1; index >= 0; index--) {
-					allowedImage = documents[index].absoluteImages.get(imageId);
+				const retained = retainedDocuments();
+				for (let index = retained.length - 1; index >= 0; index--) {
+					allowedImage = retained[index].absoluteImages.get(imageId);
 					if (allowedImage) break;
 				}
 			}
@@ -1074,13 +1233,14 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			return historyBytes;
 		},
 		/**
-		 * Current live SSE connections, not a durable count of open tabs. This can
-		 * briefly be zero during navigation/reconnection; hosts using it to avoid
-		 * duplicate tabs must allow existing pages time to reconnect first.
+		 * Recently polling pages plus legacy SSE connections, not a durable count
+		 * of open tabs. Polling leases expire after 5 s without a request; heavily
+		 * throttled/suspended tabs may disappear until they check in again.
 		 */
 		get clientCount() {
 			for (const client of eventClients) if (client.writableEnded || client.destroyed) eventClients.delete(client);
-			return eventClients.size;
+			prunePollingClients();
+			return eventClients.size + pollingClients.size;
 		},
 		updateDocument(html, { appendToHistory = true } = {}) {
 			if (closed) return documents[documents.length - 1].revision;
@@ -1105,6 +1265,9 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		async close() {
 			if (closed) return;
 			closed = true;
+			const pending = [...pendingDocuments.values()];
+			for (const document of pending) document.controller.abort();
+			linkedDocuments.clear();
 			for (const client of eventClients) {
 				if (!client.writableEnded && !client.destroyed) {
 					client.write("event: stopped\ndata: stopped\n\n");
@@ -1112,10 +1275,12 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				}
 			}
 			eventClients.clear();
+			pollingClients.clear();
 			await new Promise((resolvePromise) => {
 				server.close(() => resolvePromise());
 				server.closeAllConnections?.();
 			});
+			await Promise.allSettled(pending.map(document => document.promise));
 		},
 	};
 }

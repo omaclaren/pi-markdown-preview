@@ -1129,7 +1129,8 @@ async function assertBrowserWatchServer() {
 		sourceLabel: 'docs/<unsafe>&".md',
 	});
 	assert.doesNotMatch(preparedHtml, /<base\s/i, "Watch HTML should remove the file base so anchors remain in-page and relative resources use the authenticated local server.");
-	assert.match(preparedHtml, /EventSource/, "Watch HTML should subscribe for completion notifications.");
+	assert.match(preparedHtml, /fetch\(stateUrl/, "Watch HTML should poll for completion notifications.");
+	assert.doesNotMatch(preparedHtml, /new EventSource/, "New tabs must not hold permanent HTTP connections.");
 	assert.match(preparedHtml, /const revision = "7";/, "Watch HTML should identify its rendered revision.");
 	assert.match(preparedHtml, />2\/3</, "Watch HTML should identify the selected response within bounded history.");
 	assert.match(preparedHtml, /id="pi-markdown-preview-watch-previous"[^>]*href="\/?\?revision=5"/, "Watch HTML should link to the previous rendered response.");
@@ -1262,6 +1263,28 @@ async function assertBrowserWatchServer() {
 		assert.equal(server.revision, 2);
 		assert.deepEqual(server.revisions, [1, 2]);
 		assert.equal(server.historySize, 2);
+		const stateUrl = new URL("/__pi_markdown_preview_state__", watchUrl.origin);
+		assert.equal((await fetch(stateUrl)).status, 403, "State polling requires a session cookie.");
+		const snapshot = await fetch(stateUrl, { headers: { cookie } });
+		assert.match(snapshot.headers.get("content-type"), /application\/json/);
+		assert.equal(snapshot.headers.get("cache-control"), "no-store");
+		const state = await snapshot.json();
+		assert.deepEqual(state.revisions, [1, 2]);
+		assert.equal(state.revision, 2);
+		assert.equal(server.clientCount, 0, "State queries without a viewer id do not claim an open tab.");
+		stateUrl.searchParams.set("client", "a".repeat(32));
+		stateUrl.searchParams.set("identity", "wrong");
+		assert.equal((await fetch(stateUrl, { headers: { cookie } })).status, 409);
+		assert.equal(server.clientCount, 0, "Identity conflicts must not register viewers.");
+		stateUrl.searchParams.set("identity", state.identity);
+		await (await fetch(stateUrl, { headers: { cookie } })).json();
+		assert.equal(server.clientCount, 1);
+		await (await fetch(stateUrl, { headers: { cookie } })).json();
+		assert.equal(server.clientCount, 1, "Repeated polls renew one viewer rather than accumulating clients.");
+		stateUrl.searchParams.set("closed", "1");
+		assert.equal((await fetch(stateUrl, { method: "POST", headers: { cookie } })).status, 204);
+		assert.equal(server.clientCount, 0, "An authenticated pagehide beacon releases its viewer lease.");
+		// Older pages can still connect over SSE until navigation migrates them.
 		const eventResponse = await fetch(new URL("/__pi_markdown_preview_events__?revision=1&latest=1", watchUrl.origin), { headers: { cookie } });
 		assert.equal(eventResponse.status, 200);
 		const reader = eventResponse.body.getReader();
@@ -1504,6 +1527,7 @@ await assertPreviewPageLayoutCollection();
 
 await import("./code-wrap.mjs");
 await import("./document-updates.mjs");
+await import("./watch-document-links.mjs");
 await import("./watch-lifecycle.mjs");
 
 async function assertSinglePagePdfFigureRendering() {
