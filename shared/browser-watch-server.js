@@ -4,6 +4,9 @@ import { realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { basename, dirname, extname, isAbsolute, posix as posixPath, relative, resolve, win32 as win32Path } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sendBrowserFile } from "./browser-file-response.js";
+import { buildHtmlPagePreview, createHtmlPageServer, isHtmlPagePath } from "./html-page-preview.js";
+import { readLinkedDocument } from "./read-linked-document.js";
 
 // Keep SSE for pages served by older versions; new pages use finite polls.
 const EVENTS_PATH = "/__pi_markdown_preview_events__";
@@ -217,7 +220,7 @@ export function rewriteBrowserWatchLocalDocumentLinks(html, resourceRoot, routeF
 		const decoded = decodeHtmlImageSource(source.trim());
 		if (!decoded || decoded.startsWith("#") || decoded.startsWith("?")) return tag;
 		const path = getBrowserWatchLocalMediaPath(source, resourceRoot, platform);
-		if (!path || !isBrowserWatchDocumentPath(path)) return tag;
+		if (!path || (!isBrowserWatchDocumentPath(path) && extname(path).toLowerCase() !== ".pdf")) return tag;
 		const fragment = decoded.includes("#") ? decoded.slice(decoded.indexOf("#")) : "";
 		const target = escapeBrowserWatchHtmlAttribute(routeForDocument(path) + fragment);
 		let replacedHref = false;
@@ -229,7 +232,7 @@ export function rewriteBrowserWatchLocalDocumentLinks(html, resourceRoot, routeF
 				return ` href="${target}"`;
 			}
 			return ["target", "rel", "download"].includes(name) ? "" : attribute;
-		}).replace(/>$/, ' target="_blank" rel="noopener noreferrer">');
+		}).replace(/>$/, ' rel="noopener noreferrer">');
 	});
 }
 
@@ -247,7 +250,7 @@ const NON_HTML_SECURITY_HEADERS = {
 };
 
 /** @param {string} scriptNonce */
-function getHtmlSecurityHeaders(scriptNonce) {
+function getHtmlSecurityHeaders(scriptNonce, frameOrigin) {
 	return {
 		...COMMON_SECURITY_HEADERS,
 		"Content-Security-Policy": [
@@ -256,7 +259,7 @@ function getHtmlSecurityHeaders(scriptNonce) {
 			"connect-src 'self' https://cdn.jsdelivr.net https://unpkg.com",
 			"font-src 'self' data: https://cdn.jsdelivr.net",
 			"frame-ancestors 'none'",
-			"frame-src 'self'",
+			`frame-src 'self'${frameOrigin ? ` ${frameOrigin}` : ""}`,
 			"img-src 'self' data: http: https:",
 			"object-src 'self'",
 			`script-src 'nonce-${scriptNonce}' 'strict-dynamic' 'wasm-unsafe-eval' https://cdn.jsdelivr.net`,
@@ -343,7 +346,13 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 (() => {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   if (!window.location.hash) window.scrollTo(0, 0);
-  const readingPosition = ${preserveReadingPosition ? `window.PiMarkdownPreviewReadingPosition.install(document.getElementById('preview-root'), ${JSON.stringify(navigation.wrapScope)})` : "undefined"};
+  const positionScope = ${JSON.stringify(preserveReadingPosition ? navigation.wrapScope : `${navigation.wrapScope}:revision:${revision}`)};
+  try {
+    const prefix = 'pi-markdown-preview:reading-position:' + ${JSON.stringify(navigation.wrapScope)} + ':revision:';
+    const retained = ${JSON.stringify(revisions)}.map(String);
+    for (const key of Object.keys(sessionStorage)) if (key.startsWith(prefix) && !retained.includes(key.slice(prefix.length))) sessionStorage.removeItem(key);
+  } catch {}
+  const readingPosition = window.PiMarkdownPreviewReadingPosition.install(document.getElementById('preview-root'), positionScope);
   const revision = ${JSON.stringify(revision)};
   let revisions = ${JSON.stringify(revisions)};
   // Stable watcher identity is distinct from the run's revision-number scope.
@@ -730,6 +739,15 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     }
     updateNavigation(nextRevisions, true);
   }
+  // Leave ordinary links native (including modifier clicks and context menus).
+  // Bind the return history entry before leaving for another document.
+  document.addEventListener('click', event => {
+    const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
+    if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || link.target === '_blank') return;
+    if (!link.getAttribute('href')?.startsWith(${JSON.stringify(DOCUMENT_PREFIX)})) return;
+    history.replaceState(history.state, '', withIdentity(window.location.href));
+    readingPosition?.save();
+  });
   void pollState();
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('pagehide', () => {
@@ -750,7 +768,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 })();
 </script>`;
 
-	const readingPositionScript = preserveReadingPosition ? `<script>${READING_POSITION_SOURCE}</script>\n` : "";
+	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n`;
 	const watchUi = `${readingPositionScript}${watchNavigation}\n${watchScript}`;
 	const completeHtml = /<\/body>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/body>/i, `${watchUi}\n</body>`)
@@ -799,7 +817,7 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  *
  * `renderLocalDocument` opts into linked, read-only document previews. The host
  * must return trusted renderer HTML, bound its reads, and respect cancellation.
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal) => Promise<string> }} [options]
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal) => Promise<string> }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const fixedPort = options.port ?? 0;
@@ -840,9 +858,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		const cutoff = Date.now() - VIEWER_TTL_MS;
 		for (const [id, lastSeen] of pollingClients) if (lastSeen < cutoff) pollingClients.delete(id);
 	};
-	const buildDocument = (documentRevision, html, root = lexicalResourceRoot) => {
+	const buildDocument = (documentRevision, html, root = lexicalResourceRoot, htmlFile, fromRevision = documentRevision) => {
 		const absoluteImages = new Map();
 		const documentLinks = new Map();
+		if (htmlFile) return { revision: documentRevision, html: "", authoredHtml: html, htmlFile, absoluteImages, documentLinks, byteSize: Buffer.byteLength(html) };
 		let rewrittenHtml = rewriteBrowserWatchLocalMediaSources(html, root, (absolutePath, contentType) => {
 			const imageId = createHmac("sha256", token)
 				.update("absolute-image\0")
@@ -854,7 +873,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		if (options.renderLocalDocument) rewrittenHtml = rewriteBrowserWatchLocalDocumentLinks(rewrittenHtml, root, path => {
 			const id = createHmac("sha256", token).update("local-document\0").update(path).digest("hex");
 			documentLinks.set(id, path);
-			return `${DOCUMENT_PREFIX}${id}?identity=${identity}`;
+			const filename = extname(path).toLowerCase() === ".pdf" ? `/${encodeURIComponent(basename(path))}` : "";
+			return `${DOCUMENT_PREFIX}${id}${filename}?identity=${identity}&from=${fromRevision}`;
 		});
 		return {
 			revision: documentRevision,
@@ -864,7 +884,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			byteSize: Buffer.byteLength(rewrittenHtml, "utf8"),
 		};
 	};
-	let documents = [buildDocument(1, initialHtml)];
+	let documents = [buildDocument(1, initialHtml, lexicalResourceRoot, options.htmlFile)];
 	/** Recently opened document snapshots retain their exact media/link routes. */
 	const linkedDocuments = new Map();
 	/** @type {Map<string, { promise: Promise<ReturnType<typeof buildDocument>>, controller: AbortController }>} */
@@ -884,6 +904,15 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	let port = 0;
 	let closed = false;
 	let cookieName = "";
+	let htmlPageServerPromise;
+	const htmlPage = async (path, source) => {
+		if (closed) throw new Error("Preview closed.");
+		const viewer = await (htmlPageServerPromise ??= createHtmlPageServer(`http://127.0.0.1:${port}`));
+		if (closed) { await viewer.close(); throw new Error("Preview closed."); }
+		const url = await viewer.register(path, source);
+		if (closed) throw new Error("Preview closed.");
+		return { html: buildHtmlPagePreview(url, basename(path), source), frameOrigin: viewer.origin };
+	};
 
 	const getRevisionState = () => ({
 		identity,
@@ -947,7 +976,9 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			}
 			const selectedDocument = documents[documentIndex];
 			const scriptNonce = randomBytes(18).toString("base64url");
-			const html = prepareBrowserWatchHtml(selectedDocument.html, {
+			const page = selectedDocument.htmlFile ? await htmlPage(selectedDocument.htmlFile, selectedDocument.authoredHtml) : selectedDocument;
+			if (closed || res.destroyed) return;
+			const html = prepareBrowserWatchHtml(page.html, {
 				revision: selectedDocument.revision,
 				revisions: documents.map((document) => document.revision),
 				isWaiting: !hasHistoryDocument,
@@ -960,7 +991,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				instance,
 			}, scriptNonce);
 			res.writeHead(200, {
-				...getHtmlSecurityHeaders(scriptNonce),
+				...getHtmlSecurityHeaders(scriptNonce, page.frameOrigin),
 				"Content-Type": "text/html; charset=utf-8",
 				...(queryToken === token
 					? { "Set-Cookie": `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/` }
@@ -1055,25 +1086,33 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		}
 
 		if (requestUrl.pathname.startsWith(DOCUMENT_PREFIX)) {
-			const id = requestUrl.pathname.slice(DOCUMENT_PREFIX.length);
-			const path = /^[a-f\d]{64}$/.test(id) ? retainedDocuments().map(doc => doc.documentLinks.get(id)).find(Boolean) : undefined;
-			if (!path || !options.renderLocalDocument) {
+			const route = /^([a-f\d]{64})(?:\/([^/]+))?$/.exec(requestUrl.pathname.slice(DOCUMENT_PREFIX.length));
+			const id = route?.[1];
+			const path = route ? retainedDocuments().map(doc => doc.documentLinks.get(id)).find(Boolean) : undefined;
+			let routeName;
+			try { routeName = route?.[2] ? decodeURIComponent(route[2]) : undefined; } catch {}
+			if (!path || !options.renderLocalDocument || (route?.[2] && routeName !== basename(path))) {
 				respondText(res, 404, "Document link is not available in retained previews.");
 				return;
 			}
 			try {
 				const canonicalPath = await realpath(path);
-				if (!isBrowserWatchDocumentPath(canonicalPath) || !(await stat(canonicalPath)).isFile()) {
-					respondText(res, 415, "Only linked text/code documents can be previewed.");
+				const pdf = extname(canonicalPath).toLowerCase() === ".pdf";
+				if ((!isBrowserWatchDocumentPath(canonicalPath) && !pdf) || !(await stat(canonicalPath)).isFile()) {
+					respondText(res, 415, "Only linked text/code, HTML and PDF documents can be previewed.");
 					return;
 				}
 				if (closed || req.aborted || res.destroyed) return;
+				if (pdf) { await sendBrowserFile(req, res, canonicalPath, "application/pdf", NON_HTML_SECURITY_HEADERS); return; }
 				if (method === "HEAD") {
 					res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/html; charset=utf-8" });
 					res.end();
 					return;
 				}
-				let pending = pendingDocuments.get(id);
+				const from = Number(requestUrl.searchParams.get("from"));
+				const fromRevision = documents.some(doc => doc.revision === from) ? from : documents.at(-1).revision;
+				const pendingKey = `${id}:${fromRevision}`;
+				let pending = pendingDocuments.get(pendingKey);
 				if (!pending) {
 					if (pendingDocuments.size >= 4) {
 						respondText(res, 503, "Several documents are rendering. Please try again shortly.");
@@ -1082,9 +1121,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const controller = new AbortController();
 					const render = options.renderLocalDocument;
 					const promise = (async () => {
-						const html = await render(canonicalPath, controller.signal);
+						const page = isHtmlPagePath(canonicalPath)
+							? await htmlPage(canonicalPath, await readLinkedDocument(canonicalPath, controller.signal))
+							: { html: await render(canonicalPath, controller.signal), frameOrigin: undefined };
 						controller.signal.throwIfAborted();
-						const document = buildDocument(0, html, dirname(canonicalPath));
+						const document = { ...buildDocument(0, page.html, dirname(canonicalPath), undefined, fromRevision), frameOrigin: page.frameOrigin };
 						linkedDocuments.delete(id);
 						linkedDocuments.set(id, document);
 						let bytes = [...linkedDocuments.values()].reduce((sum, doc) => sum + doc.byteSize, 0);
@@ -1096,17 +1137,19 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 						return document;
 					})();
 					pending = { promise, controller };
-					pendingDocuments.set(id, pending);
-					promise.then(() => pendingDocuments.delete(id), () => pendingDocuments.delete(id));
+					pendingDocuments.set(pendingKey, pending);
+					promise.then(() => pendingDocuments.delete(pendingKey), () => pendingDocuments.delete(pendingKey));
 				}
 				const document = await pending.promise;
 				if (closed || req.aborted || res.destroyed) return;
 				const nonce = randomBytes(18).toString("base64url");
 				const title = escapeBrowserWatchHtmlText(`${basename(canonicalPath)} — ${options.titleSuffix || "Markdown Preview"}`);
-				const html = document.html.replace(BASE_TAG_PATTERN, "")
+				const returnUrl = `/?revision=${fromRevision}&identity=${identity}`;
+				const back = `<style>.pi-preview-document-nav{position:fixed;top:8px;right:12px;z-index:200;background:var(--card,Canvas);color:var(--text,CanvasText);border:1px solid var(--panel-border,ButtonBorder);border-radius:8px;font:14px system-ui}.pi-preview-document-nav a{display:flex;align-items:center;min-height:28px;padding:4px 10px;color:inherit;text-decoration:none;border-radius:8px}@media(pointer:coarse){.pi-preview-document-nav a{min-height:44px}}@media print{.pi-preview-document-nav{display:none}}</style><nav class="pi-preview-document-nav" aria-label="Document navigation"><a href="${escapeBrowserWatchHtmlAttribute(returnUrl)}">← Return to preview</a></nav><script>history.scrollRestoration='auto';</script>`;
+				const html = document.html.replace(/<body([^>]*)>/i, match => match + back).replace(BASE_TAG_PATTERN, "")
 					.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, () => `<title>${title}</title>`)
 					.replace(/<script(?=[\s>])/gi, `<script nonce="${nonce}"`);
-				res.writeHead(200, { ...getHtmlSecurityHeaders(nonce), "Content-Type": "text/html; charset=utf-8" });
+				res.writeHead(200, { ...getHtmlSecurityHeaders(nonce, document.frameOrigin), "Content-Type": "text/html; charset=utf-8" });
 				res.end(html);
 			} catch (error) {
 				if (closed || req.aborted || res.destroyed) return;
@@ -1245,7 +1288,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		updateDocument(html, { appendToHistory = true } = {}) {
 			if (closed) return documents[documents.length - 1].revision;
 			revision += 1;
-			const nextDocument = buildDocument(revision, html);
+			const nextDocument = buildDocument(revision, html, lexicalResourceRoot, options.htmlFile);
 			if (appendToHistory && hasHistoryDocument) {
 				documents.push(nextDocument);
 			} else {
@@ -1268,6 +1311,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const pending = [...pendingDocuments.values()];
 			for (const document of pending) document.controller.abort();
 			linkedDocuments.clear();
+			if (htmlPageServerPromise) await (await htmlPageServerPromise.catch(() => undefined))?.close();
 			for (const client of eventClients) {
 				if (!client.writableEnded && !client.destroyed) {
 					client.write("event: stopped\ndata: stopped\n\n");

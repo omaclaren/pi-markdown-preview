@@ -222,7 +222,7 @@ try {
 	await scrollToTarget();
 	await navigateUpdate(responses, updatedHtml);
 	assert.equal(await page.evaluate(() => window.scrollY), 0, 'A new assistant response still starts at the top.');
-	assert.equal(await page.evaluate(() => typeof window.PiMarkdownPreviewReadingPosition), 'undefined', 'Do not instantiate document scroll controls for response watchers.');
+	assert.equal(await page.evaluate(() => typeof window.PiMarkdownPreviewReadingPosition), 'object', 'Response watchers can restore Back navigation within a revision without carrying position into a new response.');
 
 	// Explicit fragments take priority over a stored position at another fragment.
 	await page.goto(otherFile.url + '#section-10', { waitUntil: 'domcontentloaded' });

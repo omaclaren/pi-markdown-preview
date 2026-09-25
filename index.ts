@@ -34,6 +34,7 @@ import {
 } from "./shared/annotation-scanner.js";
 import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
+import { isHtmlPagePath } from "./shared/html-page-preview.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
 import { readLinkedDocument } from "./shared/read-linked-document.js";
 
@@ -5213,10 +5214,11 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const readBrowserFileWatchSnapshot = async (filePath: string, signal?: AbortSignal) => {
-		const fileContent = await readFile(filePath, { encoding: "utf-8", signal });
-		const prepared = prepareFilePreview(filePath, fileContent);
+		const htmlPage = isHtmlPagePath(filePath);
+		const fileContent = htmlPage ? await readLinkedDocument(filePath, signal ?? new AbortController().signal) : await readFile(filePath, { encoding: "utf-8", signal });
+		const prepared = htmlPage ? { markdown: fileContent, isLatex: false } : prepareFilePreview(filePath, fileContent);
 		const contentHash = createHash("sha256").update(fileContent).digest("hex");
-		return { ...prepared, contentHash };
+		return { ...prepared, contentHash, htmlPage };
 	};
 
 	const notifyBrowserFileWatchError = (ctx: ExtensionContext, activeWatch: BrowserWatchState, error: unknown) => {
@@ -5260,7 +5262,7 @@ export default function (pi: ExtensionAPI) {
 
 			activeWatch.pendingRenderKey = renderKey;
 			const renderGeneration = ++activeWatch.renderGeneration;
-			const rendered = await renderPreviewHtmlDocument(
+			const rendered = snapshot.htmlPage ? { html: snapshot.markdown } : await renderPreviewHtmlDocument(
 				snapshot.markdown,
 				style,
 				activeWatch.resourcePath,
@@ -5522,7 +5524,9 @@ export default function (pi: ExtensionAPI) {
 			try {
 				snapshot = await readBrowserFileWatchSnapshot(filePath, renderController.signal);
 				if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) return;
-				rendered = await renderPreviewHtmlDocument(snapshot.markdown, style, resourcePath, snapshot.isLatex, previewFontSizePx, renderController.signal);
+				rendered = snapshot.htmlPage
+					? { html: snapshot.markdown, normalizedMarkdown: snapshot.markdown, fontSizePx: previewFontSizePx }
+					: await renderPreviewHtmlDocument(snapshot.markdown, style, resourcePath, snapshot.isLatex, previewFontSizePx, renderController.signal);
 			} finally {
 				finishBrowserWatchRender(provisional, renderController);
 			}
@@ -5540,6 +5544,7 @@ export default function (pi: ExtensionAPI) {
 				initialDocumentIsHistory: true,
 				sourceLabel: provisional.sourceLabel,
 				preserveReadingPosition: true,
+				htmlFile: snapshot.htmlPage ? filePath : undefined,
 				renderLocalDocument: (path, signal) => renderBrowserWatchLinkedDocument(path, getPreviewStyle(ctx.ui.theme), newWatch?.fontSizePx ?? provisional.requestedFontSizePx, signal),
 			});
 			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
@@ -5708,7 +5713,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (parsed.watch) {
+		if (parsed.watch || (parsed.target === "browser" && parsed.file && isHtmlPagePath(parsed.file))) {
 			try {
 				if (parsed.file) {
 					await startBrowserFileWatch(ctx, parsed.file, parsed.fontSizePx);

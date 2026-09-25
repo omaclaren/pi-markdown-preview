@@ -21,7 +21,7 @@ const within = async (promise, label) => {
 const seen = [];
 const rewritten = rewriteBrowserWatchLocalDocumentLinks('<a title="href=\'private.md\'" href="../report%20%26%20notes.md#details" target="_self">Report</a><a href="#local">Local</a><a href="https://example.com/x.md">Web</a><script>const example = \'<a href="secret.md">\';</script>', root, path => { seen.push(path); return "/allowed"; });
 assert.deepEqual(seen, [join(root, "..", "report & notes.md")]);
-assert.match(rewritten, /href="\/allowed#details" target="_blank" rel="noopener noreferrer"/);
+assert.match(rewritten, /href="\/allowed#details" rel="noopener noreferrer"/);
 assert.match(rewritten, /href="#local"/);
 assert.match(rewritten, /href="https:\/\/example.com\/x.md"/);
 assert.match(rewritten, /<script>const example = '<a href="secret.md">';<\/script>/);

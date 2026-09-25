@@ -1528,6 +1528,7 @@ await assertPreviewPageLayoutCollection();
 await import("./code-wrap.mjs");
 await import("./document-updates.mjs");
 await import("./watch-document-links.mjs");
+await import("./document-navigation.mjs");
 await import("./watch-lifecycle.mjs");
 
 async function assertSinglePagePdfFigureRendering() {

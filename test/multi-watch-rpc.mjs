@@ -195,7 +195,7 @@ try {
 	urls = await waitOpenCount(5);
 	const responseSession = await bootstrap(urls[4]);
 	assert.match(responseSession.html, /<title>Assistant responses — Markdown Preview<\/title>/);
-	assert.doesNotMatch(responseSession.html, /PiMarkdownPreviewReadingPosition/, "Response-watch commands must not inherit file scroll restoration.");
+	assert.match(responseSession.html, /const positionScope = "[^"]+:revision:1"/, "Response-watch commands must scope Back restoration to their current revision.");
 	assert.equal(new Set([oneSession.origin, twoSession.origin, responseSession.origin]).size, 3);
 	const responseLinks = documentLinks(responseSession.html);
 	assert.equal(responseLinks.length, 2, "real response watch must rewrite absolute and relative links");
@@ -276,6 +276,26 @@ try {
 	await command("/preview-browser --list");
 	assert.ok(notifications.slice(beforeRaceList).some((event) => /Browser preview watchers \(1\/8\)/.test(event.message)));
 	await command("/preview-browser --stop --all");
+
+	// HTML input is a real isolated page, even without spelling --watch.
+	const htmlFile = join(root, "dashboard.html");
+	await writeFile(htmlFile, '<!doctype html><html><body><h1>HTML dashboard</h1><script>window.authoredPage=true;</script></body></html>');
+	const beforeHtml = (await openedUrls()).length;
+	await command(`/preview-browser ${JSON.stringify(htmlFile)}`);
+	const htmlUrls = await waitOpenCount(beforeHtml + 1);
+	const htmlSession = await bootstrap(htmlUrls.at(-1));
+	const iframeUrl = htmlSession.html.match(/<iframe[^>]*src="([^"]+)"/)[1].replaceAll("&amp;", "&");
+	assert.notEqual(new URL(iframeUrl).origin, htmlSession.origin);
+	assert.doesNotMatch(htmlSession.html, /<script>window.authoredPage/);
+	const authored = await fetch(iframeUrl);
+	assert.match(authored.headers.get("content-security-policy"), /sandbox allow-scripts/);
+	assert.doesNotMatch(authored.headers.get("content-security-policy"), /allow-same-origin/);
+	assert.match(await authored.text(), /<h1>HTML dashboard<\/h1>/);
+	await writeFile(htmlFile, '<!doctype html><html><body><h1>Updated dashboard</h1></body></html>');
+	await waitFor(async () => /Updated dashboard/.test(await getPage(htmlSession)), "HTML file refresh");
+	await command(`/preview-browser --stop --file ${JSON.stringify(htmlFile)}`);
+	await waitFor(() => isClosed(htmlSession), "HTML watch shutdown");
+	await assert.rejects(fetch(iframeUrl));
 
 	console.log(`Multi-watch RPC lifecycle checks passed (${notifications.length} notifications, ${(await openedUrls()).length} opens).`);
 } finally {
