@@ -218,7 +218,7 @@ function getHtmlSecurityHeaders(scriptNonce) {
  * preview document.
  *
  * @param {string} html
- * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string, wrapScope?: string, preserveReadingPosition?: boolean }} navigation
+ * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string, titleSuffix?: string, wrapScope?: string, preserveReadingPosition?: boolean, identity?: string, instance?: string, reconnectAfterStop?: boolean }} navigation
  * @param {string} [scriptNonce]
  */
 export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
@@ -293,7 +293,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const readingPosition = ${preserveReadingPosition ? `window.PiMarkdownPreviewReadingPosition.install(document.getElementById('preview-root'), ${JSON.stringify(navigation.wrapScope)})` : "undefined"};
   const revision = ${JSON.stringify(revision)};
   let revisions = ${JSON.stringify(revisions)};
-  // Identifies this server run: revision numbers restart when a server does.
+  // Stable watcher identity is distinct from the run's revision-number scope.
+  // It is public, not an authentication credential or a copy of the token.
+  const identity = ${JSON.stringify(String(navigation.identity ?? ""))};
   const instance = ${JSON.stringify(String(navigation.instance ?? ""))};
   const followingLatest = revision === revisions[revisions.length - 1];
   const navigation = document.currentScript?.previousElementSibling;
@@ -416,6 +418,11 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   }
   const revisionUrl = (value) => '/?revision=' + encodeURIComponent(value);
   const latestUrl = () => '/' + window.location.hash;
+  const withIdentity = (value) => {
+    const target = new URL(value, window.location.href);
+    if (identity) target.searchParams.set('identity', identity);
+    return target.href;
+  };
   const withCurrentHash = (value) => {
     const target = new URL(value, window.location.href);
     target.hash = window.location.hash;
@@ -465,7 +472,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     copyLinkButton.setAttribute('aria-disabled', 'true');
     copyLinkButton.setAttribute('aria-busy', 'true');
     try {
-      const response = await fetch(${JSON.stringify(SHARE_PATH)} + '?revision=' + encodeURIComponent(revision));
+      const response = await fetch(withIdentity(${JSON.stringify(SHARE_PATH)} + '?revision=' + encodeURIComponent(revision)));
       if (!response.ok) throw new Error('Could not create a transferable preview link');
       const transferableUrl = new URL(await response.text());
       transferableUrl.hash = window.location.hash;
@@ -534,28 +541,53 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   // pages keep trying to reconnect. Other servers never return once stopped.
   const reconnectAfterStop = ${navigation.reconnectAfterStop === true ? "true" : "false"};
   const statusLine = navigation?.querySelector('[data-watch-control="status"]');
-  const setStatus = (text) => {
+  // Keep the known reason separate from transport state. A failed retry or an
+  // open but unverified stream does not establish that the conflict is gone.
+  let identityConflict = false;
+  const setStatus = (text = '') => {
     if (!statusLine) return;
-    statusLine.textContent = text || '';
-    statusLine.hidden = !text;
+    statusLine.textContent = identityConflict ? 'Disconnected · different preview' : text;
+    statusLine.hidden = !statusLine.textContent;
   };
   let events;
   let reconnectTimer;
   let reconnectDelay = 1000;
-  const eventsUrl = () => ${JSON.stringify(`${EVENTS_PATH}?revision=`)} + encodeURIComponent(revision) + '&latest=' + encodeURIComponent(revisions[revisions.length - 1] || revision) + '&instance=' + encodeURIComponent(instance);
+  const eventsUrl = () => ${JSON.stringify(`${EVENTS_PATH}?revision=`)} + encodeURIComponent(revision) + '&latest=' + encodeURIComponent(revisions[revisions.length - 1] || revision) + '&instance=' + encodeURIComponent(instance) + (identity ? '&identity=' + encodeURIComponent(identity) : '');
   const scheduleReconnect = () => {
     if (!reconnectAfterStop || navigating) return;
     clearTimeout(reconnectTimer);
     reconnectTimer = window.setTimeout(connectEvents, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 5000);
   };
+  const rejectIdentity = () => {
+    identityConflict = true;
+    events?.close();
+    setStatus();
+    scheduleReconnect();
+  };
+  const confirmIdentity = (state) => {
+    if (!state || typeof state !== 'object') return false;
+    if (identity && state.identity !== identity) {
+      rejectIdentity();
+      return false;
+    }
+    identityConflict = false;
+    reconnectDelay = 1000;
+    setStatus();
+    return true;
+  };
   const connectEvents = () => {
     if (navigating) return;
     const source = new EventSource(eventsUrl());
     events = source;
-    source.addEventListener('open', () => {
-      reconnectDelay = 1000;
-      setStatus('');
+    source.addEventListener('connected', (event) => {
+      if (navigating || events !== source) return;
+      let state;
+      try { state = JSON.parse(event.data); } catch { return; }
+      confirmIdentity(state);
+    });
+    source.addEventListener('identity-mismatch', () => {
+      if (!navigating && events === source) rejectIdentity();
     });
     source.addEventListener('error', () => {
       if (navigating || events !== source) return;
@@ -565,16 +597,21 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
         scheduleReconnect();
       } else setStatus('Disconnected · retrying…');
     });
-    source.addEventListener('reload', onReload);
+    source.addEventListener('reload', (event) => {
+      if (!navigating && events === source) onReload(event);
+    });
     source.addEventListener('stopped', () => {
       source.close();
-      if (events !== source) return;
+      if (navigating || events !== source) return;
       setStatus(reconnectAfterStop ? 'Preview stopped · reconnects when it restarts' : 'Preview stopped · this page no longer updates');
       scheduleReconnect();
     });
   };
   const navigateTo = (value, replace = false, focusControl, keyboard = false) => {
     if (navigating) return false;
+    // Bind the HTTP navigation too: the cookie/port can change after a valid
+    // SSE message but before this request reaches the server.
+    value = withIdentity(value);
     navigating = true;
     saveControls(focusControl, keyboard);
     readingPosition?.save();
@@ -625,8 +662,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     let state;
     try { state = JSON.parse(event.data); } catch { return; }
     if (!state || !Array.isArray(state.revisions) || state.revisions.length === 0) return;
+    if (!confirmIdentity(state)) return;
     if (state.instance && instance && state.instance !== instance) {
-      // A restarted server: this page's revision numbers belong to the old run.
+      // The same watcher restarted: revision numbers belong to the old run.
       if (!navigating) navigateTo(latestUrl(), true);
       return;
     }
@@ -717,6 +755,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		throw new Error("Browser preview watch token must be 32-256 URL-safe characters.");
 	}
 	const token = options.token ?? randomBytes(24).toString("base64url");
+	// Public identity, domain-separated from UI state and resource routes. Derive
+	// it even for generated tokens, which callers may save and reuse on restart.
+	// It binds reconnection to a watcher but never substitutes for cookie auth.
+	const identity = createHmac("sha256", token).update("watch-identity").digest("hex");
 	// Public UI-state scope, deliberately unrelated to the authentication token:
 	// random, or a one-way derivation when a caller reuses a token across restarts
 	// (so wrapping and reading-position state survive the restart too).
@@ -771,6 +813,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	let cookieName = "";
 
 	const getRevisionState = () => ({
+		identity,
 		instance,
 		revision: documents[documents.length - 1].revision,
 		revisions: documents.map((document) => document.revision),
@@ -799,6 +842,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	/** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res */
 	const handleRequest = async (req, res) => {
 		const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+		// Legacy callers may omit this public selector. Generated pages bind
+		// events, navigation and sharing to their original watcher identity.
+		const requestedIdentity = requestUrl.searchParams.get("identity");
+		const identityMatches = requestedIdentity === null || requestedIdentity === identity;
 		const method = req.method ?? "GET";
 		if (method !== "GET" && method !== "HEAD") {
 			respondText(res, 405, "Method not allowed");
@@ -809,6 +856,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const queryToken = requestUrl.searchParams.get("token") ?? "";
 			if (queryToken !== token && !hasWatchCookie(req)) {
 				respondText(res, 403, `Invalid or expired preview watch token.${expiredHint ? ` ${expiredHint}` : ""}`);
+				return;
+			}
+			if (!identityMatches) {
+				respondText(res, 409, "A different preview watcher owns this address.");
 				return;
 			}
 
@@ -831,6 +882,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				wrapScope,
 				preserveReadingPosition: options.preserveReadingPosition,
 				reconnectAfterStop: fixedPort !== 0,
+				identity,
 				instance,
 			}, scriptNonce);
 			res.writeHead(200, {
@@ -846,6 +898,18 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 
 		if (!hasWatchCookie(req)) {
 			respondText(res, 403, "Invalid or expired preview watch token.");
+			return;
+		}
+		// A second tab can replace the port-scoped cookie. Its authorization
+		// must not retarget an existing page or count it as a different watcher.
+		if ((requestUrl.pathname === SHARE_PATH || requestUrl.pathname === EVENTS_PATH) && !identityMatches) {
+			if (requestUrl.pathname === EVENTS_PATH && method === "GET") {
+				// EventSource hides HTTP error status/body from the page. Send a
+				// terminal rejection event instead, with no document state and no
+				// registration in eventClients/clientCount. Cookie auth still ran.
+				res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/event-stream; charset=utf-8" });
+				res.end("event: identity-mismatch\ndata: {}\n\n");
+			} else respondText(res, 409, "A different preview watcher owns this address.");
 			return;
 		}
 
@@ -880,6 +944,9 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			res.write(": connected\n\n");
 			// Reconnect promptly after a restart on the same port.
 			res.write("retry: 1500\n\n");
+			// A verified handshake clears stale status even when this run and its
+			// revisions are unchanged, so there would otherwise be no reload event.
+			res.write(`event: connected\ndata: ${JSON.stringify({ identity })}\n\n`);
 			eventClients.add(res);
 			const removeClient = () => eventClients.delete(res);
 			req.once("close", removeClient);
@@ -1006,7 +1073,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		get historyBytes() {
 			return historyBytes;
 		},
-		/** Pages currently connected for live updates (e.g. to avoid opening a duplicate tab). */
+		/**
+		 * Current live SSE connections, not a durable count of open tabs. This can
+		 * briefly be zero during navigation/reconnection; hosts using it to avoid
+		 * duplicate tabs must allow existing pages time to reconnect first.
+		 */
 		get clientCount() {
 			for (const client of eventClients) if (client.writableEnded || client.destroyed) eventClients.delete(client);
 			return eventClients.size;

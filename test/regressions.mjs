@@ -1766,7 +1766,8 @@ async function assertBrowserWatchReload() {
 		const autoNavigationRequest = await autoNavigationRequestPromise;
 		const autoNavigationUrl = new URL(autoNavigationRequest.url());
 		assert.equal(autoNavigationUrl.pathname, "/");
-		assert.equal(autoNavigationUrl.search, "", "Auto-follow should request the latest document rather than a revision that can become stale in flight.");
+		assert.equal(autoNavigationUrl.searchParams.has("revision"), false, "Auto-follow should request the latest document rather than a revision that can become stale in flight.");
+		assert.match(autoNavigationUrl.searchParams.get("identity"), /^[a-f\d]{64}$/, "Auto-follow remains bound to this watcher even if its cookie changes in flight.");
 		server.updateDocument('<!doctype html><html><head></head><body><p>Newest watch document</p></body></html>');
 		await autoNavigationRequest.continue();
 		await page.waitForFunction(() => window.location.search === "?revision=5" && document.body.textContent?.includes("Newest watch document"));
