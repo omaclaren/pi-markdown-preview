@@ -1277,6 +1277,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			eventClients.clear();
 			pollingClients.clear();
 			await new Promise((resolvePromise) => {
+				// Bun's close() discards its native server handle, making a later
+				// closeAllConnections() a no-op. Force-close first there (which also
+				// stops Bun's listener). Node must stop accepting before force-close.
+				if (process.versions.bun) server.closeAllConnections?.();
 				server.close(() => resolvePromise());
 				server.closeAllConnections?.();
 			});

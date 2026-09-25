@@ -10,6 +10,14 @@ import { readLinkedDocument } from "../shared/read-linked-document.js";
 const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-preview-document-links-")));
 const prefix = "/__pi_markdown_preview_document__/";
 const html = body => `<!doctype html><html><head><title>Test</title></head><body>${body}</body></html>`;
+const within = async (promise, label) => {
+	let timer;
+	try {
+		return await Promise.race([promise, new Promise((_, reject) => {
+			timer = setTimeout(() => reject(new Error(`Timed out: ${label}`)), 5000);
+		})]);
+	} finally { clearTimeout(timer); }
+};
 const seen = [];
 const rewritten = rewriteBrowserWatchLocalDocumentLinks('<a title="href=\'private.md\'" href="../report%20%26%20notes.md#details" target="_self">Report</a><a href="#local">Local</a><a href="https://example.com/x.md">Web</a><script>const example = \'<a href="secret.md">\';</script>', root, path => { seen.push(path); return "/allowed"; });
 assert.deepEqual(seen, [join(root, "..", "report & notes.md")]);
@@ -44,16 +52,27 @@ try {
 	const body = await first.text();
 	const urls = [...body.matchAll(/href="(\/__pi_markdown_preview_document__\/[^"#]+)"/g)].map(match => new URL(match[1], enabled.url));
 	assert.equal(urls.length, 5);
-	assert.equal((await fetch(urls[0])).status, 403);
-	assert.equal((await fetch(new URL(`${prefix}${"0".repeat(64)}`, enabled.url), { headers })).status, 404);
-	const waiting = [0, 1, 2, 3, 0].map(i => fetch(urls[i], { headers }).then(response => response.text(), () => "closed"));
+	const unauthorized = await fetch(urls[0]);
+	assert.equal(unauthorized.status, 403);
+	await unauthorized.text();
+	const missing = await fetch(new URL(`${prefix}${"0".repeat(64)}`, enabled.url), { headers });
+	assert.equal(missing.status, 404);
+	await missing.text();
+	const waiting = [0, 1, 2, 3, 0].map(i => fetch(urls[i], { headers }).then(response => response.text()).catch(() => "closed"));
 	const deadline = Date.now() + 3000;
 	while (renders < 4 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
 	assert.equal(renders, 4, "concurrent opens of one file share a render");
-	assert.equal((await fetch(urls[4], { headers })).status, 503, "limit parallel renders");
-	await enabled.close();
-	await Promise.all(waiting);
+	const limited = await fetch(urls[4], { headers });
+	assert.equal(limited.status, 503, "limit parallel renders");
+	await limited.text();
+	await within(enabled.close(), "watch shutdown with linked-document requests in flight");
+	await within(Promise.all(waiting), "settling cancelled HTTP requests");
 	assert.equal(cancelled, 4, "closing the watcher cancels all linked-document renders");
+	await within(enabled.close(), "repeated watch shutdown");
+	const reopened = await createBrowserWatchServer(html("reopened"), root, { port: Number(new URL(enabled.url).port) });
+	try {
+		assert.match(await (await fetch(reopened.url)).text(), /reopened/);
+	} finally { await within(reopened.close(), "shutdown after rebinding the same port"); }
 } finally {
 	await ordinary?.close();
 	await enabled?.close();
