@@ -74,6 +74,9 @@ try {
 	history.updateDocument(doc("three"));
 	await page.goto(history.url, { waitUntil: "domcontentloaded" });
 	assert.equal(await bodyText(), "three");
+	await page.waitForFunction(() => true);
+	for (let i = 0; i < 50 && history.clientCount === 0; i++) await new Promise(done => setTimeout(done, 20));
+	assert.equal(history.clientCount, 1, "The open page counts as a connected client.");
 	await shortcut(true, "ArrowLeft");
 	assert.equal(await bodyText(), "one");
 	assert.equal(revisionInUrl(), "1");

@@ -547,7 +547,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     if (!reconnectAfterStop || navigating) return;
     clearTimeout(reconnectTimer);
     reconnectTimer = window.setTimeout(connectEvents, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+    reconnectDelay = Math.min(reconnectDelay * 2, 5000);
   };
   const connectEvents = () => {
     if (navigating) return;
@@ -1005,6 +1005,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		},
 		get historyBytes() {
 			return historyBytes;
+		},
+		/** Pages currently connected for live updates (e.g. to avoid opening a duplicate tab). */
+		get clientCount() {
+			for (const client of eventClients) if (client.writableEnded || client.destroyed) eventClients.delete(client);
+			return eventClients.size;
 		},
 		updateDocument(html, { appendToHistory = true } = {}) {
 			if (closed) return documents[documents.length - 1].revision;
