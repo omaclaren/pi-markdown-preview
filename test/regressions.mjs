@@ -28,6 +28,7 @@ const sourcePath = resolve(process.cwd(), "index.ts");
 const src = readFileSync(sourcePath, "utf-8");
 const boundedProcessSrc = readFileSync(resolve(process.cwd(), "shared", "bounded-process.js"), "utf-8");
 const browserWatchServerSrc = readFileSync(resolve(process.cwd(), "shared", "browser-watch-server.js"), "utf-8");
+const browserFileResponseSrc = readFileSync(resolve(process.cwd(), "shared", "browser-file-response.js"), "utf-8");
 const pdfFigureRendererSrc = readFileSync(resolve(process.cwd(), "client", "pdf-figure-renderer.js"), "utf-8");
 assert.match(boundedProcessSrc, /child\.stdout\.on\("error"/);
 assert.match(boundedProcessSrc, /child\.stderr\.on\("error"/);
@@ -45,8 +46,10 @@ assert.match(pdfFigureRendererSrc, /isEvalSupported: false/g, "PDF.js should not
 assert.match(pdfFigureRendererSrc, /MAX_TOTAL_CANVAS_PIXELS = 32 \* 1024 \* 1024/, "PDF canvases should have an aggregate browser-memory bound.");
 assert.match(pdfFigureRendererSrc, /for \(let index = 0; index < embeds\.length; index \+= 1\)/, "PDF figures should render sequentially rather than allocating every canvas concurrently.");
 assert.ok(
-	browserWatchServerSrc.includes('req.once("aborted", destroyStream)')
-		&& browserWatchServerSrc.includes('res.once("close", destroyStream)')
+	browserWatchServerSrc.includes("await sendBrowserFile(req, res, resourcePath, contentType,")
+		&& browserFileResponseSrc.includes('req.once("aborted", abort)')
+		&& browserFileResponseSrc.includes('res.once("close", abort)')
+		&& browserFileResponseSrc.includes("const abort = () => stream.destroy();")
 		&& browserWatchServerSrc.includes("if (req.aborted || res.destroyed || res.writableEnded) return;"),
 	"Cancelled PDF.js resource requests should close their source file streams.",
 );
@@ -1528,6 +1531,8 @@ await assertPreviewPageLayoutCollection();
 await import("./code-wrap.mjs");
 await import("./document-updates.mjs");
 await import("./watch-document-links.mjs");
+const imageLinkChecks = spawnSync(process.execPath, [process.versions.bun ? "test" : "--test", resolve(process.cwd(), "test", "watch-image-links.mjs")], { stdio: "inherit", timeout: 90_000 });
+assert.equal(imageLinkChecks.status, 0, "Image link HTTP, security and browser checks should pass.");
 await import("./document-navigation.mjs");
 await import("./watch-lifecycle.mjs");
 

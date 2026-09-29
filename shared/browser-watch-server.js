@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { createReadStream, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { basename, dirname, extname, isAbsolute, posix as posixPath, relative, resolve, win32 as win32Path } from "node:path";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { sendBrowserFile } from "./browser-file-response.js";
 import { buildHtmlPagePreview, createHtmlPageServer, isHtmlPagePath } from "./html-page-preview.js";
 import { readLinkedDocument } from "./read-linked-document.js";
+import { buildImagePagePreview, IMAGE_CONTENT_TYPES as RESOURCE_CONTENT_TYPES } from "./image-page-preview.js";
 
 // Keep SSE for pages served by older versions; new pages use finite polls.
 const EVENTS_PATH = "/__pi_markdown_preview_events__";
@@ -35,18 +36,6 @@ function escapeBrowserWatchHtmlAttribute(value) {
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#39;");
 }
-
-const RESOURCE_CONTENT_TYPES = new Map([
-	[".avif", "image/avif"],
-	[".bmp", "image/bmp"],
-	[".gif", "image/gif"],
-	[".ico", "image/x-icon"],
-	[".jpeg", "image/jpeg"],
-	[".jpg", "image/jpeg"],
-	[".png", "image/png"],
-	[".svg", "image/svg+xml"],
-	[".webp", "image/webp"],
-]);
 
 function decodeHtmlImageSource(source) {
 	return source.replace(/&(amp|quot|apos|#39|#x27);/gi, (entity, name) => {
@@ -188,7 +177,7 @@ export function rewriteBrowserWatchLocalMediaSources(html, resourceRoot, routeFo
 	});
 }
 
-// Deliberately text-only: HTML is rendered as code by the host, never served raw.
+// Text formats accepted by the host renderer; HTML uses the isolated page shell.
 const DOCUMENT_EXTENSIONS = new Set(("md markdown mdx rmd qmd tex latex txt text log csv tsv json jsonc jsonl yaml yml toml ini xml "
 	+ "ts tsx mts cts js jsx mjs cjs py r jl rb rs go java kt swift c h cpp cxx cc hpp cs sh bash zsh fish ps1 sql html htm css scss sass less lua pl hs clj ex exs erl diff patch").split(" "));
 const DOCUMENT_BASENAMES = new Set(["readme", "license", "licence", "makefile", "dockerfile"]);
@@ -199,7 +188,7 @@ export function isBrowserWatchDocumentPath(path) {
 }
 
 /**
- * Rewrite only authored local document links. Pure anchors, network URLs and
+ * Rewrite only authored local document/image links. Pure anchors, network URLs and
  * unsupported files stay unchanged. No filesystem access occurs until a click.
  *
  * @param {string} html
@@ -220,7 +209,7 @@ export function rewriteBrowserWatchLocalDocumentLinks(html, resourceRoot, routeF
 		const decoded = decodeHtmlImageSource(source.trim());
 		if (!decoded || decoded.startsWith("#") || decoded.startsWith("?")) return tag;
 		const path = getBrowserWatchLocalMediaPath(source, resourceRoot, platform);
-		if (!path || (!isBrowserWatchDocumentPath(path) && extname(path).toLowerCase() !== ".pdf")) return tag;
+		if (!path || (!isBrowserWatchDocumentPath(path) && extname(path).toLowerCase() !== ".pdf" && !RESOURCE_CONTENT_TYPES.has(extname(path).toLowerCase()))) return tag;
 		const fragment = decoded.includes("#") ? decoded.slice(decoded.indexOf("#")) : "";
 		const target = escapeBrowserWatchHtmlAttribute(routeForDocument(path) + fragment);
 		let replacedHref = false;
@@ -873,7 +862,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		if (options.renderLocalDocument) rewrittenHtml = rewriteBrowserWatchLocalDocumentLinks(rewrittenHtml, root, path => {
 			const id = createHmac("sha256", token).update("local-document\0").update(path).digest("hex");
 			documentLinks.set(id, path);
-			const filename = extname(path).toLowerCase() === ".pdf" ? `/${encodeURIComponent(basename(path))}` : "";
+			const extension = extname(path).toLowerCase();
+			const filename = extension === ".pdf" || RESOURCE_CONTENT_TYPES.has(extension) ? `/${encodeURIComponent(basename(path))}` : "";
 			return `${DOCUMENT_PREFIX}${id}${filename}?identity=${identity}&from=${fromRevision}`;
 		});
 		return {
@@ -1097,9 +1087,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			}
 			try {
 				const canonicalPath = await realpath(path);
-				const pdf = extname(canonicalPath).toLowerCase() === ".pdf";
-				if ((!isBrowserWatchDocumentPath(canonicalPath) && !pdf) || !(await stat(canonicalPath)).isFile()) {
-					respondText(res, 415, "Only linked text/code, HTML and PDF documents can be previewed.");
+				const extension = extname(canonicalPath).toLowerCase();
+				const pdf = extension === ".pdf";
+				const image = RESOURCE_CONTENT_TYPES.has(extension);
+				if ((!isBrowserWatchDocumentPath(canonicalPath) && !pdf && !image) || !(await stat(canonicalPath)).isFile()) {
+					respondText(res, 415, "Only linked text/code, HTML, PDF and supported image files can be previewed.");
 					return;
 				}
 				if (closed || req.aborted || res.destroyed) return;
@@ -1121,9 +1113,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const controller = new AbortController();
 					const render = options.renderLocalDocument;
 					const promise = (async () => {
-						const page = isHtmlPagePath(canonicalPath)
-							? await htmlPage(canonicalPath, await readLinkedDocument(canonicalPath, controller.signal))
-							: { html: await render(canonicalPath, controller.signal), frameOrigin: undefined };
+						const page = image
+							? { html: buildImagePagePreview(canonicalPath), frameOrigin: undefined }
+							: isHtmlPagePath(canonicalPath)
+								? await htmlPage(canonicalPath, await readLinkedDocument(canonicalPath, controller.signal))
+								: { html: await render(canonicalPath, controller.signal), frameOrigin: undefined };
 						controller.signal.throwIfAborted();
 						const document = { ...buildDocument(0, page.html, dirname(canonicalPath), undefined, fromRevision), frameOrigin: page.frameOrigin };
 						linkedDocuments.delete(id);
@@ -1196,35 +1190,12 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			return;
 		}
 		if (req.aborted || res.destroyed || res.writableEnded) return;
-		res.writeHead(200, {
-			"Cache-Control": "no-store",
-			"Content-Length": String(resourceStat.size),
+		// Preserve useful filenames for Save image as / native media viewers,
+		// while sharing bounded, abortable byte-range streaming with PDF links.
+		await sendBrowserFile(req, res, resourcePath, contentType, {
+			...COMMON_SECURITY_HEADERS,
 			"Content-Security-Policy": "default-src 'none'; sandbox",
-			"Content-Type": contentType,
-			"Cross-Origin-Resource-Policy": "same-origin",
-			"X-Content-Type-Options": "nosniff",
 		});
-		if (method === "HEAD") {
-			res.end();
-			return;
-		}
-		if (req.aborted || res.destroyed || res.writableEnded) return;
-		const stream = createReadStream(resourcePath);
-		const destroyStream = () => {
-			if (!stream.destroyed) stream.destroy();
-		};
-		const removeStreamAbortListeners = () => {
-			req.off("aborted", destroyStream);
-			res.off("close", destroyStream);
-		};
-		req.once("aborted", destroyStream);
-		res.once("close", destroyStream);
-		stream.once("close", removeStreamAbortListeners);
-		stream.once("error", () => {
-			removeStreamAbortListeners();
-			res.destroy();
-		});
-		stream.pipe(res);
 	};
 
 	const server = createServer((req, res) => {

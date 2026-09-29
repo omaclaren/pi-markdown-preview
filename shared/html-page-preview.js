@@ -3,12 +3,12 @@ import { realpath } from "node:fs/promises";
 import { createServer } from "node:http";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { sendBrowserFile } from "./browser-file-response.js";
+import { IMAGE_CONTENT_TYPES } from "./image-page-preview.js";
 
-const ASSETS = new Map(Object.entries({
+const ASSETS = new Map([...IMAGE_CONTENT_TYPES, ...Object.entries({
 	".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
-	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif", ".svg": "image/svg+xml", ".ico": "image/x-icon",
 	".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf", ".wasm": "application/wasm",
-}));
+})]);
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 export const isHtmlPagePath = path => /\.html?$/i.test(path);
 
