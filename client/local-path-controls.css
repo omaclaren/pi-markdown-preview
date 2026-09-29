@@ -1,0 +1,33 @@
+.pi-preview-local-link { position: relative; }
+.pi-preview-copy-path { font: 14px system-ui; cursor: pointer; color: inherit; user-select: none; }
+/* Generated icon content keeps copy feedback out of prose/reading-position text. */
+.pi-preview-copy-path-inline::before { content: "⧉"; }
+.pi-preview-copy-path-inline[data-copy-state="copied"]::before { content: "✓"; }
+.pi-preview-copy-path-inline[data-copy-state="failed"]::before { content: "!"; }
+.pi-preview-copy-path-inline { display: inline-grid; place-items: center; vertical-align: baseline; position: static; margin: 0 0 0 .2em; padding: 0; width: 1.6em; min-width: 0; height: 1.6em; min-height: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; opacity: 0; }
+.pi-preview-local-link:hover > .pi-preview-copy-path-inline,
+.pi-preview-local-link:has(:focus-visible) > .pi-preview-copy-path-inline { opacity: 1; }
+.pi-preview-copy-path:hover { background: var(--card, Canvas); border-color: var(--panel-border, ButtonBorder); }
+.pi-preview-copy-path:focus-visible { outline: 2px solid var(--link, Highlight); outline-offset: 2px; opacity: 1; }
+.pi-preview-copy-path[aria-disabled="true"] { cursor: progress; }
+.pi-preview-path-status, .pi-preview-path-copy-buffer { position: fixed; left: -10000px; top: 0; width: 1px; height: 1px; overflow: hidden; white-space: pre; }
+.pi-preview-document-nav { position: fixed; top: 8px; right: 12px; z-index: 200; display: flex; align-items: stretch; background: var(--card, Canvas); color: var(--text, CanvasText); border: 1px solid var(--panel-border, ButtonBorder); border-radius: 8px; font: 14px system-ui; }
+.pi-preview-document-nav a, .pi-preview-document-nav button { display: flex; align-items: center; justify-content: center; min-height: 28px; padding: 4px 10px; color: inherit; text-decoration: none; border: 0; border-radius: 8px; background: transparent; font: inherit; box-sizing: content-box; }
+.pi-preview-document-nav button { min-width: 9em; }
+.pi-preview-document-nav ~ #preview-root > header { padding-right: min(340px, 65vw); }
+.pi-preview-path-dialog { position: fixed; top: 124px; right: 12px; z-index: 300; box-sizing: border-box; width: min(520px, calc(100vw - 24px)); padding: 12px; background: var(--card, Canvas); color: var(--text, CanvasText); border: 1px solid var(--panel-border, ButtonBorder); border-radius: 8px; font: 14px system-ui; box-shadow: 0 4px 16px #0003; }
+.pi-preview-path-dialog[hidden] { display: none; }
+.pi-preview-path-dialog p { margin: 0 0 8px; }
+.pi-preview-path-dialog textarea { display: block; box-sizing: border-box; width: 100%; margin: 0 0 8px; padding: 8px; font: 14px monospace; resize: vertical; color: inherit; background: transparent; }
+.pi-preview-path-dialog button { position: static; padding: 6px 12px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--panel-border, ButtonBorder); border-radius: 4px; cursor: pointer; }
+@media (max-width: 520px) {
+ .pi-preview-document-nav { flex-direction: column; }
+ .pi-preview-document-nav ~ #preview-root > header { min-height: 120px; }
+}
+@media (hover: none), (pointer: coarse) {
+ .pi-preview-copy-path-inline { opacity: 1; min-width: 44px; min-height: 44px; }
+ .pi-preview-document-nav a, .pi-preview-document-nav button, .pi-preview-path-dialog button { min-height: 44px; }
+}
+@media print {
+ .pi-preview-copy-path, .pi-preview-document-nav, .pi-preview-path-dialog, .pi-preview-path-status { display: none !important; }
+}

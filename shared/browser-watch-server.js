@@ -8,6 +8,7 @@ import { sendBrowserFile } from "./browser-file-response.js";
 import { buildHtmlPagePreview, createHtmlPageServer, isHtmlPagePath } from "./html-page-preview.js";
 import { readLinkedDocument } from "./read-linked-document.js";
 import { buildImagePagePreview, IMAGE_CONTENT_TYPES as RESOURCE_CONTENT_TYPES } from "./image-page-preview.js";
+import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 
 // Keep SSE for pages served by older versions; new pages use finite polls.
 const EVENTS_PATH = "/__pi_markdown_preview_events__";
@@ -847,9 +848,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		const cutoff = Date.now() - VIEWER_TTL_MS;
 		for (const [id, lastSeen] of pollingClients) if (lastSeen < cutoff) pollingClients.delete(id);
 	};
-	const buildDocument = (documentRevision, html, root = lexicalResourceRoot, htmlFile, fromRevision = documentRevision) => {
+	const buildDocument = (documentRevision, html, root = lexicalResourceRoot, htmlFile, fromRevision = documentRevision, pagePath) => {
 		const absoluteImages = new Map();
 		const documentLinks = new Map();
+		const localPaths = new Map();
 		if (htmlFile) return { revision: documentRevision, html: "", authoredHtml: html, htmlFile, absoluteImages, documentLinks, byteSize: Buffer.byteLength(html) };
 		let rewrittenHtml = rewriteBrowserWatchLocalMediaSources(html, root, (absolutePath, contentType) => {
 			const imageId = createHmac("sha256", token)
@@ -864,8 +866,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			documentLinks.set(id, path);
 			const extension = extname(path).toLowerCase();
 			const filename = extension === ".pdf" || RESOURCE_CONTENT_TYPES.has(extension) ? `/${encodeURIComponent(basename(path))}` : "";
-			return `${DOCUMENT_PREFIX}${id}${filename}?identity=${identity}&from=${fromRevision}`;
+			const route = `${DOCUMENT_PREFIX}${id}${filename}`;
+			localPaths.set(route, path);
+			return `${route}?identity=${identity}&from=${fromRevision}`;
 		});
+		rewrittenHtml = addBrowserWatchLocalPathControls(rewrittenHtml, localPaths, pagePath);
 		return {
 			revision: documentRevision,
 			html: rewrittenHtml,
@@ -1119,7 +1124,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 								? await htmlPage(canonicalPath, await readLinkedDocument(canonicalPath, controller.signal))
 								: { html: await render(canonicalPath, controller.signal), frameOrigin: undefined };
 						controller.signal.throwIfAborted();
-						const document = { ...buildDocument(0, page.html, dirname(canonicalPath), undefined, fromRevision), frameOrigin: page.frameOrigin };
+						const document = { ...buildDocument(0, page.html, dirname(canonicalPath), undefined, fromRevision, path), frameOrigin: page.frameOrigin };
 						linkedDocuments.delete(id);
 						linkedDocuments.set(id, document);
 						let bytes = [...linkedDocuments.values()].reduce((sum, doc) => sum + doc.byteSize, 0);
@@ -1139,7 +1144,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				const nonce = randomBytes(18).toString("base64url");
 				const title = escapeBrowserWatchHtmlText(`${basename(canonicalPath)} — ${options.titleSuffix || "Markdown Preview"}`);
 				const returnUrl = `/?revision=${fromRevision}&identity=${identity}`;
-				const back = `<style>.pi-preview-document-nav{position:fixed;top:8px;right:12px;z-index:200;background:var(--card,Canvas);color:var(--text,CanvasText);border:1px solid var(--panel-border,ButtonBorder);border-radius:8px;font:14px system-ui}.pi-preview-document-nav a{display:flex;align-items:center;min-height:28px;padding:4px 10px;color:inherit;text-decoration:none;border-radius:8px}@media(pointer:coarse){.pi-preview-document-nav a{min-height:44px}}@media print{.pi-preview-document-nav{display:none}}</style><nav class="pi-preview-document-nav" aria-label="Document navigation"><a href="${escapeBrowserWatchHtmlAttribute(returnUrl)}">← Return to preview</a></nav><script>history.scrollRestoration='auto';</script>`;
+				const back = `<nav class="pi-preview-document-nav" aria-label="Document navigation"><a href="${escapeBrowserWatchHtmlAttribute(returnUrl)}">← Return to preview</a></nav><script>history.scrollRestoration='auto';</script>`;
 				const html = document.html.replace(/<body([^>]*)>/i, match => match + back).replace(BASE_TAG_PATTERN, "")
 					.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, () => `<title>${title}</title>`)
 					.replace(/<script(?=[\s>])/gi, `<script nonce="${nonce}"`);

@@ -1531,8 +1531,10 @@ await assertPreviewPageLayoutCollection();
 await import("./code-wrap.mjs");
 await import("./document-updates.mjs");
 await import("./watch-document-links.mjs");
-const imageLinkChecks = spawnSync(process.execPath, [process.versions.bun ? "test" : "--test", resolve(process.cwd(), "test", "watch-image-links.mjs")], { stdio: "inherit", timeout: 90_000 });
-assert.equal(imageLinkChecks.status, 0, "Image link HTTP, security and browser checks should pass.");
+for (const suite of ["watch-image-links.mjs", "watch-copy-local-path.mjs"]) {
+	const checks = spawnSync(process.execPath, [process.versions.bun ? "test" : "--test", resolve(process.cwd(), "test", suite)], { stdio: "inherit", timeout: 90_000 });
+	assert.equal(checks.status, 0, `${suite}: HTTP, security and browser checks should pass.`);
+}
 await import("./document-navigation.mjs");
 await import("./watch-lifecycle.mjs");
 
