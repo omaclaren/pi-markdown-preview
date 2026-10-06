@@ -90,11 +90,11 @@ test("local path metadata is opt-in, authenticated, safely serialized and create
 
 test("copy paths beside links and on nested/image/HTML pages preserves native navigation and readable text", browserOptions, async t => {
 	const f = await fixture(t); const { browser, page, errors } = await f.page();
-	assert.equal(await page.$$eval('.pi-preview-copy-path-inline', nodes => nodes.length), 7);
-	for (const id of ['web', 'fragment', 'unsupported']) assert.equal(await page.$(selector(id)), null);
+	assert.equal(await page.$$eval('.pi-preview-copy-path-inline', nodes => nodes.length), 8);
+	for (const id of ['web', 'fragment']) assert.equal(await page.$(selector(id)), null);
 	const originalUrl = page.url(), link = await page.$eval('#relative', node => node.href);
 	const before = await page.$eval('#preview-root', root => root.textContent);
-	for (const [id, path] of [['relative', f.file], ['file-url', f.file], ['alias', join(f.project, 'alias.md')], ['pdf', join(f.other, 'report.pdf')], ['missing', join(f.project, 'missing.md')]]) {
+	for (const [id, path] of [['relative', f.file], ['file-url', f.file], ['alias', join(f.project, 'alias.md')], ['pdf', join(f.other, 'report.pdf')], ['missing', join(f.project, 'missing.md')], ['unsupported', join(f.project, 'private.zip')]]) {
 		await copy(page, selector(id));
 		assert.equal(await page.evaluate(() => window.__pathCopy.modern.at(-1)), path);
 		assert.equal(page.url(), originalUrl, 'copy must not navigate');

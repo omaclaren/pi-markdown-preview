@@ -9,15 +9,16 @@ const scriptJson = value => JSON.stringify(value).replace(/</g, "\\u003c").repla
  * @param {string} html
  * @param {Map<string, string>} paths Route pathname -> resolved authored path.
  * @param {string} [pagePath] The linked file itself, without its URL fragment.
+ * @param {{ url: string, key: string, kind: "file" | "directory", previewable: boolean }} [nativeAction]
  */
-export function addBrowserWatchLocalPathControls(html, paths, pagePath) {
+export function addBrowserWatchLocalPathControls(html, paths, pagePath, nativeAction) {
 	if (!paths.size && !pagePath) return html;
 	let style = `<style>${STYLE}</style>`;
 	if (/<\/head>/i.test(html)) {
 		html = html.replace(/<\/head>/i, () => `${style}</head>`);
 		style = "";
 	}
-	const ui = `${style}<script>${SCRIPT}(${scriptJson([...paths])}, ${scriptJson(pagePath ?? null)});</script>`;
+	const ui = `${style}<script>${SCRIPT}(${scriptJson([...paths])}, ${scriptJson(pagePath ?? null)}, ${scriptJson(nativeAction ?? null)});</script>`;
 	// A filename can contain "$&" or "$'": never use it as a replacement string.
 	return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, () => `${ui}</body>`) : `${html}\n${ui}`;
 }

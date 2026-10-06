@@ -9,6 +9,8 @@ import { buildHtmlPagePreview, createHtmlPageServer, isHtmlPagePath } from "./ht
 import { readLinkedDocument } from "./read-linked-document.js";
 import { buildImagePagePreview, IMAGE_CONTENT_TYPES as RESOURCE_CONTENT_TYPES } from "./image-page-preview.js";
 import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
+import { buildLocalPathPage } from "./local-path-page.js";
+import { performNativePathAction } from "./native-path-action.js";
 
 // Keep SSE for pages served by older versions; new pages use finite polls.
 const EVENTS_PATH = "/__pi_markdown_preview_events__";
@@ -19,6 +21,7 @@ const SHARE_PATH = "/__pi_markdown_preview_share__";
 const RESOURCE_PREFIX = "/__pi_markdown_preview_resource__/";
 const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const DOCUMENT_PREFIX = "/__pi_markdown_preview_document__/";
+const NATIVE_ACTION_PREFIX = "/__pi_markdown_preview_native_action__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-position.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
@@ -189,8 +192,9 @@ export function isBrowserWatchDocumentPath(path) {
 }
 
 /**
- * Rewrite only authored local document/image links. Pure anchors, network URLs and
- * unsupported files stay unchanged. No filesystem access occurs until a click.
+ * Rewrite authored local path links, including unsupported files and folders.
+ * Pure anchors, network URLs and internal routes stay unchanged. No filesystem
+ * access occurs until a click; unsupported paths get a path page, not file bytes.
  *
  * @param {string} html
  * @param {string} resourceRoot
@@ -208,9 +212,9 @@ export function rewriteBrowserWatchLocalDocumentLinks(html, resourceRoot, routeF
 		if (!href) return tag;
 		const source = href[2] ?? href[3] ?? href[4] ?? "";
 		const decoded = decodeHtmlImageSource(source.trim());
-		if (!decoded || decoded.startsWith("#") || decoded.startsWith("?")) return tag;
+		if (!decoded || decoded.startsWith("#") || decoded.startsWith("?") || decoded.startsWith("/__pi_markdown_preview_")) return tag;
 		const path = getBrowserWatchLocalMediaPath(source, resourceRoot, platform);
-		if (!path || (!isBrowserWatchDocumentPath(path) && extname(path).toLowerCase() !== ".pdf" && !RESOURCE_CONTENT_TYPES.has(extname(path).toLowerCase()))) return tag;
+		if (!path) return tag;
 		const fragment = decoded.includes("#") ? decoded.slice(decoded.indexOf("#")) : "";
 		const target = escapeBrowserWatchHtmlAttribute(routeForDocument(path) + fragment);
 		let replacedHref = false;
@@ -805,9 +809,10 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  * open pages then reconnect by themselves instead of going stale. `port`
  * failing to bind rejects (e.g. EADDRINUSE) so the caller can fall back to 0.
  *
- * `renderLocalDocument` opts into linked, read-only document previews. The host
- * must return trusted renderer HTML, bound its reads, and respect cancellation.
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal) => Promise<string> }} [options]
+ * `renderLocalDocument` opts into linked previews/path pages and explicit native
+ * file actions. The host must return trusted renderer HTML, bound its reads, and
+ * respect cancellation. `nativePathAction` can supply a host/test desktop opener.
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void> }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const fixedPort = options.port ?? 0;
@@ -829,6 +834,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		? randomBytes(16).toString("hex")
 		: createHmac("sha256", token).update("ui-state-scope").digest("hex").slice(0, 32);
 	const instance = randomBytes(8).toString("hex");
+	// Deliberately new on each server start, unlike remembered watch credentials.
+	const nativeActionKey = randomBytes(32).toString("base64url");
+	const nativePathAction = options.nativePathAction ?? performNativePathAction;
+	let nativeActionBusy = false, nextNativeActionAt = 0;
 	const expiredHint = typeof options.expiredHint === "string" ? options.expiredHint.trim() : "Re-run /preview-browser --watch.";
 	const lexicalResourceRoot = resolve(resourceRoot);
 	const resolvedResourceRoot = await realpath(lexicalResourceRoot);
@@ -848,7 +857,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		const cutoff = Date.now() - VIEWER_TTL_MS;
 		for (const [id, lastSeen] of pollingClients) if (lastSeen < cutoff) pollingClients.delete(id);
 	};
-	const buildDocument = (documentRevision, html, root = lexicalResourceRoot, htmlFile, fromRevision = documentRevision, pagePath) => {
+	const buildDocument = (documentRevision, html, root = lexicalResourceRoot, htmlFile, fromRevision = documentRevision, pagePath, nativeAction) => {
 		const absoluteImages = new Map();
 		const documentLinks = new Map();
 		const localPaths = new Map();
@@ -870,7 +879,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			localPaths.set(route, path);
 			return `${route}?identity=${identity}&from=${fromRevision}`;
 		});
-		rewrittenHtml = addBrowserWatchLocalPathControls(rewrittenHtml, localPaths, pagePath);
+		rewrittenHtml = addBrowserWatchLocalPathControls(rewrittenHtml, localPaths, pagePath, nativeAction);
 		return {
 			revision: documentRevision,
 			html: rewrittenHtml,
@@ -945,7 +954,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		const identityMatches = requestedIdentity === null || requestedIdentity === identity;
 		const method = req.method ?? "GET";
 		const releasingViewer = requestUrl.pathname === STATE_PATH && method === "POST" && requestUrl.searchParams.get("closed") === "1";
-		if (method !== "GET" && method !== "HEAD" && !releasingViewer) {
+		const nativeRequest = requestUrl.pathname.startsWith(NATIVE_ACTION_PREFIX);
+		if (method !== "GET" && method !== "HEAD" && !releasingViewer && !(nativeRequest && method === "POST")) {
 			respondText(res, 405, "Method not allowed");
 			return;
 		}
@@ -1002,7 +1012,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		}
 		// A second tab can replace the port-scoped cookie. Its authorization
 		// must not retarget an existing page or count it as a different watcher.
-		if ((requestUrl.pathname === SHARE_PATH || requestUrl.pathname === EVENTS_PATH || requestUrl.pathname === STATE_PATH || requestUrl.pathname.startsWith(DOCUMENT_PREFIX)) && !identityMatches) {
+		if ((requestUrl.pathname === SHARE_PATH || requestUrl.pathname === EVENTS_PATH || requestUrl.pathname === STATE_PATH || requestUrl.pathname.startsWith(DOCUMENT_PREFIX) || nativeRequest) && !identityMatches) {
 			if (requestUrl.pathname === EVENTS_PATH && method === "GET") {
 				// EventSource hides HTTP error status/body from the page. Send a
 				// terminal rejection event instead, with no document state and no
@@ -1010,6 +1020,43 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/event-stream; charset=utf-8" });
 				res.end("event: identity-mismatch\ndata: {}\n\n");
 			} else respondText(res, 409, "A different preview watcher owns this address.");
+			return;
+		}
+
+		if (nativeRequest) {
+			if (method !== "POST") { respondText(res, 405, "Native actions require an explicit POST request."); return; }
+			req.resume(); // No request body or caller-supplied filesystem path is used.
+			const origin = `http://127.0.0.1:${port}`;
+			if (requestedIdentity !== identity || requestUrl.searchParams.get("instance") !== instance
+				|| req.headers.host !== `127.0.0.1:${port}` || req.headers.origin !== origin
+				|| req.headers["x-preview-action"] !== nativeActionKey
+				|| (req.headers["sec-fetch-site"] && req.headers["sec-fetch-site"] !== "same-origin")
+				|| (req.headers["sec-fetch-dest"] && req.headers["sec-fetch-dest"] !== "empty")) {
+				respondText(res, 403, "Open file actions from a current, authenticated preview page."); return;
+			}
+			const id = requestUrl.pathname.slice(NATIVE_ACTION_PREFIX.length);
+			const path = /^[a-f\d]{64}$/.test(id) && options.renderLocalDocument
+				? retainedDocuments().map(doc => doc.documentLinks.get(id)).find(Boolean) : undefined;
+			if (!path) { respondText(res, 404, "Path link is not available in retained previews."); return; }
+			const action = requestUrl.searchParams.get("action");
+			if (action !== "open" && action !== "reveal") { respondText(res, 400, "Unknown native file action."); return; }
+			if (nativeActionBusy || Date.now() < nextNativeActionAt) { respondText(res, 429, "A file action was just requested. Please wait before trying again."); return; }
+			nativeActionBusy = true;
+			nextNativeActionAt = Date.now() + 600;
+			try {
+				const info = await stat(await realpath(path));
+				if (!info.isFile() && !info.isDirectory()) { respondText(res, 415, "Only regular files and folders support native actions."); return; }
+				if (closed || req.aborted || res.destroyed) return;
+				if (!retainedDocuments().some(doc => doc.documentLinks.get(id) === path)) { respondText(res, 404, "Path link has expired."); return; }
+				await nativePathAction(action, path, info.isDirectory() ? "directory" : "file");
+				if (!closed && !res.destroyed) { res.writeHead(204, NON_HTML_SECURITY_HEADERS); res.end(); }
+			} catch (error) {
+				if (closed || res.destroyed) return;
+				const status = ["ENOENT", "ENOTDIR"].includes(error?.code) ? 404 : ["EACCES", "EPERM"].includes(error?.code) ? 403
+					: [501, 502, 504].includes(error?.statusCode) ? error.statusCode : 500;
+				respondText(res, status, status === 404 ? "The linked path no longer exists." : status === 403 ? "The linked path is not accessible."
+					: [501, 502, 504].includes(status) ? error.message : "Could not request the native file action.");
+			} finally { nativeActionBusy = false; }
 			return;
 		}
 
@@ -1095,12 +1142,15 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				const extension = extname(canonicalPath).toLowerCase();
 				const pdf = extension === ".pdf";
 				const image = RESOURCE_CONTENT_TYPES.has(extension);
-				if ((!isBrowserWatchDocumentPath(canonicalPath) && !pdf && !image) || !(await stat(canonicalPath)).isFile()) {
-					respondText(res, 415, "Only linked text/code, HTML, PDF and supported image files can be previewed.");
+				const info = await stat(canonicalPath);
+				const previewable = info.isFile() && (isBrowserWatchDocumentPath(canonicalPath) || pdf || image);
+				const pathPage = requestUrl.searchParams.get("view") === "path" || !previewable;
+				if (!info.isFile() && !info.isDirectory()) {
+					respondText(res, 415, "Only regular files and folders can be linked.");
 					return;
 				}
 				if (closed || req.aborted || res.destroyed) return;
-				if (pdf) { await sendBrowserFile(req, res, canonicalPath, "application/pdf", NON_HTML_SECURITY_HEADERS); return; }
+				if (pdf && !pathPage) { await sendBrowserFile(req, res, canonicalPath, "application/pdf", NON_HTML_SECURITY_HEADERS); return; }
 				if (method === "HEAD") {
 					res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/html; charset=utf-8" });
 					res.end();
@@ -1108,7 +1158,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				}
 				const from = Number(requestUrl.searchParams.get("from"));
 				const fromRevision = documents.some(doc => doc.revision === from) ? from : documents.at(-1).revision;
-				const pendingKey = `${id}:${fromRevision}`;
+				const retainedKey = `${id}:${pathPage ? "path" : "preview"}`;
+				const pendingKey = `${retainedKey}:${fromRevision}`;
 				let pending = pendingDocuments.get(pendingKey);
 				if (!pending) {
 					if (pendingDocuments.size >= 4) {
@@ -1118,15 +1169,19 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const controller = new AbortController();
 					const render = options.renderLocalDocument;
 					const promise = (async () => {
-						const page = image
+						const kind = info.isDirectory() ? "directory" : "file";
+						const page = pathPage
+							? { html: buildLocalPathPage(path, kind), frameOrigin: undefined }
+							: image
 							? { html: buildImagePagePreview(canonicalPath), frameOrigin: undefined }
 							: isHtmlPagePath(canonicalPath)
 								? await htmlPage(canonicalPath, await readLinkedDocument(canonicalPath, controller.signal))
 								: { html: await render(canonicalPath, controller.signal), frameOrigin: undefined };
 						controller.signal.throwIfAborted();
-						const document = { ...buildDocument(0, page.html, dirname(canonicalPath), undefined, fromRevision, path), frameOrigin: page.frameOrigin };
-						linkedDocuments.delete(id);
-						linkedDocuments.set(id, document);
+						const nativeAction = pathPage ? { url: `${NATIVE_ACTION_PREFIX}${id}?identity=${identity}&instance=${instance}`, key: nativeActionKey, kind, previewable } : undefined;
+						const document = { ...buildDocument(0, page.html, dirname(canonicalPath), undefined, fromRevision, path, nativeAction), frameOrigin: page.frameOrigin };
+						linkedDocuments.delete(retainedKey);
+						linkedDocuments.set(retainedKey, document);
 						let bytes = [...linkedDocuments.values()].reduce((sum, doc) => sum + doc.byteSize, 0);
 						while (linkedDocuments.size > historyLimit || (linkedDocuments.size > 1 && bytes > historyByteLimit)) {
 							const oldest = linkedDocuments.keys().next().value;

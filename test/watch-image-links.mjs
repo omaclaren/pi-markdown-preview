@@ -30,7 +30,7 @@ test("all supported image links rewrite safely, including local file URLs and Wi
 	for (const href of ["file:///C:/figures/plot%20one.png", "C:/figures/plot%20one.png", "../figures/plot%20one.png"]) {
 		rewriteBrowserWatchLocalDocumentLinks(`<a href="${href}">Image</a>`, "C:\\project", path => { assert.equal(path, "C:\\figures\\plot one.png"); return "/allowed"; }, "win32");
 	}
-	for (const href of ["#figure", "?revision=1", "https://example.com/image.png", "//example.com/image.png", "file://remote/image.png", "data:image/png;base64,abc", "archive.zip", "image.heic", "bad%00.png", "bad%XX.png"]) {
+	for (const href of ["#figure", "?revision=1", "https://example.com/image.png", "//example.com/image.png", "file://remote/image.png", "data:image/png;base64,abc", "bad%00.png", "bad%XX.png"]) {
 		const input = `<a href="${href}">Unchanged</a>`;
 		assert.equal(rewriteBrowserWatchLocalDocumentLinks(input, "/work", () => assert.fail(href)), input);
 	}
@@ -89,7 +89,8 @@ test("image pages are authenticated, bounded, binary-safe and stream named resou
 	assert.deepEqual(Buffer.from(await range.arrayBuffer()), png.subarray(0, 8));
 	await writeFile(path, Buffer.concat([png, Buffer.from("revised")]));
 	assert.equal((await (await request(imageUrl, { headers }, 200)).arrayBuffer()).byteLength, png.length + 7, "resource refresh rereads bytes");
-	for (const [index, status] of [[3, 404], [4, 415]]) await (await request(urls[index], { headers }, status)).text();
+	await (await request(urls[3], { headers }, 404)).text();
+	assert.match(await (await request(urls[4], { headers }, 200)).text(), /Local folder/, "directories with image-like names get a path page");
 	const large = await (await request(urls[5], { headers }, 200)).text();
 	const largeResource = await request(new URL(attr(large, "src"), server.url), { headers }, 200);
 	assert.equal((await largeResource.arrayBuffer()).byteLength, 2 * 1024 * 1024 + 1, "images do not pass through the UTF-8/text size gate");

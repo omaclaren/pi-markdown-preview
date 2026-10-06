@@ -1,4 +1,4 @@
-(function installLocalPathControls(entries, pagePath) {
+(function installLocalPathControls(entries, pagePath, nativeAction) {
 	"use strict";
 	if (document.documentElement.dataset.previewLocalPaths === "ready") return;
 	document.documentElement.dataset.previewLocalPaths = "ready";
@@ -133,6 +133,19 @@
 		return button;
 	}
 
+	function fileActionsLink(href, label, inline) {
+		const url = new URL(href, location.href);
+		url.searchParams.set("view", "path");
+		const link = document.createElement("a");
+		link.href = url.href;
+		link.rel = "noopener noreferrer";
+		link.className = inline ? "pi-preview-file-actions-inline" : "pi-preview-file-actions";
+		link.textContent = inline ? "" : "File actions";
+		link.title = "File actions";
+		link.setAttribute("aria-label", label);
+		return link;
+	}
+
 	for (const link of document.querySelectorAll("a[href]")) {
 		let url;
 		try { url = new URL(link.getAttribute("href"), location.href); } catch { continue; }
@@ -143,10 +156,64 @@
 		wrapper.className = "pi-preview-local-link";
 		const label = link.textContent.trim() || link.querySelector("img")?.alt || "linked file";
 		link.before(wrapper);
-		wrapper.append(link, makeButton(path, true, "Copy local path for " + label));
+		wrapper.append(link, makeButton(path, true, "Copy local path for " + label), fileActionsLink(url.href, "File actions for " + label, true));
 	}
 	if (pagePath) {
 		const navigation = document.querySelector('nav[aria-label="Document navigation"]');
 		navigation?.appendChild(makeButton(pagePath, false, "Copy local path"));
+		if (!nativeAction) navigation?.appendChild(fileActionsLink(location.href, "File actions", false));
+	}
+	if (nativeAction && pagePath) {
+		const container = document.getElementById("pi-preview-native-actions");
+		const result = document.getElementById("pi-preview-native-result");
+		if (!container || !result) return;
+		let pending = false;
+		const buttons = [];
+		const addAction = (action, label) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = label;
+			button.dataset.nativeAction = action;
+			buttons.push(button);
+			button.addEventListener("click", async event => {
+				// No DOM-generated clicks, page-load actions or automatic retries.
+				if (!event.isTrusted || pending) return;
+				pending = true;
+				buttons.forEach(item => item.setAttribute("aria-disabled", "true"));
+				button.setAttribute("aria-busy", "true");
+				result.textContent = "Requesting the system action…";
+				try {
+					const url = new URL(nativeAction.url, location.href);
+					url.searchParams.set("action", action);
+					const response = await fetch(url, { method: "POST", credentials: "same-origin", headers: { "X-Preview-Action": nativeAction.key }, signal: AbortSignal.timeout(15_000) });
+					if (!response.ok) {
+						const message = await response.text();
+						throw new Error(message || "The file action was not accepted.");
+					}
+					result.textContent = "Request sent to the system on the preview host.";
+				} catch (error) {
+					result.textContent = error.name === "TimeoutError" || error.name === "AbortError"
+						? "No confirmation received. Check your desktop before trying again."
+						: error instanceof TypeError ? "Could not reach the preview. Check your desktop before trying again." : error.message;
+				} finally {
+					pending = false;
+					buttons.forEach(item => item.removeAttribute("aria-disabled"));
+					button.removeAttribute("aria-busy");
+				}
+			});
+			container.appendChild(button);
+		};
+		if (nativeAction.kind !== "directory") addAction("reveal", "Show in folder");
+		addAction("open", nativeAction.kind === "directory" ? "Open folder" : "Open in default app");
+		container.appendChild(makeButton(pagePath, false, "Copy local path"));
+		if (nativeAction.previewable) {
+			const preview = document.createElement("a");
+			const url = new URL(location.href);
+			url.searchParams.delete("view");
+			preview.href = url.href;
+			preview.rel = "noopener noreferrer";
+			preview.textContent = "Preview";
+			container.appendChild(preview);
+		}
 	}
 })
