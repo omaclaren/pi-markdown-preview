@@ -57,8 +57,9 @@ export async function assertWatchControls({ browser, html, resourceRoot, buildHt
 			assert.equal(await page.$eval(select("toggle"), button => button.getAttribute("aria-label")), "Preview controls, revision 3 of 3");
 			const before = await geometry();
 			assert.ok(before.toolbar.width < Math.min(320, width), "The collapsed bar must not depend on source-label length.");
-			await page.focus(select("copy-link"));
-			await page.keyboard.press("Tab");
+			assert.ok(await page.$eval(select("copy-link"), button => button.getClientRects().length && button.parentElement.id === "pi-markdown-preview-watch-nav"), "Copy remains directly available on the toolbar, outside the collapsed menu.");
+			assert.equal(await page.$eval(select("toggle"), button => button.textContent.includes('Preview') || button.textContent.includes('Response')), false, "The counter does not compete with the view names.");
+			await page.focus(select("toggle"));
 			assert.ok(await page.$eval(select("toggle"), button => button === document.activeElement));
 			await page.keyboard.press("Enter");
 			assert.equal(await hidden("controls"), false, "Native Enter should open the disclosure.");
@@ -133,15 +134,18 @@ export async function assertWatchControls({ browser, html, resourceRoot, buildHt
 		await ready();
 		assert.equal(await hidden("controls"), true, "Explicit dismissal must survive the next load.");
 
-		// Copy is visible without opening anything; all writes are intercepted.
+		// Copy works directly from the collapsed toolbar; all writes are intercepted.
 		await page.setViewport({ width: 1200, height: 800 });
 		await page.goto(server.url, { waitUntil: "domcontentloaded" });
 		await ready();
 		const copyGeometry = await geometry();
-		await page.focus(select("copy-link"));
+		assert.equal(await hidden("controls"), true);
+		await page.focus(select("toggle"));
+		await page.keyboard.press("Tab");
+		assert.ok(await page.$eval(select("copy-link"), button => button === document.activeElement), "Copy is the next toolbar stop when history is collapsed.");
 		await page.keyboard.press("Enter");
 		await page.waitForFunction(() => document.querySelector('[data-watch-control="copy-link"]').textContent === "Copied");
-		assert.equal(await hidden("controls"), true);
+		assert.equal(await hidden("controls"), true, "Copy succeeds without opening the menu.");
 		assert.ok(await page.$eval(select("copy-link"), button => button === document.activeElement && !button.disabled));
 		assert.deepEqual(await geometry(), copyGeometry, "Copy feedback must not resize the collapsed bar.");
 		assert.equal(await page.evaluate(() => window.__shareTest.legacy), 0);
@@ -153,31 +157,39 @@ export async function assertWatchControls({ browser, html, resourceRoot, buildHt
 			await page.evaluate(mode => { window.__shareTest.mode = mode; }, mode);
 			await openWatchControls(page);
 			await page.click(select("copy-link"));
-			assert.equal(await hidden("controls"), true, "Sharing and history panels must not overlap.");
 			if (mode === "legacy") {
 				await page.waitForFunction(() => document.querySelector('[data-watch-control="copy-link"]').textContent === "Copied");
 				assert.ok(await page.$eval(select("copy-link"), button => button === document.activeElement));
 				continue;
 			}
 			await page.waitForFunction(() => !document.querySelector('[data-watch-control="share-panel"]').hidden);
+			assert.equal(await hidden("controls"), true, "Sharing and history panels must not overlap.");
 			assert.ok(await page.$eval(select("share-input"), input => input === document.activeElement && input.selectionStart === 0 && input.selectionEnd === input.value.length));
 			assert.deepEqual(await geometry(), copyGeometry, "Manual-copy fallback is an overlay, not a document row.");
 			assert.equal(await page.$$eval("body > textarea", elements => elements.length), 0, "Legacy failures must clean up temporary textareas.");
 			await page.keyboard.press("Escape");
 			assert.equal(await hidden("share-panel"), true);
 			assert.equal(await page.$eval(select("share-input"), input => input.value), "");
-			assert.ok(await page.$eval(select("copy-link"), button => button === document.activeElement), "Escape returns to the still-visible Copy link button.");
+			assert.ok(await page.$eval(select("copy-link"), button => button === document.activeElement), "Escape returns to the visible Copy action.");
+			await page.click(select("copy-link"));
+			await page.waitForFunction(() => !document.querySelector('[data-watch-control="share-panel"]').hidden);
+			await page.click(select("share-close"));
+			assert.equal(await hidden("share-panel"), true);
+			assert.ok(await page.$eval(select("copy-link"), button => button === document.activeElement), "Close also returns focus to Copy.");
 		}
-		await page.evaluate(() => { window.__shareTest.mode = "pending"; });
-		await page.click(select("copy-link"));
-		await page.waitForFunction(() => typeof window.__shareTest.fail === "function");
-		const count = await page.evaluate(() => window.__shareTest.copies.length);
-		await page.click(select("copy-link"));
-		assert.equal(await page.evaluate(() => window.__shareTest.copies.length), count, "Suppress duplicate pending copy requests without disabling keyboard focus.");
-		await page.mouse.click(400, 400);
-		await page.evaluate(() => window.__shareTest.fail(new Error("User moved on")));
-		await page.waitForFunction(() => !document.querySelector('[data-watch-control="copy-link"]').hasAttribute("aria-busy"));
-		assert.equal(await hidden("share-panel"), true, "A late clipboard failure must not reopen a dismissed panel or steal focus.");
+		for (const dismissal of ["escape", "outside"]) {
+			await page.evaluate(() => { window.__shareTest.mode = "pending"; delete window.__shareTest.fail; });
+			await page.click(select("copy-link"));
+			await page.waitForFunction(() => typeof window.__shareTest.fail === "function");
+			const count = await page.evaluate(() => window.__shareTest.copies.length);
+			await page.click(select("copy-link"));
+			assert.equal(await page.evaluate(() => window.__shareTest.copies.length), count, "Suppress duplicate pending copy requests without disabling keyboard focus.");
+			if (dismissal === "escape") await page.keyboard.press("Escape");
+			else await page.mouse.click(400, 400);
+			await page.evaluate(() => window.__shareTest.fail(new Error("User moved on")));
+			await page.waitForFunction(() => !document.querySelector('[data-watch-control="copy-link"]').hasAttribute("aria-busy"));
+			assert.equal(await hidden("share-panel"), true, `A late clipboard failure after ${dismissal} must not reopen a panel or steal focus.`);
+		}
 
 		// Hidden navigation remains available via its existing keyboard shortcuts.
 		await page.keyboard.down("Alt"); await page.keyboard.press("ArrowLeft"); await page.keyboard.up("Alt");

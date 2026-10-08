@@ -94,6 +94,16 @@ test("copy paths beside links and on nested/image/HTML pages preserves native na
 	for (const id of ['web', 'fragment']) assert.equal(await page.$(selector(id)), null);
 	const originalUrl = page.url(), link = await page.$eval('#relative', node => node.href);
 	const before = await page.$eval('#preview-root', root => root.textContent);
+	await page.mouse.move(0, 0);
+	const bounds = async () => page.$eval('.pi-preview-local-link:has(#relative)', wrapper => ({
+		width: wrapper.getBoundingClientRect().width,
+		controls: [...wrapper.querySelectorAll('.pi-preview-copy-path-inline,.pi-preview-file-actions-inline')].map(e => ({ width: e.getBoundingClientRect().width, opacity: +getComputedStyle(e).opacity })),
+	}));
+	const resting = await bounds();
+	assert.ok(resting.controls.every(e => e.opacity > 0 && e.opacity < 1 && e.width <= 20), 'desktop controls remain compact and visibly muted');
+	await page.hover('#relative'); const hovered = await bounds();
+	assert.equal(hovered.width, resting.width, 'hovering must not shift the prose');
+	assert.ok(hovered.controls.every(e => e.opacity === 1));
 	for (const [id, path] of [['relative', f.file], ['file-url', f.file], ['alias', join(f.project, 'alias.md')], ['pdf', join(f.other, 'report.pdf')], ['missing', join(f.project, 'missing.md')], ['unsupported', join(f.project, 'private.zip')]]) {
 		await copy(page, selector(id));
 		assert.equal(await page.evaluate(() => window.__pathCopy.modern.at(-1)), path);

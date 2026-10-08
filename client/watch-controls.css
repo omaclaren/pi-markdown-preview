@@ -36,6 +36,9 @@
   font: inherit;
 }
 #pi-markdown-preview-watch-nav > button { border-radius: 999px; }
+.pi-preview-view-switch { display: inline-flex; gap: 0.15rem; }
+#pi-markdown-preview-watch-nav a[aria-current="page"] { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
+body.pi-preview-working main { padding-top: max(72px, calc(var(--pi-preview-watch-nav-height, 3rem) + 24px)); }
 #pi-markdown-preview-watch-nav a:hover,
 #pi-markdown-preview-watch-nav button:hover { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
 #pi-markdown-preview-watch-nav a:focus-visible,
@@ -112,6 +115,7 @@
 }
 @media screen and (max-width: 640px) {
   body { padding-bottom: calc(var(--pi-preview-watch-nav-height, 3rem) + 1rem); }
+  body.pi-preview-working main { padding-top: 24px; }
   #pi-markdown-preview-watch-nav { bottom: 0.5rem; left: 0.5rem; right: auto; top: auto; }
   #pi-markdown-preview-watch-controls,
   #pi-markdown-preview-watch-share-panel { bottom: calc(100% + 0.4rem); left: 0; right: auto; top: auto; }

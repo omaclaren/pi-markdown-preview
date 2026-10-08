@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { sendBrowserFile } from "./browser-file-response.js";
 import { IMAGE_CONTENT_TYPES } from "./image-page-preview.js";
+import { AGENT_PAGE_THEME } from "./agent-page-style.js";
 
 const ASSETS = new Map([...IMAGE_CONTENT_TYPES, ...Object.entries({
 	".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -15,7 +16,8 @@ export const isHtmlPagePath = path => /\.html?$/i.test(path);
 /** Trusted outer shell; authored HTML is NEVER inserted into this origin's DOM. */
 export function buildHtmlPagePreview(url, title, source) {
 	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title><style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;font:15px system-ui;background:#fff;color:#222}main{height:100%;display:flex;flex-direction:column}header{padding:16px;padding-right:min(240px,65vw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0;background:#f5f6f8;border-bottom:1px solid #ddd}details{max-height:100%;overflow:auto}summary{cursor:pointer;padding:8px 16px}@media(pointer:coarse){header{padding-top:22px;padding-bottom:22px;min-height:64px}summary{min-height:44px}}pre{margin:0;padding:16px;white-space:pre;overflow:auto}details[open]{flex:1;min-height:0}details[open] .source-label,details:not([open]) .page-label{display:none}iframe{width:100%;flex:1;min-height:0;border:0}details[open]+iframe{display:none}</style></head><body><main id="preview-root"><header>${escape(title)} · isolated HTML page</header><details><summary><span class="source-label">View source</span><span class="page-label">View page</span></summary><pre><code>${escape(source)}</code></pre></details><iframe title="${escape(title)}" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" src="${escape(url)}"></iframe></main><script>window.__mermaidDone=true;</script></body></html>`;
+${AGENT_PAGE_THEME}
+html,body{height:100%}main{height:100%;display:flex;flex-direction:column}header{padding:16px;padding-right:min(240px,65vw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0;background:var(--panel);border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}details{max-height:100%;overflow:auto;background:var(--panel)}summary{cursor:pointer;padding:8px 16px}summary:hover{background:var(--hover)}summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}@media(pointer:coarse){header{padding-top:22px;padding-bottom:22px;min-height:64px}summary{min-height:44px}}pre{margin:0;padding:16px;white-space:pre;overflow:auto;font:13px/1.6 ui-monospace,Menlo,monospace;border-top:1px solid var(--line)}pre code{font:inherit}details[open]{flex:1;min-height:0}details[open] .source-label,details:not([open]) .page-label{display:none}iframe{width:100%;flex:1;min-height:0;border:0}details[open]+iframe{display:none}</style></head><body><main id="preview-root"><header>${escape(title)} · isolated HTML page</header><details><summary><span class="source-label">View source</span><span class="page-label">View page</span></summary><pre><code>${escape(source)}</code></pre></details><iframe title="${escape(title)}" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" src="${escape(url)}"></iframe></main><script>window.__mermaidDone=true;</script></body></html>`;
 }
 
 /**

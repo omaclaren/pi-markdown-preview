@@ -1,7 +1,7 @@
 (function installPiMarkdownPreviewReadingPosition(globalObject) {
 	"use strict";
 
-	const SELECTOR = "h1,h2,h3,h4,h5,h6,p,pre,table,figure,li";
+	const SELECTOR = "h1,h2,h3,h4,h5,h6,p,pre,table,figure,li,summary";
 	function hashText(text) {
 		let hash = 2166136261;
 		for (let index = 0; index < text.length; index += 1) {
@@ -21,7 +21,7 @@
 			const occurrence = occurrences.get(key) || 0;
 			occurrences.set(key, occurrence + 1);
 			return { element, key, occurrence };
-		});
+		}).filter(({ element }) => element.getClientRects().length > 0 && (!element.checkVisibility || element.checkVisibility()));
 	}
 
 	function capture(root) {

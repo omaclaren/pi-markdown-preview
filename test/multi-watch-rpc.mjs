@@ -11,7 +11,7 @@ if (process.platform === "win32") {
 	process.exit(0);
 }
 
-const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repo = resolve(process.env.PI_MARKDOWN_PREVIEW_TEST_PACKAGE_DIR || join(dirname(fileURLToPath(import.meta.url)), ".."));
 const root = await realpath(await mkdtemp(join(tmpdir(), "pi-markdown-preview-multi-watch-")));
 const bin = join(root, "bin");
 const openLog = join(root, "open.log");
@@ -42,14 +42,25 @@ await writeFile(two, "# Two\n\nIndependent\n");
 // Seed a real assistant response without calling a model or using user logs.
 const session = SessionManager.create(root, join(root, "sessions"));
 session.appendMessage({ role: "user", content: "Show the report", timestamp: Date.now() });
+const recordedImage = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT1kAAAAASUVORK5CYII=";
+const fixtureUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+session.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "synthetic-image", name: "read", arguments: { path: "/never-read/synthetic.png" } }], api: "openai-responses", provider: "openai", model: "test-fixture", stopReason: "toolUse", timestamp: Date.now(), usage: fixtureUsage });
+session.appendMessage({ role: "toolResult", toolCallId: "synthetic-image", toolName: "read", content: [{ type: "image", mimeType: "image/png", data: recordedImage }], isError: false, timestamp: Date.now() });
 session.appendMessage({
 	role: "assistant", content: [{ type: "text", text: `[Absolute report](<${report}#details>)\n\n[Relative report](<docs/linked report.md>)` }],
 	api: "openai-responses", provider: "openai", model: "test-fixture", stopReason: "stop", timestamp: Date.now(),
 	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 });
 
+// Isolate settings/auth and strip provider secrets. These commands must never
+// reach a real model, even if a broken extension fails to register a command.
+const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|^AWS_|^MUXY_|^HERDR_)/i.test(name)));
 const env = {
-	...process.env,
+	...inherited,
+	HOME: root,
+	PI_CODING_AGENT_DIR: join(root, "agent"),
+	PI_OFFLINE: "1",
+	PI_SKIP_VERSION_CHECK: "1",
 	CMUX_BUNDLED_CLI_PATH: fakeCmuxPath,
 	CMUX_WORKSPACE_ID: "multi-watch-test-workspace",
 	PANDOC_PATH: fakePandocPath,
@@ -195,6 +206,10 @@ try {
 	urls = await waitOpenCount(5);
 	const responseSession = await bootstrap(urls[4]);
 	assert.match(responseSession.html, /<title>Assistant responses — Markdown Preview<\/title>/);
+	assert.doesNotMatch(responseSession.html, /<a\b[^>]*data-watch-control="turn-details"/);
+	const beforeDetailsUpgrade = notifications.length;
+	await command("/preview-browser -w --turn-details");
+	assert.ok(notifications.slice(beforeDetailsUpgrade).some(e => e.notifyType === "error" && e.message.includes("fresh private preview link")), "Do not upgrade an already-shared preview to expose traces.");
 	assert.match(responseSession.html, /const positionScope = "[^"]+:revision:1"/, "Response-watch commands must scope Back restoration to their current revision.");
 	assert.equal(new Set([oneSession.origin, twoSession.origin, responseSession.origin]).size, 3);
 	const responseLinks = documentLinks(responseSession.html);
@@ -233,6 +248,23 @@ try {
 	assert.equal(await waitFor(() => isClosed(responseSession), "response watcher shutdown"), true);
 	await command("/preview-browser --stop");
 	assert.equal(await waitFor(() => isClosed(twoSession), "bare unambiguous shutdown"), true);
+
+	const opensBeforeDetails = (await openedUrls()).length;
+	await command("/preview-browser -w --turn-details");
+	const detailUrls = await waitOpenCount(opensBeforeDetails + 1);
+	const detailSession = await bootstrap(detailUrls.at(-1));
+	const detailLink = detailSession.html.match(/data-watch-control="turn-details" href="([^"]+)"/)?.[1].replaceAll("&amp;", "&");
+	assert.ok(detailLink, "Real Pi response watchers should expose the opted-in details link.");
+	const detailPage = await fetch(new URL(detailLink, detailSession.origin), { headers: { cookie: detailSession.cookie } });
+	assert.equal(detailPage.status, 200);
+	const workingHtml = await detailPage.text();
+	assert.match(workingHtml, /Show the report/);
+	assert.ok(workingHtml.includes(`data:image/png;base64,${recordedImage}`), "Real persisted Pi results must retain bounded inline image bytes.");
+	assert.match(detailPage.headers.get("content-security-policy"), /img-src data:/);
+	assert.doesNotMatch(detailSession.html, /data-recorded-src=/);
+	assert.doesNotMatch(detailSession.html, /Show the report/);
+	await command("/preview-browser --stop --responses");
+	assert.equal(await waitFor(() => isClosed(detailSession), "details watcher shutdown"), true);
 
 	const limitFiles = [];
 	for (let index = 0; index < 9; index++) {
@@ -300,6 +332,9 @@ try {
 	console.log(`Multi-watch RPC lifecycle checks passed (${notifications.length} notifications, ${(await openedUrls()).length} opens).`);
 } finally {
 	child.stdin.end();
-	if (child.exitCode === null) await new Promise((resolvePromise) => child.once("exit", resolvePromise));
+	if (child.exitCode === null) {
+		const force = setTimeout(() => child.kill("SIGKILL"), 5000);
+		try { await new Promise((resolvePromise) => child.once("exit", resolvePromise)); } finally { clearTimeout(force); }
+	}
 	await rm(root, { recursive: true, force: true });
 }

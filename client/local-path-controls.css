@@ -1,12 +1,13 @@
 .pi-preview-local-link { position: relative; }
 .pi-preview-copy-path { font: 14px system-ui; cursor: pointer; color: inherit; user-select: none; }
-/* Generated icon content keeps copy feedback out of prose/reading-position text. */
+/* Compact, muted controls stay visible without empty hover-only gaps or layout shifts.
+   Generated icons keep feedback out of prose/reading-position text. */
 .pi-preview-copy-path-inline::before { content: "⧉"; }
 .pi-preview-copy-path-inline[data-copy-state="copied"]::before { content: "✓"; }
 .pi-preview-copy-path-inline[data-copy-state="failed"]::before { content: "!"; }
-.pi-preview-copy-path-inline { display: inline-grid; place-items: center; vertical-align: baseline; position: static; margin: 0 0 0 .2em; padding: 0; width: 1.6em; min-width: 0; height: 1.6em; min-height: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; opacity: 0; }
+.pi-preview-copy-path-inline { display: inline-grid; place-items: center; vertical-align: baseline; position: static; margin: 0 0 0 .2em; padding: 0; width: 1.2em; min-width: 0; height: 1.4em; min-height: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; opacity: .55; }
 .pi-preview-file-actions-inline::before { content: "⋯"; }
-.pi-preview-file-actions-inline { display: inline-grid; place-items: center; vertical-align: baseline; margin-left: .1em; width: 1.6em; height: 1.6em; border: 1px solid transparent; border-radius: 4px; font: 14px system-ui; color: inherit; text-decoration: none; opacity: 0; }
+.pi-preview-file-actions-inline { display: inline-grid; place-items: center; vertical-align: baseline; margin-left: .1em; width: 1.2em; height: 1.4em; border: 1px solid transparent; border-radius: 4px; font: 14px system-ui; color: inherit; text-decoration: none; opacity: .55; }
 .pi-preview-file-actions-inline:hover { background: var(--card, Canvas); border-color: var(--panel-border, ButtonBorder); }
 .pi-preview-file-actions-inline:focus-visible { outline: 2px solid var(--link, Highlight); outline-offset: 2px; }
 .pi-preview-local-link:hover > .pi-preview-copy-path-inline,

@@ -11,6 +11,9 @@ import { buildImagePagePreview, IMAGE_CONTENT_TYPES as RESOURCE_CONTENT_TYPES } 
 import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
+import { buildTurnDetailsPage } from "./turn-details-page.js";
+import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
+import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 
 // Keep SSE for pages served by older versions; new pages use finite polls.
 const EVENTS_PATH = "/__pi_markdown_preview_events__";
@@ -22,8 +25,11 @@ const RESOURCE_PREFIX = "/__pi_markdown_preview_resource__/";
 const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const DOCUMENT_PREFIX = "/__pi_markdown_preview_document__/";
 const NATIVE_ACTION_PREFIX = "/__pi_markdown_preview_native_action__/";
+const TURN_PREFIX = "/__pi_markdown_preview_turn__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-position.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const WORKING_STATE_SOURCE = readFileSync(new URL("../client/working-view-state.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const WORKING_IMAGES_SOURCE = readFileSync(new URL("../client/working-images.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_HISTORY_BYTE_LIMIT = 32 * 1024 * 1024;
@@ -243,6 +249,12 @@ const NON_HTML_SECURITY_HEADERS = {
 	"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
 };
 
+const turnSecurityHeaders = nonce => ({
+	...COMMON_SECURITY_HEADERS,
+	"Content-Type": "text/html; charset=utf-8",
+	"Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+});
+
 /** @param {string} scriptNonce */
 function getHtmlSecurityHeaders(scriptNonce, frameOrigin) {
 	return {
@@ -268,7 +280,7 @@ function getHtmlSecurityHeaders(scriptNonce, frameOrigin) {
  * preview document.
  *
  * @param {string} html
- * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string, titleSuffix?: string, wrapScope?: string, preserveReadingPosition?: boolean, identity?: string, instance?: string, reconnectAfterStop?: boolean }} navigation
+ * @param {{ revision: number, revisions: number[], isWaiting?: boolean, sourceLabel?: string, titleSuffix?: string, wrapScope?: string, preserveReadingPosition?: boolean, identity?: string, instance?: string, reconnectAfterStop?: boolean, turnDetailsUrl?: string, view?: "preview" | "working" }} navigation
  * @param {string} [scriptNonce]
  */
 export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
@@ -284,13 +296,17 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 			: `${wrapScopeMeta}\n${watchedHtml}`;
 	}
 
-	const preserveReadingPosition = navigation.preserveReadingPosition === true && Boolean(navigation.wrapScope);
+	const working = navigation.view === "working";
+	const preserveReadingPosition = !working && navigation.preserveReadingPosition === true && Boolean(navigation.wrapScope);
+	const positionBase = working ? `${navigation.wrapScope}:working:${navigation.instance}` : navigation.wrapScope;
+	const positionScope = preserveReadingPosition ? positionBase : `${positionBase}:revision:${navigation.revision}`;
+	const counterpartScope = working ? `${navigation.wrapScope}:revision:${navigation.revision}` : `${navigation.wrapScope}:working:${navigation.instance}:revision:${navigation.revision}`;
 	const revision = String(navigation.revision);
 	const revisions = navigation.revisions.map(String);
 	const isWaiting = navigation.isWaiting === true;
 	const sourceLabel = navigation.sourceLabel?.trim();
 	if (sourceLabel) {
-		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — ${navigation.titleSuffix || "Markdown Preview"}`);
+		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — ${working ? "Working" : navigation.titleSuffix || "Markdown Preview"}`);
 		watchedHtml = /<title\b[^>]*>[\s\S]*?<\/title>/i.test(watchedHtml)
 			? watchedHtml.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, `<title>${escapedTitle}</title>`)
 			: watchedHtml.replace(/<\/head>/i, `<title>${escapedTitle}</title>\n</head>`);
@@ -299,9 +315,12 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const previousRevision = revisions[currentIndex - 1];
 	const nextRevision = revisions[currentIndex + 1];
 	const latestRevision = revisions[revisions.length - 1] ?? revision;
+	const revisionPath = target => working
+		? `${TURN_PREFIX}${encodeURIComponent(target)}?identity=${encodeURIComponent(navigation.identity || "")}&instance=${encodeURIComponent(navigation.instance || "")}`
+		: `/?revision=${encodeURIComponent(target)}`;
 	const linkAttributes = (targetRevision) => targetRevision === undefined
 		? 'aria-disabled="true" tabindex="-1"'
-		: `href="/?revision=${encodeURIComponent(targetRevision)}" aria-disabled="false" tabindex="0"`;
+		: `href="${escapeBrowserWatchHtmlAttribute(revisionPath(targetRevision))}" aria-disabled="false" tabindex="0"`;
 
 	const watchStyle = `<style id="pi-markdown-preview-watch-style">${WATCH_CONTROLS_STYLE}</style>`;
 	watchedHtml = /<\/head>/i.test(watchedHtml)
@@ -313,9 +332,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
-  <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser">Copy link</button>
+  ${navigation.turnDetailsUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"${working ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)" aria-keyshortcuts="Control+Alt+W">Working</a></span>` : ""}
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
-    <span>Preview ·</span>
     <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
     <span id="pi-markdown-preview-watch-new" data-watch-control="new" hidden>New</span>
     <span class="pi-preview-watch-chevron" aria-hidden="true">▾</span>
@@ -329,6 +347,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       <button data-watch-control="wrap-code" type="button" hidden></button>
     </div>
   </div>
+  <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser" aria-live="polite">Copy link</button>
   <div id="pi-markdown-preview-watch-share-panel" data-watch-control="share-panel" role="dialog" aria-label="Transferable preview link" hidden>
     <span>Copy this link:</span>
     <input data-watch-control="share-input" aria-label="Authenticated preview link" readonly />
@@ -340,9 +359,14 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 (() => {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   if (!window.location.hash) window.scrollTo(0, 0);
-  const positionScope = ${JSON.stringify(preserveReadingPosition ? navigation.wrapScope : `${navigation.wrapScope}:revision:${revision}`)};
+  const working = ${working};
+  const positionScope = ${JSON.stringify(positionScope)};
+  const counterpartScope = ${JSON.stringify(counterpartScope)};
+  const retainedScopes = ${JSON.stringify(revisions.map(r => `${positionBase}:revision:${r}`))};
+  window.PiMarkdownPreviewWorkingState?.install(document.getElementById('preview-root'), positionScope, retainedScopes);
+  window.PiMarkdownPreviewWorkingImages?.install(document.getElementById('preview-root'));
   try {
-    const prefix = 'pi-markdown-preview:reading-position:' + ${JSON.stringify(navigation.wrapScope)} + ':revision:';
+    const prefix = 'pi-markdown-preview:reading-position:' + ${JSON.stringify(positionBase)} + ':revision:';
     const retained = ${JSON.stringify(revisions)}.map(String);
     for (const key of Object.keys(sessionStorage)) if (key.startsWith(prefix) && !retained.includes(key.slice(prefix.length))) sessionStorage.removeItem(key);
   } catch {}
@@ -353,7 +377,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   // It is public, not an authentication credential or a copy of the token.
   const identity = ${JSON.stringify(String(navigation.identity ?? ""))};
   const instance = ${JSON.stringify(String(navigation.instance ?? ""))};
-  const followingLatest = revision === revisions[revisions.length - 1];
+  const followingLatest = !working && revision === revisions[revisions.length - 1];
   const navigation = document.currentScript?.previousElementSibling;
   // Measure only the compact bar. Absolutely positioned panels never reserve
   // document space or move the bar; narrow/touch layouts still need clearance.
@@ -365,6 +389,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   updateNavigationHeight();
   window.addEventListener('resize', updateNavigationHeight);
   window.addEventListener('load', updateNavigationHeight, { once: true });
+  const previewLink = navigation?.querySelector('[data-watch-control="preview"]');
+  const workingLink = navigation?.querySelector('[data-watch-control="turn-details"]');
   const previousLink = navigation?.querySelector('[data-watch-control="previous"]');
   const countLabel = navigation?.querySelector('[data-watch-control="count"]');
   const nextLink = navigation?.querySelector('[data-watch-control="next"]');
@@ -439,7 +465,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     if (!navigation?.contains(event.target)) dismissPanels();
   };
   const onPanelEscape = (event) => {
-    if (event.key !== 'Escape' || event.defaultPrevented || (controlsPanel?.hidden && sharePanel?.hidden)) return;
+    const copyingFocused = copyLinkButton?.hasAttribute('aria-busy') && document.activeElement === copyLinkButton;
+    if (event.key !== 'Escape' || event.defaultPrevented || (controlsPanel?.hidden && sharePanel?.hidden && !copyingFocused)) return;
     event.preventDefault();
     dismissPanels(true);
   };
@@ -472,8 +499,10 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     }
     if (controlsPanel && Number.isFinite(savedControls.scrollTop)) controlsPanel.scrollTop = savedControls.scrollTop;
   }
-  const revisionUrl = (value) => '/?revision=' + encodeURIComponent(value);
-  const latestUrl = () => '/' + window.location.hash;
+  const revisionUrl = (value) => working
+    ? ${JSON.stringify(TURN_PREFIX)} + encodeURIComponent(value) + '?identity=' + encodeURIComponent(identity) + '&instance=' + encodeURIComponent(instance)
+    : '/?revision=' + encodeURIComponent(value);
+  const latestUrl = () => (working ? revisionUrl(revisions[revisions.length - 1]) : '/') + window.location.hash;
   const withIdentity = (value) => {
     const target = new URL(value, window.location.href);
     if (identity) target.searchParams.set('identity', identity);
@@ -520,6 +549,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   let copyFeedbackTimer;
   copyLinkButton?.addEventListener('click', async () => {
     if (copying) return;
+    // Copy stays on the toolbar. Close other panels without moving focus;
+    // dismissal still cancels late manual-copy fallback/focus work.
     dismissPanels();
     const copyInteraction = interactionVersion;
     copying = true;
@@ -528,7 +559,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     copyLinkButton.setAttribute('aria-disabled', 'true');
     copyLinkButton.setAttribute('aria-busy', 'true');
     try {
-      const response = await fetch(withIdentity(${JSON.stringify(SHARE_PATH)} + '?revision=' + encodeURIComponent(revision)));
+      const response = await fetch(withIdentity(${JSON.stringify(SHARE_PATH)} + '?revision=' + encodeURIComponent(revision) + (working ? '&view=working&instance=' + encodeURIComponent(instance) : '')));
       if (!response.ok) throw new Error('Could not create a transferable preview link');
       const transferableUrl = new URL(await response.text());
       transferableUrl.hash = window.location.hash;
@@ -554,7 +585,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       copyFeedbackTimer = window.setTimeout(() => { copyLinkButton.textContent = 'Copy link'; }, 1400);
     }
   });
-  const canonicalUrl = revisionUrl(revision) + window.location.hash;
+  const canonicalTarget = new URL(revisionUrl(revision), window.location.href);
+  if (previewLink && workingLink) { canonicalTarget.searchParams.set('identity', identity); canonicalTarget.searchParams.set('instance', instance); }
+  const canonicalUrl = canonicalTarget.pathname + canonicalTarget.search + window.location.hash;
   if (window.location.pathname + window.location.search + window.location.hash !== canonicalUrl) {
     history.replaceState(null, '', canonicalUrl);
   }
@@ -600,6 +633,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   // Keep the known reason separate from transport state. A failed retry or an
   // unverified response does not establish that the conflict is gone.
   let identityConflict = false;
+  let instanceExpired = false;
   const setStatus = (text = '') => {
     if (!statusLine) return;
     statusLine.textContent = identityConflict ? 'Disconnected · different preview' : text;
@@ -679,27 +713,49 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     const href = link?.getAttribute('href');
     return href ? navigateTo(withCurrentHash(href), false, link, keyboard) : false;
   };
+  const plainClick = event => !event.defaultPrevented && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+  const navigateView = (link, keyboard = false) => {
+    if (!link?.getAttribute('href') || link.getAttribute('aria-current') === 'page' || link.getAttribute('aria-disabled') === 'true') return;
+    const url = new URL(link.href);
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('pi-markdown-preview:reading-position:' + counterpartScope) || 'null');
+      if (typeof saved?.hash === 'string' && saved.hash.length <= 2048) url.hash = saved.hash;
+    } catch {}
+    navigateTo(url.href, false, link, keyboard);
+  };
+  for (const link of [previewLink, workingLink]) link?.addEventListener('click', event => {
+    if (!plainClick(event)) return;
+    event.preventDefault(); navigateView(link, event.detail === 0);
+  });
   previousLink?.addEventListener('click', (event) => {
-    if (!previousLink.getAttribute('href')) return;
+    if (!plainClick(event) || !previousLink.getAttribute('href')) return;
     event.preventDefault();
     navigateToLink(previousLink, event.detail === 0);
   });
   nextLink?.addEventListener('click', (event) => {
-    if (!nextLink.getAttribute('href')) return;
+    if (!plainClick(event) || !nextLink.getAttribute('href')) return;
     event.preventDefault();
     navigateToLink(nextLink, event.detail === 0);
   });
   latestLink?.addEventListener('click', (event) => {
-    if (!latestLink.getAttribute('href')) return;
+    if (!plainClick(event) || !latestLink.getAttribute('href')) return;
     event.preventDefault();
     navigateTo(latestUrl(), false, latestLink, event.detail === 0);
   });
   window.addEventListener('keydown', (event) => {
-    if (event.defaultPrevented || !event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.defaultPrevented || event.isComposing || event.repeat || event.metaKey || !event.altKey) return;
     const target = event.target;
-    if (target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+    if (target instanceof Element && target.closest('input:not([type="checkbox"]), textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+    if (event.ctrlKey) {
+      if (event.shiftKey) return;
+      const key = event.key.toLowerCase();
+      const link = event.code === 'KeyP' || key === 'p' ? previewLink : event.code === 'KeyW' || key === 'w' ? workingLink : null;
+      if (link) { event.preventDefault(); navigateView(link, true); }
+      return;
+    }
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     event.preventDefault();
+    if (instanceExpired) return;
     if (event.shiftKey) {
       // Shift jumps to the ends of the retained history.
       if (event.key === 'ArrowRight') {
@@ -715,7 +771,12 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   function onRevisionState(state) {
     if (state.instance && instance && state.instance !== instance) {
       // The same watcher restarted: revision numbers belong to the old run.
-      if (!navigating) navigateTo(latestUrl(), true);
+      if (working) {
+        instanceExpired = true;
+        setStatus('Preview restarted · reopen Preview');
+        for (const link of [previousLink, nextLink, latestLink, workingLink]) setLink(link, undefined);
+        if (previewLink) previewLink.href = withIdentity('/');
+      } else if (!navigating) navigateTo(latestUrl(), true);
       return;
     }
     const nextRevisions = state.revisions.map(String);
@@ -742,6 +803,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     history.replaceState(history.state, '', withIdentity(window.location.href));
     readingPosition?.save();
   });
+  if (working) requestAnimationFrame(() => { window.__mermaidDone = true; window.dispatchEvent(new Event('pi-markdown-preview-ready')); });
   void pollState();
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('pagehide', () => {
@@ -762,7 +824,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 })();
 </script>`;
 
-	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n`;
+	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}`;
 	const watchUi = `${readingPositionScript}${watchNavigation}\n${watchScript}`;
 	const completeHtml = /<\/body>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/body>/i, `${watchUi}\n</body>`)
@@ -812,7 +874,10 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  * `renderLocalDocument` opts into linked previews/path pages and explicit native
  * file actions. The host must return trusted renderer HTML, bound its reads, and
  * respect cancellation. `nativePathAction` can supply a host/test desktop opener.
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void> }} [options]
+ * `initialTurnDetails` and updateDocument's `turnDetails` opt in per response.
+ * These lazy, read-only callbacks must bound reads and respect cancellation;
+ * they are never called for root HTML, polling, HEAD, or unretained revisions.
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal, sourceRevision?: number) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void>, initialTurnDetails?: (signal: AbortSignal) => Promise<object> }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const fixedPort = options.port ?? 0;
@@ -888,7 +953,9 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			byteSize: Buffer.byteLength(rewrittenHtml, "utf8"),
 		};
 	};
-	let documents = [buildDocument(1, initialHtml, lexicalResourceRoot, options.htmlFile)];
+	let documents = [{ ...buildDocument(1, initialHtml, lexicalResourceRoot, options.htmlFile), turnDetails: options.initialTurnDetails }];
+	/** Per-document lazy reads: bounded concurrency, no persisted trace cache. */
+	const pendingTurns = new Map();
 	/** Recently opened document snapshots retain their exact media/link routes. */
 	const linkedDocuments = new Map();
 	/** @type {Map<string, { promise: Promise<ReturnType<typeof buildDocument>>, controller: AbortController }>} */
@@ -902,6 +969,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			historyBytes -= documents[0].byteSize;
 			documents.shift();
 		}
+		for (const [document, pending] of pendingTurns) if (!documents.includes(document)) pending.controller.abort();
 	};
 	let revision = 1;
 	let hasHistoryDocument = options.initialDocumentIsHistory !== false;
@@ -945,6 +1013,23 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		res.end(message);
 	};
 
+	// Only call after authentication and watcher identity checks. Preserve the
+	// error status and exact-instance boundary; recovery requires a real click.
+	const respondRecovery = (req, res, status, title, message, document, bootstrap = false, retry = false) => {
+		const actions = [];
+		if (retry && document) actions.push({ name: "retry", label: "Try again", href: `${TURN_PREFIX}${document.revision}?identity=${identity}&instance=${instance}` });
+		if (document) actions.push({ name: "preview", label: "View this response", href: `/?revision=${document.revision}&identity=${identity}&instance=${instance}` });
+		actions.push({ name: "current-preview", label: "Open current preview", href: `/?identity=${identity}` });
+		const html = buildWatchRecoveryPage(title, message, actions, document?.html);
+		res.writeHead(status, {
+			...COMMON_SECURITY_HEADERS,
+			"Content-Type": "text/html; charset=utf-8",
+			"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+			...(bootstrap ? { "Set-Cookie": `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/` } : {}),
+		});
+		res.end(req.method === "HEAD" ? undefined : html);
+	};
+
 	/** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res */
 	const handleRequest = async (req, res) => {
 		const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -971,8 +1056,25 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				return;
 			}
 
+			const requestedInstance = requestUrl.searchParams.get("instance");
+			if (requestedInstance !== null && requestedInstance !== instance) {
+				respondRecovery(req, res, 409, "Preview link expired", "This response belongs to an earlier preview run. Open the current preview to reconnect.", undefined, queryToken === token); return;
+			}
 			const requestedRevisionRaw = requestUrl.searchParams.get("revision");
 			const requestedRevision = requestedRevisionRaw === null ? undefined : Number(requestedRevisionRaw);
+			if (requestedInstance !== null && !documents.some(d => d.revision === requestedRevision)) {
+				respondRecovery(req, res, 404, "Response no longer retained", "This exact response is no longer available in the retained history. You can open the current preview instead.", undefined, queryToken === token); return;
+			}
+			if (requestUrl.searchParams.get("view") === "working") {
+				if (requestedInstance !== instance || !documents.some(d => d.revision === requestedRevision && d.turnDetails)) {
+					const document = requestedInstance === instance ? documents.find(d => d.revision === requestedRevision) : undefined;
+					respondRecovery(req, res, 404, "Working unavailable", "Working is not available for this response.", document, queryToken === token); return;
+				}
+				res.writeHead(302, { ...NON_HTML_SECURITY_HEADERS,
+					Location: `${TURN_PREFIX}${requestedRevision}?identity=${identity}&instance=${instance}`,
+					...(queryToken === token ? { "Set-Cookie": `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/` } : {}),
+				}); res.end(); return;
+			}
 			let documentIndex = documents.length - 1;
 			if (Number.isInteger(requestedRevision)) {
 				const exactIndex = documents.findIndex((document) => document.revision === requestedRevision);
@@ -987,6 +1089,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				revision: selectedDocument.revision,
 				revisions: documents.map((document) => document.revision),
 				isWaiting: !hasHistoryDocument,
+				turnDetailsUrl: selectedDocument.turnDetails ? `${TURN_PREFIX}${selectedDocument.revision}?identity=${identity}&instance=${instance}` : undefined,
 				sourceLabel: options.sourceLabel,
 				titleSuffix: options.titleSuffix,
 				wrapScope,
@@ -1020,6 +1123,52 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/event-stream; charset=utf-8" });
 				res.end("event: identity-mismatch\ndata: {}\n\n");
 			} else respondText(res, 409, "A different preview watcher owns this address.");
+			return;
+		}
+
+		if (requestUrl.pathname.startsWith(TURN_PREFIX)) {
+			if (requestedIdentity !== identity) {
+				respondText(res, 409, "This turn link belongs to a different preview."); return;
+			}
+			if (requestUrl.searchParams.get("instance") !== instance) {
+				respondRecovery(req, res, 409, "Working link expired", "This turn belongs to an earlier preview run. Open the current preview to reconnect."); return;
+			}
+			const rawRevision = requestUrl.pathname.slice(TURN_PREFIX.length);
+			const document = /^\d+$/.test(rawRevision) ? documents.find(d => String(d.revision) === rawRevision) : undefined;
+			if (!document?.turnDetails) {
+				respondRecovery(req, res, 404, document ? "Working unavailable" : "Response no longer retained", document
+					? "Working is not available for this response. You can still view this exact response in Preview."
+					: "This exact response is no longer available in the retained history. You can open the current preview instead.", document); return;
+			}
+			const scriptNonce = randomBytes(18).toString("base64url");
+			if (method === "HEAD") { res.writeHead(200, turnSecurityHeaders(scriptNonce)); res.end(); return; }
+			let pending = pendingTurns.get(document);
+			if (!pending) {
+				if (pendingTurns.size >= 2) { respondRecovery(req, res, 503, "Working is busy", "Other turn details are loading. Please try again shortly.", document, false, true); return; }
+				const controller = new AbortController();
+				pending = { controller, promise: Promise.resolve().then(() => document.turnDetails(controller.signal)) };
+				pendingTurns.set(document, pending);
+				pending.promise.finally(() => pendingTurns.delete(document)).catch(() => {});
+			}
+			try {
+				const details = await pending.promise;
+				if (closed || res.destroyed) return;
+				if (!documents.includes(document)) { respondRecovery(req, res, 404, "Response no longer retained", "This exact response is no longer available in the retained history. You can open the current preview instead."); return; }
+				const page = buildTurnDetailsPage(details, "", options.sourceLabel, previewAppearanceStyle(document.html));
+				const html = prepareBrowserWatchHtml(page, {
+					view: "working", revision: document.revision, revisions: documents.map(d => d.revision),
+					turnDetailsUrl: `${TURN_PREFIX}${document.revision}?identity=${identity}&instance=${instance}`,
+					sourceLabel: options.sourceLabel, wrapScope, identity, instance, reconnectAfterStop: fixedPort !== 0,
+				}, scriptNonce);
+				res.writeHead(200, turnSecurityHeaders(scriptNonce));
+				res.end(html);
+			} catch {
+				if (!closed && !res.destroyed) {
+					const retained = documents.includes(document);
+					respondRecovery(req, res, retained ? 503 : 404, retained ? "Working unavailable" : "Response no longer retained",
+						retained ? "Recorded turn details could not be read. You can try again or view this response in Preview." : "This exact response is no longer available in the retained history.", retained ? document : undefined, false, retained);
+				}
+			}
 			return;
 		}
 
@@ -1082,6 +1231,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 
 		if (requestUrl.pathname === SHARE_PATH) {
 			const requestedRevision = Number(requestUrl.searchParams.get("revision"));
+			const working = requestUrl.searchParams.get("view") === "working";
+			if (working && (requestUrl.searchParams.get("instance") !== instance || !documents.some(d => d.revision === requestedRevision && d.turnDetails))) {
+				respondText(res, 404, "Working is not available for this response."); return;
+			}
 			const selectedRevision = Number.isInteger(requestedRevision)
 				&& documents.some((document) => document.revision === requestedRevision)
 				? requestedRevision
@@ -1089,6 +1242,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const transferableUrl = new URL(`http://127.0.0.1:${port}/`);
 			transferableUrl.searchParams.set("token", token);
 			transferableUrl.searchParams.set("revision", String(selectedRevision));
+			if (working) {
+				transferableUrl.searchParams.set("view", "working");
+				transferableUrl.searchParams.set("instance", instance);
+				transferableUrl.searchParams.set("identity", identity);
+			}
 			res.writeHead(200, {
 				...NON_HTML_SECURITY_HEADERS,
 				"Content-Type": "text/plain; charset=utf-8",
@@ -1176,7 +1334,10 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 							? { html: buildImagePagePreview(canonicalPath), frameOrigin: undefined }
 							: isHtmlPagePath(canonicalPath)
 								? await htmlPage(canonicalPath, await readLinkedDocument(canonicalPath, controller.signal))
-								: { html: await render(canonicalPath, controller.signal), frameOrigin: undefined };
+								: { html: await render(canonicalPath, controller.signal, fromRevision), frameOrigin: undefined };
+						if (pathPage || image || isHtmlPagePath(canonicalPath)) {
+							page.html = applyPreviewAppearance(page.html, documents.find(doc => doc.revision === fromRevision)?.html);
+						}
 						controller.signal.throwIfAborted();
 						const nativeAction = pathPage ? { url: `${NATIVE_ACTION_PREFIX}${id}?identity=${identity}&instance=${instance}`, key: nativeActionKey, kind, previewable } : undefined;
 						const document = { ...buildDocument(0, page.html, dirname(canonicalPath), undefined, fromRevision, path, nativeAction), frameOrigin: page.frameOrigin };
@@ -1316,10 +1477,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			prunePollingClients();
 			return eventClients.size + pollingClients.size;
 		},
-		updateDocument(html, { appendToHistory = true } = {}) {
+		/** @param {string} html @param {{ appendToHistory?: boolean, turnDetails?: (signal: AbortSignal) => Promise<object> }} [update] */
+		updateDocument(html, { appendToHistory = true, turnDetails } = {}) {
 			if (closed) return documents[documents.length - 1].revision;
 			revision += 1;
-			const nextDocument = buildDocument(revision, html, lexicalResourceRoot, options.htmlFile);
+			const nextDocument = { ...buildDocument(revision, html, lexicalResourceRoot, options.htmlFile), turnDetails };
 			if (appendToHistory && hasHistoryDocument) {
 				documents.push(nextDocument);
 			} else {
@@ -1339,7 +1501,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		async close() {
 			if (closed) return;
 			closed = true;
-			const pending = [...pendingDocuments.values()];
+			const pending = [...pendingDocuments.values(), ...pendingTurns.values()];
 			for (const document of pending) document.controller.abort();
 			linkedDocuments.clear();
 			if (htmlPageServerPromise) await (await htmlPageServerPromise.catch(() => undefined))?.close();

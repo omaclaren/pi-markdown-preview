@@ -672,6 +672,9 @@ const parsedBrowserWatch = parsePreviewArgs("--browser --watch --font-size 14");
 assert.equal(parsedBrowserWatch.target, "browser");
 assert.equal(parsedBrowserWatch.watch, true);
 assert.equal(parsedBrowserWatch.fontSizePx, 14);
+assert.equal(parsePreviewArgs("-b -w --turn-details").turnDetails, true);
+assert.match(parsePreviewArgs("-b --turn-details").error ?? "", /assistant-response/);
+assert.match(parsePreviewArgs("-b -w --turn-details report.md").error ?? "", /assistant-response/);
 const parsedShortBrowserWatch = parsePreviewArgs("-b -w");
 assert.equal(parsedShortBrowserWatch.target, "browser", "-b should select the browser target.");
 assert.equal(parsedShortBrowserWatch.watch, true, "-w should enable browser watch mode.");
@@ -1111,7 +1114,7 @@ assert.deepEqual(
 			],
 		},
 	}),
-	{ markdown: "Repeated response", responseKey: "session:response-two" },
+	{ entryId: "response-two", markdown: "Repeated response", responseKey: "session:response-two" },
 	"Watch history should distinguish separate assistant messages even when their rendered Markdown is identical.",
 );
 
@@ -1531,7 +1534,7 @@ await assertPreviewPageLayoutCollection();
 await import("./code-wrap.mjs");
 await import("./document-updates.mjs");
 await import("./watch-document-links.mjs");
-for (const suite of ["watch-image-links.mjs", "watch-copy-local-path.mjs", "watch-native-paths.mjs"]) {
+for (const suite of ["watch-image-links.mjs", "watch-copy-local-path.mjs", "watch-native-paths.mjs", "watch-turn-details.mjs", "watch-working-navigation.mjs", "watch-recovery.mjs", "watch-turn-images.mjs", "watch-ask-question.mjs"]) {
 	const checks = spawnSync(process.execPath, [process.versions.bun ? "test" : "--test", resolve(process.cwd(), "test", suite)], { stdio: "inherit", timeout: 90_000 });
 	assert.equal(checks.status, 0, `${suite}: HTTP, security and browser checks should pass.`);
 }

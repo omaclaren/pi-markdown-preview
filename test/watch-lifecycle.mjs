@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
+import { openWatchControls } from "./watch-controls.mjs";
 
 const eventsPath = "/__pi_markdown_preview_state__";
 const conflictStatus = "Disconnected · different preview";
@@ -187,6 +188,7 @@ try {
 		document.execCommand = () => { window.__copyCalls += 1; return true; };
 	});
 	const copyResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/__pi_markdown_preview_share__");
+	await openWatchControls(page);
 	await page.click('[data-watch-control="copy-link"]');
 	const refusedCopy = await copyResponse;
 	assert.equal(refusedCopy.status(), 409, "An old page must not copy a different watcher's link.");

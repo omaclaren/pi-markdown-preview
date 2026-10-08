@@ -33,6 +33,8 @@ import {
 	transformMarkdownOutsideFences,
 } from "./shared/annotation-scanner.js";
 import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
+import { readTurnDetails } from "./shared/read-turn-details.js";
+import { turnDetailsFromRecords } from "./shared/turn-details.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 import { isHtmlPagePath } from "./shared/html-page-preview.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
@@ -974,6 +976,7 @@ function getPreviewStyle(theme?: Theme): PreviewStyle {
 }
 
 interface AssistantMessage {
+	entryId?: string;
 	index: number;
 	markdown: string;
 	preview: string;
@@ -981,6 +984,7 @@ interface AssistantMessage {
 }
 
 interface AssistantResponseSnapshot {
+	entryId?: string;
 	markdown: string;
 	responseKey: string;
 }
@@ -1022,7 +1026,7 @@ function getAssistantMessages(ctx: ExtensionContext): AssistantMessage[] {
 		const preview = firstLine.replace(/^#+\s*/, "").slice(0, 80);
 		const entryFallback = typeof entry.id === "string" && entry.id ? `session:${entry.id}` : `session-index:${messageIndex}`;
 		const responseKey = getAssistantResponseKey(msg, entryFallback);
-		messages.push({ index: messageIndex, markdown, preview, responseKey });
+		messages.push({ entryId: entry.id, index: messageIndex, markdown, preview, responseKey });
 		messageIndex++;
 	}
 
@@ -1033,7 +1037,30 @@ function getLastAssistantResponse(ctx: ExtensionContext): AssistantResponseSnaps
 	const messages = getAssistantMessages(ctx);
 	if (messages.length === 0) return undefined;
 	const latest = messages[messages.length - 1]!;
-	return { markdown: latest.markdown, responseKey: latest.responseKey };
+	return { entryId: latest.entryId, markdown: latest.markdown, responseKey: latest.responseKey };
+}
+
+function piTurnDetails(ctx: ExtensionContext, response: AssistantResponseSnapshot | undefined, enabled: boolean) {
+	if (!enabled || !response) return undefined;
+	const manager = ctx.sessionManager;
+	const sessionId = manager.getSessionId();
+	const path = manager.getSessionFile();
+	const find = () => manager.getBranch().slice(-10_000).filter(e => e.type === "message" && e.message.role === "assistant"
+		&& getAssistantResponseKey(e.message, `session:${e.id}`) === response.responseKey
+		&& extractAssistantMarkdownContent(e.message.content) === response.markdown).at(-1);
+	const entry = response.entryId ? manager.getEntry(response.entryId) : find();
+	if (entry?.type === "message" && entry.message.role === "assistant" && entry.message.stopReason !== "stop") return undefined;
+	const id = response.entryId ?? entry?.id;
+	return async (signal: AbortSignal) => {
+		signal.throwIfAborted();
+		if (manager.getSessionId() !== sessionId) return { events: [], notices: ["This session is no longer active."] };
+		const entryId = id ?? find()?.id;
+		if (!entryId) return { events: [], notices: ["This response has no matching persisted entry; prompt and working details are unavailable."] };
+		const target = { key: `pi:${entryId}`, markdown: response.markdown };
+		if (path) return readTurnDetails(path, "pi", target, signal);
+		const branch = manager.getBranch(entryId);
+		return turnDetailsFromRecords("pi", branch.slice(-10_000), target, branch.length > 10_000);
+	};
 }
 
 function getLastAssistantMarkdown(ctx: ExtensionContext): string | undefined {
@@ -4635,6 +4662,7 @@ interface ParsedPreviewArgs {
 	file?: string;
 	fontSizePx?: number;
 	watch?: boolean;
+	turnDetails?: boolean;
 	stop?: boolean;
 	stopAll?: boolean;
 	stopResponses?: boolean;
@@ -4651,6 +4679,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 	let file: string | undefined;
 	let fontSizePx: number | undefined;
 	let watch = false;
+	let turnDetails = false;
 	let stop = false;
 	let stopAll = false;
 	let stopResponses = false;
@@ -4687,6 +4716,11 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 
 		if (token === "--watch" || token === "-w") {
 			watch = true;
+			continue;
+		}
+
+		if (token === "--turn-details") {
+			turnDetails = true;
 			continue;
 		}
 
@@ -4787,6 +4821,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
+	if (turnDetails && (!watch || file !== undefined)) return { error: "--turn-details is only available for the assistant-response browser watcher (--watch without a file)." };
 	if (file && pick) return { error: "Cannot use --pick and --file together." };
 	if (watch && stop) return { error: "Cannot use --watch and --stop together." };
 	if (watch && list) return { error: "Cannot use --watch and --list together." };
@@ -4805,7 +4840,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		return { error: "--list cannot be combined with a file, --pick, --font-size, --responses, or --all." };
 	}
 
-	return { target, pick, file, fontSizePx, watch, stop, stopAll, stopResponses, list };
+	return { target, pick, file, fontSizePx, watch, turnDetails, stop, stopAll, stopResponses, list };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -4813,6 +4848,7 @@ export default function (pi: ExtensionAPI) {
 	type BrowserWatchId = "responses" | `file:${string}`;
 	interface ResponseBrowserWatchSource {
 		kind: "responses";
+		turnDetails?: boolean;
 		lastResponseKey?: string;
 		queuedResponseOverride?: AssistantResponseSnapshot;
 	}
@@ -4853,6 +4889,7 @@ export default function (pi: ExtensionAPI) {
 		filePath?: string;
 		sourceLabel: string;
 		requestedFontSizePx: number;
+		turnDetails?: boolean;
 		promise: Promise<void>;
 		renderAbortController?: AbortController;
 		server?: BrowserWatchServer;
@@ -5164,6 +5201,7 @@ export default function (pi: ExtensionAPI) {
 			if (!isBrowserWatchActive(activeWatch) || activeWatch.renderGeneration !== renderGeneration || activeWatch.source.kind !== "responses") return false;
 			activeWatch.server.updateDocument(rendered.html, {
 				appendToHistory: response.responseKey !== activeWatch.source.lastResponseKey,
+				turnDetails: piTurnDetails(ctx, response, activeWatch.source.turnDetails === true),
 			});
 			activeWatch.lastRenderKey = renderKey;
 			activeWatch.source.lastResponseKey = response.responseKey;
@@ -5332,7 +5370,7 @@ export default function (pi: ExtensionAPI) {
 		}, BROWSER_FILE_WATCH_DEBOUNCE_MS);
 	};
 
-	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number): Promise<void> => {
+	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number, turnDetails = false): Promise<void> => {
 		const id = RESPONSE_BROWSER_WATCH_ID;
 		if (pendingBrowserWatchCleanups.has(id)) {
 			throw new Error("The previous assistant-response watcher did not clean up completely. Retry /preview-browser --stop --responses first.");
@@ -5340,6 +5378,7 @@ export default function (pi: ExtensionAPI) {
 		const existingWatch = browserWatches.get(id);
 		if (existingWatch) {
 			if (existingWatch.source.kind !== "responses") throw new Error("Invalid response watcher state.");
+			if (turnDetails && !existingWatch.source.turnDetails) throw new Error("Working needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch --turn-details.");
 			const operation = claimBrowserWatchOperation(id);
 			const previewFontSizePx = fontSizePx === undefined
 				? existingWatch.fontSizePx
@@ -5357,6 +5396,7 @@ export default function (pi: ExtensionAPI) {
 
 		const existingProvisional = provisionalBrowserWatches.get(id);
 		if (existingProvisional) {
+			if (turnDetails && !existingProvisional.turnDetails) throw new Error("The response watcher is starting without prompt and working access. Wait for it, stop it, then start a fresh watch with --turn-details.");
 			if (fontSizePx !== undefined) {
 				existingProvisional.requestedFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
 			}
@@ -5370,6 +5410,7 @@ export default function (pi: ExtensionAPI) {
 			id,
 			operation,
 			sourceLabel: "Assistant responses",
+			turnDetails,
 			requestedFontSizePx: previewFontSizePx,
 			promise: Promise.resolve(),
 		};
@@ -5410,6 +5451,7 @@ export default function (pi: ExtensionAPI) {
 
 			const server = await createBrowserWatchServer(html, resourcePath, {
 				initialDocumentIsHistory: !!response,
+				initialTurnDetails: piTurnDetails(ctx, response, provisional.turnDetails === true),
 				sourceLabel: provisional.sourceLabel,
 				renderLocalDocument: (path, signal) => renderBrowserWatchLinkedDocument(path, getPreviewStyle(ctx.ui.theme), newWatch?.fontSizePx ?? provisional.requestedFontSizePx, signal),
 			});
@@ -5422,7 +5464,7 @@ export default function (pi: ExtensionAPI) {
 				id,
 				operationId: operation.operationId,
 				server,
-				source: { kind: "responses", lastResponseKey: response?.responseKey },
+				source: { kind: "responses", turnDetails: provisional.turnDetails, lastResponseKey: response?.responseKey },
 				sourceLabel: provisional.sourceLabel,
 				resourcePath,
 				fontSizePx: provisional.requestedFontSizePx,
@@ -5440,7 +5482,8 @@ export default function (pi: ExtensionAPI) {
 			await openFileInDefaultBrowser(server.url, true);
 			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(newWatch)) return;
 			hasShownBrowserWatchHint = true;
-			ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop --responses.", "info");
+			ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop --responses."
+				+ (newWatch.source.kind === "responses" && newWatch.source.turnDetails ? " Working includes potentially sensitive input/tool text and recorded images; share only with trusted viewers." : ""), "info");
 		})();
 		provisional.promise = startPromise;
 		try {
@@ -5658,7 +5701,7 @@ export default function (pi: ExtensionAPI) {
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --turn-details to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only).", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
@@ -5718,7 +5761,7 @@ export default function (pi: ExtensionAPI) {
 				if (parsed.file) {
 					await startBrowserFileWatch(ctx, parsed.file, parsed.fontSizePx);
 				} else {
-					await startBrowserResponseWatch(ctx, parsed.fontSizePx);
+					await startBrowserResponseWatch(ctx, parsed.fontSizePx, parsed.turnDetails);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -5885,7 +5928,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them)",
+		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --turn-details opts into recorded inputs/tools for response watchers)",
 		handler: async (args, ctx) => {
 			await run(`--browser ${args}`.trim(), ctx);
 		},

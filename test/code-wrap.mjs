@@ -264,6 +264,7 @@ try {
 		navigator.clipboard.writeText = async () => { throw new Error("Clipboard denied"); };
 		document.execCommand = () => false;
 	});
+	await openWatchControls(page);
 	await page.click('[data-watch-control="copy-link"]');
 	await page.waitForFunction(() => !document.querySelector('[data-watch-control="share-panel"]').hidden);
 	assert.ok(await page.evaluate(() => {
