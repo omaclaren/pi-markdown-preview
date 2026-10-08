@@ -28,6 +28,7 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 
 - **Terminal preview (default)** — renders markdown as PNG images displayed inline (Kitty, iTerm2, Ghostty, WezTerm). Long responses are split across navigable pages at block boundaries when possible, with a fixed-height fallback for oversized content.
 - **Browser preview** — opens rendered HTML in your default browser as a single continuous scrollable document, with optional completion-level auto-refresh and response navigation via `--watch` (`-w`)
+- **[Working (optional)](#working-optional)** — a read-only view of recorded prompts, tool calls/results and images for a completed response. Enable with `/preview-browser --watch --turn-details`.
 - **Local document links in watch mode** — ordinary browser navigation for rendered text snapshots, image viewing, native PDFs, and isolated HTML pages
 - **PDF export** — exports markdown to PDF via pandoc + LaTeX and opens it in your default PDF viewer
 - **LLM-callable artifact export** — lets pi render the latest response, supplied Markdown/LaTeX, or a local file to PDF, HTML, or PNG files for remote/headless workflows such as Telegram delivery
@@ -154,13 +155,28 @@ File watchers preserve your reading position across automatic updates, reloads, 
 
 ### Working (optional)
 
-`/preview-browser --watch --turn-details` adds **Working** beside completed responses. It opens a separate, non-live page with recorded input messages, progress, exposed thinking/reasoning and tool calls/results. Prompts are expanded; working and tool output are folded. Known Bash, codemode, read and edit calls have readable argument views: literal commands/code, file paths and requested ranges, and Before/After replacement text. Other options stay visible and the recorded JSON is expandable. Tool results, including read output, appear in separate result cards. Wide results scroll horizontally by default; each has a Wrap lines checkbox. Extra blank lines before a prompt are hidden in the reading view; Raw input preserves the original recorded text. Unknown or malformed argument shapes keep their literal view; paths and code remain inert. Preview and Working share a view switcher and history controls. Ctrl+Alt+P/W (Control+Option on macOS) selects Preview/Working for the same response; Option/Alt+Left/Right browses history without changing views (add Shift for oldest/latest). Shortcuts leave text inputs alone. Command-based combinations are left to the host/browser; they can switch workspaces or close tabs. Scroll position, expanded cards and result wrapping survive refreshes and view changes within the tab. Working’s recorded content stays fixed while its toolbar tracks available history; new responses do not move you away from it. If Working is unavailable, a recovery page offers that exact response in Preview. Reloaded links from an earlier watcher run offer an explicit **Open current preview** action, never an automatic substitute. Browser Back, modifier clicks and new tabs work normally. One-shot previews, exports and file watchers are unchanged.
+```text
+/preview-browser --watch --turn-details
+```
 
-Details are read only on request for the exact retained response. Reads and output are bounded (8 MiB JSONL tail, 1 MiB records, 10,000 records; 250 displayed events, 16K characters of recorded text per entry and 256K overall). A short disclaimer notes that history may be incomplete; clipped entries are marked and missing material is not reconstructed. This is recorded activity rather than the complete model input. System/developer entries, known harness-injected context, opaque signatures and prompt/non-image attachments are omitted. Text stays literal: commands, paths and URLs do not execute or become file capabilities.
+Select **Working** beside a completed response for a read-only view of its recorded prompts, progress, exposed thinking/reasoning and tool calls/results. Some content may be missing or shortened. Prompts start expanded; activity and results start folded. Commands, file reads and requested edits have readable argument views, with the recorded JSON available. Result text can wrap, and recorded image thumbnails can be enlarged.
 
-Tool results can include **recorded image thumbnails**, with click/Enter to enlarge and Escape/Close to return. Only inline recorded bytes are used—never a current file, external URL or attachment ID. Static PNG, JPEG and WebP are supported; missing, unsupported and oversized images get a short unavailable message. Images appear below the result's text and decode when its card is expanded. Bounds are eight image candidates per turn, 512 KiB and 8 Mi pixels per image, 2 MiB and 16 Mi pixels overall, and 8192 pixels per dimension. Existing record/read limits still apply: an oversized source record can be absent altogether. No conversion, persistent image storage or new file-serving endpoint is added.
+Use **Ctrl+Alt+P/W** (Control+Option on macOS) to switch between Preview and Working for the same response. Each view remembers its reading position; expanded cards and wrapping choices survive refreshes within the tab. Working stays on the selected turn as new responses arrive. Missing data offers a link to the same response in Preview; expired links offer an explicit way to reconnect. The history controls above work in both views. One-shot previews, exports and file watchers are unchanged.
 
-**Privacy:** prompts, tool text and recorded images can contain secrets and are not automatically redacted. Anyone with this opted-in watcher's link can request its retained turn details. To avoid upgrading a previously shared ordinary link, first stop any ordinary response watcher with `/preview-browser --stop --responses`, then start with `--turn-details` to obtain a fresh private link. Details remain enabled until that watcher is stopped; reopening it without the flag does not revoke access. Stop it and start an ordinary watcher to disable the feature.
+**Privacy:** prompts, tool text and recorded images can contain secrets and are not automatically redacted. Share these links only with trusted viewers. If an ordinary response watcher is running, stop it with `/preview-browser --stop --responses` before enabling Working; this gives you a fresh private link. Working stays enabled until that watcher is stopped. Reopening without the flag does not revoke access; stop it and start an ordinary watcher to disable it.
+
+![Working with a recorded image — synthetic example](screenshots/recorded-images-working-dark.png)
+
+<details>
+<summary>Recorded content and limits</summary>
+
+Details are read only when requested, for the exact retained response. Reads are limited to an 8 MiB JSONL tail, 1 MiB per record and 10,000 records. Display limits are 250 events, 16K characters of recorded text per entry and 256K overall. Clipped entries are marked; missing material is not reconstructed. System/developer entries, known harness-injected context, opaque signatures and prompt/non-image attachments are omitted.
+
+Commands, paths and URLs stay literal and do not execute or become file capabilities. Known Bash, codemode, read and edit calls show commands/code, requested paths/ranges and Before/After replacement text. Other options and unknown or malformed argument shapes retain their literal view. Calls and results remain separate. Raw input preserves the prompt's original text when the reading view removes leading blank lines.
+
+Images use only recorded inline bytes, never current files, URLs or attachment IDs. Static PNG, JPEG and WebP are supported; missing, unsupported or oversized images get an unavailable message. Thumbnails decode when their result card opens. Limits are eight candidates per turn, 512 KiB and 8 Mi pixels per image, 2 MiB and 16 Mi pixels overall, and 8192 pixels per dimension. Record/read limits still apply, so an oversized source record may be absent altogether. There is no conversion or persistent image storage.
+
+</details>
 
 ### LLM-callable artifact export
 
