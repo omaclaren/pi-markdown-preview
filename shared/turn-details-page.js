@@ -52,6 +52,31 @@ function claudePasteBody(value) {
 	return body.replace(/^(?:\r\n|\r|\n)/, "").replace(/(?:\r\n|\r|\n)$/, "");
 }
 
+// Claude records a slash command as a tag-only record: each known tag at most
+// once, separated only by whitespace, with no recognised tag inside a field.
+// Anything else stays an ordinary prompt. Raw input keeps the exact record.
+const SLASH_COMMAND_TAGS = ["command-name", "command-message", "command-args"];
+function claudeSlashCommand(value) {
+	const source = value.trim(), fields = new Map();
+	let at = 0;
+	while (at < source.length) {
+		const tag = SLASH_COMMAND_TAGS.find(name => source.startsWith(`<${name}>`, at));
+		if (!tag || fields.has(tag)) return null;
+		const start = at + tag.length + 2, end = source.indexOf(`</${tag}>`, start);
+		if (end < 0) return null;
+		const field = source.slice(start, end);
+		if (/<\/?command-(?:name|message|args)>/.test(field)) return null;
+		fields.set(tag, field);
+		at = end + tag.length + 3;
+		while (at < source.length && /\s/.test(source[at])) at++;
+	}
+	const name = fields.get("command-name")?.trim();
+	if (!name || /\s/.test(name)) return null;
+	const args = (fields.get("command-args") ?? "").trim();
+	return args ? `${name} ${args}` : name;
+}
+const slashCommand = (event, fromClaude) => fromClaude && event.kind === "prompt" ? claudeSlashCommand(event.text) : null;
+
 // Recognise recorded argument shapes, not code syntax. Never reindent, split
 // operators, resolve file paths, infer a successful edit, or execute anything.
 function eventContent(event, fromClaude = false) {
@@ -64,6 +89,8 @@ function eventContent(event, fromClaude = false) {
 		return (event.text || answer ? `<label class="output-wrap"><input type="checkbox" aria-label="Wrap lines for ${escape(event.label || "tool output")}">Wrap lines</label>${answer ? answeredQuestions(event) : literal}` : '') + images;
 	}
 	if (event.kind === "prompt") {
+		const slash = slashCommand(event, fromClaude);
+		if (slash !== null) return `${literalPre(slash)}<details class="recorded-input"><summary>Raw input</summary>${literal}</details>`;
 		// Suppress only empty leading lines in the reading view. Preserve the
 		// first content line's indentation and keep the recorded input available.
 		const body = (fromClaude ? claudePasteBody(event.text) : null) ?? event.text;
@@ -115,7 +142,13 @@ export function buildTurnDetailsPage(details, responseUrl, label = "", appearanc
 		if (["prompt", "progress", "reasoning", "tool", "result"].includes(e?.kind)) bounded.add(e.kind, e.label, e.text, e.callId, e.images, details?.sourceAgent === "claude" ? e.questionAnswers : undefined);
 	}
 	const { events } = bounded.result;
-	const rows = events.map((e, i) => `<details class="event ${e.kind}"${e.kind === "prompt" || e.label === "User shell command" ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(e.label || e.kind)}</summary><div class="event-content">${eventContent(e, details?.sourceAgent === "claude")}</div></details>`).join("\n");
+	const fromClaude = details?.sourceAgent === "claude";
+	// Inputs open by default. Only recognised local-command history (a slash
+	// command answered by local command output) starts collapsed.
+	const input = e => e.kind === "prompt" || e.label === "User shell command";
+	const localOutput = e => e?.kind === "result" && !e.callId && ["Command output", "Command error output"].includes(e.label);
+	const localCommand = i => slashCommand(events[i], fromClaude) !== null && localOutput(events[i + 1]);
+	const rows = events.map((e, i) => `<details class="event ${e.kind}"${input(e) && !localCommand(i) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(slashCommand(e, fromClaude) !== null ? "Slash command" : e.label || e.kind)}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Working</title><style>
 ${AGENT_PAGE_STYLE}
 ${appearanceStyle}

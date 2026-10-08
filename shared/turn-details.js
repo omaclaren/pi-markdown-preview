@@ -81,11 +81,17 @@ const isBoundary = (agent, e) => agent === "pi"
 	: isFinal(agent, e) || e.isApiErrorMessage === true || (e.type === "user" && /^\[Request interrupted by user(?: for tool use)?\]$/.test(textOf(e.message?.content).trim()));
 const keyOf = (agent, e) => agent === "pi" ? `pi:${e.id ?? e.timestamp ?? ""}` : `claude:${e.message?.id ?? e.uuid ?? ""}`;
 
-// Claude records user-entered ! commands and their output as user messages.
-// Match only complete wrapper records; do not interpret arbitrary embedded XML
-// or confuse them with assistant Bash calls. The extracted content stays literal.
+// Claude records user-entered ! commands and local command output as user
+// messages. Match only one complete, unambiguous wrapper per record: a repeated
+// or nested copy of the same tag leaves the whole record literal. Do not
+// interpret arbitrary embedded XML or confuse these with assistant Bash calls.
+// Slash-command records stay prompts; the page presents them compactly.
 function claudeContent(t, value, role, final, answerMetadata) {
-	const unwrap = (source, tag) => source.startsWith(`<${tag}>`) && source.endsWith(`</${tag}>`) ? source.slice(tag.length + 2, -(tag.length + 3)) : null;
+	const unwrap = (source, tag) => {
+		if (!source.startsWith(`<${tag}>`) || !source.endsWith(`</${tag}>`)) return null;
+		const inner = source.slice(tag.length + 2, -(tag.length + 3));
+		return inner.includes(`<${tag}>`) || inner.includes(`</${tag}>`) ? null : inner;
+	};
 	for (const block of blocks(value)) {
 		const source = role === "user" && ["text", "input_text"].includes(block?.type) ? text(block.text).trim() : "";
 		const command = unwrap(source, "bash-input");
@@ -93,11 +99,14 @@ function claudeContent(t, value, role, final, answerMetadata) {
 		const split = source.indexOf("</bash-stdout>");
 		const stdout = split < 0 ? null : unwrap(source.slice(0, split + "</bash-stdout>".length), "bash-stdout");
 		const stderr = split < 0 ? null : unwrap(source.slice(split + "</bash-stdout>".length).trim(), "bash-stderr");
+		const localStdout = unwrap(source, "local-command-stdout"), localStderr = unwrap(source, "local-command-stderr");
 		if (command !== null) t.add("tool", "User shell command", command);
 		else if (stdout !== null && stderr !== null) {
 			t.add("result", "Shell stdout", stdout); t.add("result", "Shell stderr", stderr);
 			if (!stdout.trim() && !stderr.trim()) t.note("A user shell command has no recorded text output.");
-		} else t.content([block], role, final, answerMetadata);
+		} else if (localStdout !== null) t.add("result", "Command output", localStdout);
+		else if (localStderr !== null) t.add("result", "Command error output", localStderr);
+		else t.content([block], role, final, answerMetadata);
 	}
 }
 
