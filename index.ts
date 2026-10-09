@@ -4719,7 +4719,8 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 			continue;
 		}
 
-		if (token === "--turn-details") {
+		// --turn-details is the undocumented 0.21.x spelling of --working.
+		if (token === "--working" || token === "--turn-details") {
 			turnDetails = true;
 			continue;
 		}
@@ -4821,7 +4822,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
-	if (turnDetails && (!watch || file !== undefined)) return { error: "--turn-details is only available for the assistant-response browser watcher (--watch without a file)." };
+	if (turnDetails && (!watch || file !== undefined)) return { error: "--working is only available for the assistant-response browser watcher (--watch without a file)." };
 	if (file && pick) return { error: "Cannot use --pick and --file together." };
 	if (watch && stop) return { error: "Cannot use --watch and --stop together." };
 	if (watch && list) return { error: "Cannot use --watch and --list together." };
@@ -5378,7 +5379,7 @@ export default function (pi: ExtensionAPI) {
 		const existingWatch = browserWatches.get(id);
 		if (existingWatch) {
 			if (existingWatch.source.kind !== "responses") throw new Error("Invalid response watcher state.");
-			if (turnDetails && !existingWatch.source.turnDetails) throw new Error("Working needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch --turn-details.");
+			if (turnDetails && !existingWatch.source.turnDetails) throw new Error("Working needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch --working.");
 			const operation = claimBrowserWatchOperation(id);
 			const previewFontSizePx = fontSizePx === undefined
 				? existingWatch.fontSizePx
@@ -5396,7 +5397,7 @@ export default function (pi: ExtensionAPI) {
 
 		const existingProvisional = provisionalBrowserWatches.get(id);
 		if (existingProvisional) {
-			if (turnDetails && !existingProvisional.turnDetails) throw new Error("The response watcher is starting without prompt and working access. Wait for it, stop it, then start a fresh watch with --turn-details.");
+			if (turnDetails && !existingProvisional.turnDetails) throw new Error("The response watcher is starting without prompt and working access. Wait for it, stop it, then start a fresh watch with --working.");
 			if (fontSizePx !== undefined) {
 				existingProvisional.requestedFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
 			}
@@ -5483,7 +5484,8 @@ export default function (pi: ExtensionAPI) {
 			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(newWatch)) return;
 			hasShownBrowserWatchHint = true;
 			ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop --responses."
-				+ (newWatch.source.kind === "responses" && newWatch.source.turnDetails ? " Working includes potentially sensitive input/tool text and recorded images; share only with trusted viewers." : ""), "info");
+				+ (newWatch.source.kind === "responses" && newWatch.source.turnDetails ? " Working includes potentially sensitive input/tool text and recorded images; share only with trusted viewers."
+					: newWatch.source.kind === "responses" ? " Tip: start with /preview-browser --watch --working to see prompts and activity." : ""), "info");
 		})();
 		provisional.promise = startPromise;
 		try {
@@ -5701,7 +5703,7 @@ export default function (pi: ExtensionAPI) {
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --turn-details to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only).", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only).", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
@@ -5928,7 +5930,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --turn-details opts into recorded inputs/tools for response watchers)",
+		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --working opts into recorded inputs/tools for response watchers)",
 		handler: async (args, ctx) => {
 			await run(`--browser ${args}`.trim(), ctx);
 		},

@@ -207,8 +207,9 @@ try {
 	const responseSession = await bootstrap(urls[4]);
 	assert.match(responseSession.html, /<title>Assistant responses — Markdown Preview<\/title>/);
 	assert.doesNotMatch(responseSession.html, /<a\b[^>]*data-watch-control="turn-details"/);
+	assert.ok(notifications.some(e => e.message?.includes("Tip: start with /preview-browser --watch --working to see prompts and activity.")), "A response watcher without Working suggests --working.");
 	const beforeDetailsUpgrade = notifications.length;
-	await command("/preview-browser -w --turn-details");
+	await command("/preview-browser -w --working");
 	assert.ok(notifications.slice(beforeDetailsUpgrade).some(e => e.notifyType === "error" && e.message.includes("fresh private preview link")), "Do not upgrade an already-shared preview to expose traces.");
 	assert.match(responseSession.html, /const positionScope = "[^"]+:revision:1"/, "Response-watch commands must scope Back restoration to their current revision.");
 	assert.equal(new Set([oneSession.origin, twoSession.origin, responseSession.origin]).size, 3);
@@ -250,11 +251,13 @@ try {
 	assert.equal(await waitFor(() => isClosed(twoSession), "bare unambiguous shutdown"), true);
 
 	const opensBeforeDetails = (await openedUrls()).length;
-	await command("/preview-browser -w --turn-details");
+	const notesBeforeDetails = notifications.length;
+	await command("/preview-browser -w --turn-details"); // hidden 0.21.x alias of --working
 	const detailUrls = await waitOpenCount(opensBeforeDetails + 1);
 	const detailSession = await bootstrap(detailUrls.at(-1));
 	const detailLink = detailSession.html.match(/data-watch-control="turn-details" href="([^"]+)"/)?.[1].replaceAll("&amp;", "&");
 	assert.ok(detailLink, "Real Pi response watchers should expose the opted-in details link.");
+	assert.ok(notifications.slice(notesBeforeDetails).some(e => e.message?.includes("Working includes potentially sensitive")) && !notifications.slice(notesBeforeDetails).some(e => e.message?.includes("Tip:")), "Working watchers warn instead of showing the tip.");
 	const detailPage = await fetch(new URL(detailLink, detailSession.origin), { headers: { cookie: detailSession.cookie } });
 	assert.equal(detailPage.status, 200);
 	const workingHtml = await detailPage.text();

@@ -349,6 +349,40 @@ test("Codemode, read and edit use literal typed views with raw arguments and saf
  assert.ok(page('codemode', deep).length < 30_000);
 });
 
+test("Other tools' JSON arguments and JSON results show literal fields, keeping the exact recorded text", () => {
+ const page = (kind, label, text) => buildTurnDetailsPage({ events: [{ kind, label, text, ...(kind === "result" ? { callId: "c" } : {}) }] }, "#");
+ // Short scalars become a compact list; long or multi-line strings become full-width literal blocks.
+ const search = page("tool", "Tool: ToolSearch", JSON.stringify({ query: "select:TaskStop", max_results: 1, flag: false, none: null, empty: "" }));
+ assert.match(search, /<dt>query<\/dt><dd><pre>select:TaskStop<\/pre><\/dd><dt>max_results<\/dt><dd><pre>1<\/pre><\/dd><dt>flag<\/dt><dd><pre>false<\/pre><\/dd><dt>none<\/dt><dd><pre>null<\/pre><\/dd><dt>empty<\/dt><dd><span class="empty-text">Empty text<\/span><\/dd>/);
+ assert.match(search, /Recorded arguments \(JSON\)<\/summary><pre><span>\{&quot;query&quot;:&quot;select:TaskStop&quot;/);
+ const write = page("tool", "Tool: mcp__files__write", JSON.stringify({ file_path: "/tmp/<a>.md", content: 'line 1\nline "2" \\n', nested: { list: [1, { deep: true }] } }));
+ assert.match(write, /<dt>file_path<\/dt><dd><pre>\/tmp\/&lt;a&gt;\.md<\/pre><\/dd>/);
+ assert.match(write, /<h3>content<\/h3><pre class="field-text"><code>line 1\nline &quot;2&quot; \\n<\/code><\/pre>/, "strings keep real line breaks and literal backslashes, without JSON escaping");
+ assert.match(write, /<h3>nested<\/h3><pre class="field-text"><code>\{\n  &quot;list&quot;: \[\n    1,/);
+ // Hostile keys and values stay inert.
+ const hostile = page("tool", "Tool: Unknown", JSON.stringify({ "<script>x</script>": "<img src=x onerror=alert(1)>" }));
+ assert.doesNotMatch(hostile, /<script>|<img/); assert.match(hostile, /<dt>&lt;script&gt;x&lt;\/script&gt;<\/dt>/);
+ // Unrecognised shapes of known tools also show fields instead of escaped JSON.
+ assert.match(page("tool", "Tool: Read", JSON.stringify({ pattern: "a\\b", glob: "*.md" })), /<dt>pattern<\/dt><dd><pre>a\\b<\/pre><\/dd>/);
+ // Deep nesting stays compact rather than expanding quadratically.
+ const deep = page("tool", "Tool: Unknown", '{"x":' + '['.repeat(1000) + '0' + ']'.repeat(1000) + '}');
+ assert.ok(deep.length < 30_000); assert.match(deep, /<h3>x<\/h3><pre class="field-text"><code>\[\[\[\[/);
+ // Results: one JSON object becomes fields, one array becomes pretty JSON, both with exact Raw output.
+ const stopped = page("result", "Tool result: TaskStop", JSON.stringify({ message: 'Stopped (cd "/x")' }));
+ assert.match(stopped, /<dt>message<\/dt><dd><pre>Stopped \(cd &quot;\/x&quot;\)<\/pre><\/dd>/);
+ assert.match(stopped, /<summary>Raw output<\/summary><pre><span>\{&quot;message&quot;:&quot;Stopped \(cd \\&quot;\/x\\&quot;\)&quot;\}<\/span><\/pre>/);
+ assert.match(page("result", "Tool result", '[1,{"a":2}]'), /<pre class="json-output"><code>\[\n  1,\n  \{\n    &quot;a&quot;: 2\n  \}\n\]<\/code><\/pre>/);
+ // Anything that is not exactly one non-empty JSON object or array stays literal.
+ for (const text of ["ok", '"just a string"', "42", "{}", "[]", '{"a":1} trailing', '{"a":', "null"]) {
+  const html = page("result", "Tool result", text);
+  assert.doesNotMatch(html, /<summary>Raw output|class="tool-fields"|class="json-output"/, text);
+ }
+ for (const text of ["[1,2]", "null", '"x"', "{}", "not json"]) assert.doesNotMatch(page("tool", "Tool: Unknown", text), /class="tool-fields"/, text);
+ // Prompts and reasoning are never reinterpreted as JSON.
+ assert.doesNotMatch(page("prompt", "Prompt / input", '{"a":1}'), /class="tool-fields"/);
+ assert.doesNotMatch(page("reasoning", "Recorded thinking / reasoning", '{"a":1}'), /class="tool-fields"/);
+});
+
 test("Claude paste envelopes are presentation-only and require a complete matching wrapper", () => {
  const wrap = body => `<pasted_content id="sample-04e5">\n${body}\n</pasted_content id="sample-04e5">`;
  const render = (text, sourceAgent = 'claude', kind = 'prompt') => buildTurnDetailsPage({sourceAgent,events:[{kind,label:'Prompt',text}]}, '#');

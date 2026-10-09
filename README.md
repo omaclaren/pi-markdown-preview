@@ -28,7 +28,7 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 
 - **Terminal preview (default)** — renders markdown as PNG images displayed inline (Kitty, iTerm2, Ghostty, WezTerm). Long responses are split across navigable pages at block boundaries when possible, with a fixed-height fallback for oversized content.
 - **Browser preview** — opens rendered HTML in your default browser as a single continuous scrollable document, with optional completion-level auto-refresh and response navigation via `--watch` (`-w`)
-- **[Working (optional)](#working-optional)** — a read-only view of recorded prompts, tool calls/results and images for a completed response. Enable with `/preview-browser --watch --turn-details`.
+- **[Working (optional)](#working-optional)** — a read-only view of recorded prompts, tool calls/results and images for a completed response. Enable with `/preview-browser --watch --working`.
 - **Local document links in watch mode** — ordinary browser navigation for rendered text snapshots, image viewing, native PDFs, and isolated HTML pages
 - **PDF export** — exports markdown to PDF via pandoc + LaTeX and opens it in your default PDF viewer
 - **LLM-callable artifact export** — lets pi render the latest response, supplied Markdown/LaTeX, or a local file to PDF, HTML, or PNG files for remote/headless workflows such as Telegram delivery
@@ -98,7 +98,7 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 | `/preview-browser` | Shortcut for a one-shot browser preview |
 | `/preview-browser <path/to/file>` | Open a file preview in browser |
 | `/preview-browser --watch` (`-w`) | Keep a browser preview updated after each completed assistant response |
-| `/preview-browser --watch --turn-details` | Opt in to recorded prompt/working/tool details for response previews |
+| `/preview-browser --watch --working` | Opt in to recorded prompt/working/tool details for response previews |
 | `/preview-browser --watch <path>` | Start or reopen a browser watcher for a file |
 | `/preview-browser --list` | List active and starting browser preview watchers |
 | `/preview-browser --stop <path>` | Stop one file watcher |
@@ -156,7 +156,7 @@ File watchers preserve your reading position across automatic updates, reloads, 
 ### Working (optional)
 
 ```text
-/preview-browser --watch --turn-details
+/preview-browser --watch --working
 ```
 
 Select **Working** beside a completed response for a read-only view of its recorded prompts, progress, exposed thinking/reasoning and tool calls/results. Some content may be missing or shortened. Prompts start expanded; activity and results start folded. Commands, file reads and requested edits have readable argument views, with the recorded JSON available. Result text can wrap, and recorded image thumbnails can be enlarged.

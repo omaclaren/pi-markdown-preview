@@ -22,6 +22,40 @@ function options(args, omitted = [], labels = {}) {
 	return fields ? `<dl class="tool-options">${fields}</dl>` : "";
 }
 
+// Pretty JSON only for shallow values with bounded growth; deep or expanding
+// values stay compact, so a bounded record cannot grow quadratically.
+const JSON_DEPTH_LIMIT = 20;
+const shallow = (value, depth = 0) => depth <= JSON_DEPTH_LIMIT && (value === null || typeof value !== "object" || Object.values(value).every(v => shallow(v, depth + 1)));
+function jsonText(value) {
+	const compact = JSON.stringify(value);
+	if (!shallow(value)) return compact;
+	const pretty = JSON.stringify(value, null, 2);
+	return pretty.length <= Math.max(4096, 3 * compact.length) ? pretty : compact;
+}
+
+// Any plain JSON object as labelled literal fields: short scalars as a compact
+// list, long or multi-line strings and nested values as full-width blocks.
+// Strings keep their recorded text and line breaks; nothing is interpreted.
+const shortScalar = v => v === null || typeof v === "number" || typeof v === "boolean" || (typeof v === "string" && v.length <= 120 && !/[\r\n]/.test(v));
+function fieldsView(record) {
+	const entries = Object.entries(record);
+	const rows = entries.filter(([, v]) => shortScalar(v)).map(([key, v]) => `<dt>${escape(key)}</dt><dd>${v === "" ? '<span class="empty-text">Empty text</span>' : `<pre>${escape(typeof v === "string" ? v : JSON.stringify(v))}</pre>`}</dd>`).join("");
+	const blocks = entries.filter(([, v]) => !shortScalar(v)).map(([key, v]) => `<section class="tool-field"><h3>${escape(key)}</h3>${code(typeof v === "string" ? v : jsonText(v), "field-text")}</section>`).join("");
+	return `<div class="tool-fields">${rows ? `<dl class="tool-options">${rows}</dl>` : ""}${blocks}</div>`;
+}
+
+// A result that is exactly one non-empty JSON object or array: objects as
+// fields, arrays as bounded pretty JSON. The exact text stays under Raw output.
+function jsonResult(text) {
+	const source = text.trim();
+	if (!/^[[{]/.test(source)) return null;
+	let value;
+	try { value = JSON.parse(source); } catch { return null; }
+	if (value === null || typeof value !== "object" || !Object.keys(value).length) return null;
+	const view = Array.isArray(value) ? code(jsonText(value), "json-output") : fieldsView(value);
+	return `${view}<details class="recorded-output"><summary>Raw output</summary>${literalPre(text)}</details>`;
+}
+
 function askedQuestions(args) {
 	return args.questions.map(q => `<section class="asked-question"><p class="question-header">${escape(q.header)}${typeof q.multiSelect === "boolean" ? ` · ${q.multiSelect ? "Multiple selections allowed" : "Single selection"}` : ""}</p><h2>${escape(q.question)}</h2><ul class="question-options">${q.options.map(o => `<li><strong>${escape(o.label)}</strong><div class="question-prose">${escape(o.description)}</div>${o.preview === undefined ? "" : textField("Preview", o.preview, "question-preview")}${options(o, ["label", "description", "preview"])}</li>`).join("")}</ul>${options(q, ["question", "header", "options", "multiSelect"])}</section>`).join("");
 }
@@ -86,7 +120,7 @@ function eventContent(event, fromClaude = false) {
 			? `<p class="recorded-image-error">Recorded image unavailable: ${escape(IMAGE_UNAVAILABLE[image.unavailable])}</p>`
 			: `<figure class="recorded-image"><button type="button" class="recorded-image-open" aria-expanded="false" aria-label="Recorded image ${i + 1} · ${image.width} × ${image.height}. Enlarge"><img data-recorded-src="data:${image.mimeType};base64,${image.data}" width="${image.width}" height="${image.height}" alt="Recorded tool-result image ${i + 1}" decoding="async"><span>Enlarge</span></button><figcaption>${image.width} × ${image.height} · ${escape(image.mimeType.slice(6).toUpperCase())}</figcaption><p class="recorded-image-error" role="status" hidden></p></figure>`).join('');
 		const answer = fromClaude && /^Tool result:\s*(?:functions\.)?AskUserQuestion$/i.test(event.label);
-		return (event.text || answer ? `<label class="output-wrap"><input type="checkbox" aria-label="Wrap lines for ${escape(event.label || "tool output")}">Wrap lines</label>${answer ? answeredQuestions(event) : literal}` : '') + images;
+		return (event.text || answer ? `<label class="output-wrap"><input type="checkbox" aria-label="Wrap lines for ${escape(event.label || "tool output")}">Wrap lines</label>${answer ? answeredQuestions(event) : jsonResult(event.text) ?? literal}` : '') + images;
 	}
 	if (event.kind === "prompt") {
 		const slash = slashCommand(event, fromClaude);
@@ -101,12 +135,14 @@ function eventContent(event, fromClaude = false) {
 	}
 	if (event.kind !== "tool") return literal;
 	const name = /^Tool:\s*(?:functions\.)?(bash|exec_command|exec|codemode|read|edit|multiedit|askuserquestion)$/i.exec(event.label)?.[1].toLowerCase();
-	if (!name) return literal;
 	let args;
 	try { args = JSON.parse(event.text); }
 	catch { return name === "codemode" ? code(event.text, "code-input") : literal; }
-	if (!object(args)) return literal;
+	if (!object(args) || !Object.keys(args).length) return literal;
+	// Unrecognised tools and unrecognised shapes of known tools: literal fields.
+	const fields = () => `${fieldsView(args)}${rawArguments(event.text)}`;
 	try {
+		if (!name) return fields();
 		const descKey = typeof args.description === "string" ? ["description"] : [];
 		const finish = (body, used, labels = {}) => `${body}${description(args)}${options(args, [...used, ...descKey], labels)}${rawArguments(event.text)}`;
 		if (name === "askuserquestion") {
@@ -118,20 +154,21 @@ function eventContent(event, fromClaude = false) {
 			if (typeof args.code === "string") return finish(code(args.code, "code-input"), ["code"]);
 		} else {
 			const pathKey = stringKey(args, ["path", "file_path", "filePath"]);
-			if (!pathKey) return literal;
+			if (!pathKey) return fields();
 			if (name === "read") return finish(filePath(args[pathKey]), [pathKey], { offset: "Start line", limit: "Line limit" });
 			const batch = Object.hasOwn(args, "edits");
 			const replacements = batch ? args.edits : [args];
-			if (!Array.isArray(replacements) || !replacements.length) return literal;
+			if (!Array.isArray(replacements) || !replacements.length) return fields();
 			const pairs = replacements.map(edit => object(edit) && [["oldText", "newText"], ["old_string", "new_string"], ["oldString", "newString"]].find(pair => pair.every(key => typeof edit[key] === "string")));
-			if (pairs.some(pair => !pair)) return literal;
+			if (pairs.some(pair => !pair)) return fields();
 			const body = replacements.map((edit, i) => {
 				const pair = pairs[i];
 				return `<section class="edit-replacement"><h2>Requested replacement${replacements.length > 1 ? ` ${i + 1}` : ""}</h2>${textField("Before", edit[pair[0]], "edit-before")}${textField("After", edit[pair[1]], "edit-after")}${batch ? options(edit, pair) : ""}</section>`;
 			}).join("");
 			return finish(filePath(args[pathKey]) + body, [pathKey, ...(batch ? ["edits"] : pairs[0])]);
 		}
-	} catch { /* Unrecognised/deep argument structures keep the literal view. */ }
+		return fields();
+	} catch { /* Unexpected failures keep the literal view. */ }
 	return literal;
 }
 
@@ -162,6 +199,7 @@ pre { margin:0; padding:12px 14px; background:transparent; font:0.9em/1.6 ui-mon
 .tool-path { padding:12px 14px } .tool-path pre { padding:2px 0 0 } .field-label,.tool-field h3,.edit-replacement h2 { font:600 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--muted); margin:0 }
 .edit-replacement { padding:0 14px 14px } .edit-replacement h2 { margin:0 0 10px } .tool-field { margin:8px 0 } .tool-field pre { padding:4px 0 } .empty-text { color:var(--muted); font-size:12px; margin:4px 0 } .edit-replacement .tool-options { margin:12px 0 0 }
 .tool-options { display:grid; grid-template-columns:fit-content(40%) minmax(0,1fr); gap:6px 12px; margin:0 14px 12px; font-size:12px } .tool-options dt { color:var(--muted); overflow-wrap:anywhere } .tool-options dd { margin:0; min-width:0 } .tool-options pre { padding:0; font-size:12px }
+.tool-fields { padding:12px 14px 2px } .tool-fields .tool-options { margin:0 0 10px } .tool-fields .tool-field { margin:0 0 10px } .tool-fields .empty-text { margin:0 }
 .recorded-arguments,.recorded-input { border-top:1px solid var(--line) } .recorded-arguments > summary,.recorded-input > summary { color:var(--muted); font-size:12px; font-weight:400 }
 .prompt pre,.progress pre,.reasoning pre { font:inherit }
 .asked-question,.question-reply { margin:14px } .asked-question h2,.question-reply h3 { font-family:inherit; font-size:1em; font-weight:600; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 8px } .question-header { color:var(--muted); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 6px }
