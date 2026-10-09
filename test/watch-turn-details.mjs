@@ -383,6 +383,36 @@ test("Other tools' JSON arguments and JSON results show literal fields, keeping 
  assert.doesNotMatch(page("reasoning", "Recorded thinking / reasoning", '{"a":1}'), /class="tool-fields"/);
 });
 
+test("Terminal colour codes are hidden in tool output, and Claude task notifications read as notifications", () => {
+ const render = (events, sourceAgent = "claude") => buildTurnDetailsPage({ sourceAgent, events }, "#");
+ const reading = html => html.match(/<\/label><pre><span>([\s\S]*?)<\/span><\/pre>/)?.[1];
+ // CSI colour/style codes, an OSC hyperlink and a charset designator disappear from the reading view only.
+ const coloured = "\x1b[1mUsage:\x1b[22m\n\x1b[32mUpdated npm:pi-markdown-preview\x1b[39m \x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\\x1b(B";
+ const result = render([{ kind: "result", label: "Tool result: Bash", callId: "c", text: coloured }]);
+ assert.equal(reading(result), "Usage:\nUpdated npm:pi-markdown-preview link");
+ assert.ok(result.includes(`<summary>Raw output</summary><pre><span>${coloured.replace(/&/g, "&amp;")}</span></pre>`), "Raw output keeps the exact recorded bytes");
+ // Plain output is untouched and gets no Raw output; coloured JSON still becomes fields.
+ const plain = render([{ kind: "result", label: "Tool result: Bash", callId: "c", text: "ok [1m not an escape" }]);
+ assert.equal(reading(plain), "ok [1m not an escape"); assert.doesNotMatch(plain, /<summary>Raw output/);
+ assert.match(render([{ kind: "result", label: "Tool result", callId: "c", text: '\x1b[32m{"status":"ok"}\x1b[0m' }]), /<dt>status<\/dt><dd><pre>ok<\/pre><\/dd>/);
+ // Inputs and prompts are never stripped.
+ assert.ok(render([{ kind: "tool", label: "Tool: Unknown", text: "\x1b[1mraw\x1b[0m" }]).includes("\x1b[1mraw"));
+
+ const notification = "<task-notification>\n<task-id>bosxfigqa</task-id>\n<tool-use-id>toolu_01</tool-use-id>\n<output-file>/private/tmp/tasks/bosxfigqa.output</output-file>\n<status>completed</status>\n<summary>Background command \"Wait for the registry\" completed (exit code 0)</summary>\n</task-notification>";
+ const task = render([{ kind: "prompt", label: "Prompt / input", text: notification }]);
+ assert.match(task, /<details class="event prompt" open><summary><span class="number">1<\/span> Task notification<\/summary>/);
+ assert.match(task, /<p class="task-summary">Background command &quot;Wait for the registry&quot; completed \(exit code 0\)<\/p>/);
+ assert.match(task, /<dt>task-id<\/dt><dd><pre>bosxfigqa<\/pre><\/dd>/); assert.match(task, /<dt>status<\/dt><dd><pre>completed<\/pre><\/dd>/);
+ assert.match(task, /<summary>Raw input<\/summary><pre><span>&lt;task-notification&gt;\n&lt;task-id&gt;bosxfigqa/);
+ // Other harnesses, partial, repeated, nested or trailing wrappers stay literal prompts.
+ assert.match(render([{ kind: "prompt", label: "Prompt / input", text: notification }], "pi"), /<\/span> Prompt \/ input<\/summary>/);
+ for (const literal of [notification.replace("</task-notification>", ""), notification.replace("<status>", "<status>a</status><status>"),
+  notification.replace("<summary>", "<summary><summary>x</summary>"), `${notification} trailing`, "<task-notification><task-id>x</task-id></task-notification>",
+  notification.replace("<status>", "<Status>").replace("</status>", "</Status>")]) {
+  assert.match(render([{ kind: "prompt", label: "Prompt / input", text: literal }]), /<\/span> Prompt \/ input<\/summary>/, literal);
+ }
+});
+
 test("Claude paste envelopes are presentation-only and require a complete matching wrapper", () => {
  const wrap = body => `<pasted_content id="sample-04e5">\n${body}\n</pasted_content id="sample-04e5">`;
  const render = (text, sourceAgent = 'claude', kind = 'prompt') => buildTurnDetailsPage({sourceAgent,events:[{kind,label:'Prompt',text}]}, '#');
@@ -458,6 +488,36 @@ test("Working page uses one short disclaimer instead of reader diagnostics", () 
  }
  const clipped = buildTurnDetailsPage({ events: [{ kind: 'tool', label: 'Tool: read', text: 'x'.repeat(20_000) }] }, '#');
  assert.match(clipped, /\[… truncated\]/, 'Keep the short inline marker where actual text is clipped.');
+});
+
+test("Working browser view: Expand all and Collapse all act on event cards only and survive Back", async t => {
+ // Static: the controls render hidden (script-revealed) only when there are cards.
+ assert.match(buildTurnDetailsPage({ events: [{ kind: "prompt", label: "Prompt", text: "x" }] }, "#"), /<div class="working-bulk" role="group" aria-label="All cards" hidden><button type="button" data-working-bulk="expand">Expand all<\/button><button type="button" data-working-bulk="collapse">Collapse all<\/button><\/div>/);
+ assert.doesNotMatch(buildTurnDetailsPage({ events: [] }, "#"), /data-working-bulk/);
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ const dir = await temp(t);
+ const events = [{ kind: "prompt", label: "Prompt", text: "Start" },
+  { kind: "tool", label: "Tool: Bash", text: JSON.stringify({ command: "ls" }), callId: "a" },
+  { kind: "result", label: "Tool result", text: '{"status":"ok"}', callId: "a" },
+  { kind: "tool", label: "Tool: Unknown", text: JSON.stringify({ query: "x" }), callId: "b" }];
+ const server = await createBrowserWatchServer(html, dir, { initialTurnDetails: async () => ({ events }) });
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ try {
+  const page = await browser.newPage(); await page.goto(server.url);
+  await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="turn-details"]')]);
+  const state = () => page.evaluate(() => ({ cards: [...document.querySelectorAll("details.event")].map(e => e.open), nested: [...document.querySelectorAll("details.event details")].map(e => e.open) }));
+  assert.equal(await page.$eval(".working-bulk", e => e.hidden), false, "the script reveals the controls");
+  assert.deepEqual((await state()).cards, [true, false, false, false]);
+  await page.click('[data-working-bulk="expand"]');
+  assert.deepEqual(await state(), { cards: [true, true, true, true], nested: [false, false, false] }, "nested raw sections stay closed");
+  await page.click('[data-working-bulk="collapse"]');
+  assert.deepEqual((await state()).cards, [false, false, false, false]);
+  await page.click('[data-working-bulk="expand"]');
+  await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="preview"]')]);
+  await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="turn-details"]')]);
+  assert.deepEqual((await state()).cards, [true, true, true, true], "the expanded state is restored on return");
+ } finally { await browser.close(); await server.close(); }
 });
 
 test("Turn details browser view preserves normal links/Back, keyboard controls and mobile layout", async t => {

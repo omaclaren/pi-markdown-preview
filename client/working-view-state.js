@@ -20,6 +20,19 @@
      if (Array.isArray(state.left) && state.left.length <= 250) outputs.forEach((e, i) => { if (Number.isFinite(state.left[i])) e.scrollLeft = Math.max(0, state.left[i]); });
     }
    } catch { /* Storage denial must not prevent reading or navigation. */ }
+   // Expand/Collapse all acts on event cards only, never nested raw sections.
+   // The controls stay hidden unless this script runs.
+   const bulk = root.querySelector('.working-bulk');
+   const cards = Array.from(root.querySelectorAll('details.event')).slice(0, 1000);
+   if (bulk && cards.length) {
+    bulk.hidden = false;
+    bulk.addEventListener('click', event => {
+     const button = event.target.closest?.('[data-working-bulk]');
+     if (!button || !bulk.contains(button)) return;
+     const open = button.getAttribute('data-working-bulk') === 'expand';
+     for (const card of cards) card.open = open;
+    });
+   }
    window.addEventListener('pagehide', () => {
     try {
      sessionStorage.setItem(key, JSON.stringify({

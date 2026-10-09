@@ -46,15 +46,21 @@ function fieldsView(record) {
 
 // A result that is exactly one non-empty JSON object or array: objects as
 // fields, arrays as bounded pretty JSON. The exact text stays under Raw output.
-function jsonResult(text) {
+function jsonResult(text, recorded = text) {
 	const source = text.trim();
 	if (!/^[[{]/.test(source)) return null;
 	let value;
 	try { value = JSON.parse(source); } catch { return null; }
 	if (value === null || typeof value !== "object" || !Object.keys(value).length) return null;
 	const view = Array.isArray(value) ? code(jsonText(value), "json-output") : fieldsView(value);
-	return `${view}<details class="recorded-output"><summary>Raw output</summary>${literalPre(text)}</details>`;
+	return `${view}${rawOutput(recorded)}`;
 }
+const rawOutput = text => `<details class="recorded-output"><summary>Raw output</summary>${literalPre(text)}</details>`;
+
+// Terminal colour and control sequences (CSI, OSC and charset designators) are
+// presentation noise in recorded tool output. The reading view hides them;
+// Raw output keeps the exact recorded text.
+const TERMINAL_SEQUENCE = /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]/g;
 
 function askedQuestions(args) {
 	return args.questions.map(q => `<section class="asked-question"><p class="question-header">${escape(q.header)}${typeof q.multiSelect === "boolean" ? ` · ${q.multiSelect ? "Multiple selections allowed" : "Single selection"}` : ""}</p><h2>${escape(q.question)}</h2><ul class="question-options">${q.options.map(o => `<li><strong>${escape(o.label)}</strong><div class="question-prose">${escape(o.description)}</div>${o.preview === undefined ? "" : textField("Preview", o.preview, "question-preview")}${options(o, ["label", "description", "preview"])}</li>`).join("")}</ul>${options(q, ["question", "header", "options", "multiSelect"])}</section>`).join("");
@@ -111,6 +117,49 @@ function claudeSlashCommand(value) {
 }
 const slashCommand = (event, fromClaude) => fromClaude && event.kind === "prompt" ? claudeSlashCommand(event.text) : null;
 
+// Claude records a background-task notification as one complete
+// <task-notification> wrapper of simple child fields, each at most once and
+// separated only by whitespace. Anything else stays an ordinary prompt.
+function claudeTaskNotification(value) {
+	const source = value.trim(), open = "<task-notification>", close = "</task-notification>";
+	if (!source.startsWith(open) || !source.endsWith(close)) return null;
+	const body = source.slice(open.length, -close.length);
+	if (body.includes(open) || body.includes(close)) return null;
+	const fields = new Map();
+	let at = 0;
+	const skip = () => { while (at < body.length && /\s/.test(body[at])) at++; };
+	for (skip(); at < body.length; skip()) {
+		const tag = /^<([a-z][a-z0-9-]{0,40})>/.exec(body.slice(at, at + 44))?.[1];
+		if (!tag || fields.has(tag)) return null;
+		const start = at + tag.length + 2, end = body.indexOf(`</${tag}>`, start);
+		if (end < 0) return null;
+		const field = body.slice(start, end);
+		if (field.includes(`<${tag}>`)) return null;
+		fields.set(tag, field);
+		at = end + tag.length + 3;
+	}
+	return fields.has("summary") || fields.has("status") ? Object.fromEntries(fields) : null;
+}
+function taskNotificationView(fields) {
+	const { summary, ...rest } = fields;
+	return `${summary?.trim() ? `<p class="task-summary">${escape(summary.trim())}</p>` : ""}${Object.keys(rest).length ? fieldsView(rest) : ""}`;
+}
+
+// Claude-only compact views of recognised prompt envelopes. Raw input keeps
+// the exact recorded text.
+function claudeEnvelope(event, fromClaude) {
+	if (!fromClaude || event.kind !== "prompt") return null;
+	const slash = claudeSlashCommand(event.text);
+	if (slash !== null) return { label: "Slash command", html: literalPre(slash) };
+	const task = claudeTaskNotification(event.text);
+	return task ? { label: "Task notification", html: taskNotificationView(task) } : null;
+}
+
+function resultView(text) {
+	const shown = text.replace(TERMINAL_SEQUENCE, "");
+	return jsonResult(shown, text) ?? (shown === text ? literalPre(text) : `${literalPre(shown)}${rawOutput(text)}`);
+}
+
 // Recognise recorded argument shapes, not code syntax. Never reindent, split
 // operators, resolve file paths, infer a successful edit, or execute anything.
 function eventContent(event, fromClaude = false) {
@@ -120,11 +169,11 @@ function eventContent(event, fromClaude = false) {
 			? `<p class="recorded-image-error">Recorded image unavailable: ${escape(IMAGE_UNAVAILABLE[image.unavailable])}</p>`
 			: `<figure class="recorded-image"><button type="button" class="recorded-image-open" aria-expanded="false" aria-label="Recorded image ${i + 1} · ${image.width} × ${image.height}. Enlarge"><img data-recorded-src="data:${image.mimeType};base64,${image.data}" width="${image.width}" height="${image.height}" alt="Recorded tool-result image ${i + 1}" decoding="async"><span>Enlarge</span></button><figcaption>${image.width} × ${image.height} · ${escape(image.mimeType.slice(6).toUpperCase())}</figcaption><p class="recorded-image-error" role="status" hidden></p></figure>`).join('');
 		const answer = fromClaude && /^Tool result:\s*(?:functions\.)?AskUserQuestion$/i.test(event.label);
-		return (event.text || answer ? `<label class="output-wrap"><input type="checkbox" aria-label="Wrap lines for ${escape(event.label || "tool output")}">Wrap lines</label>${answer ? answeredQuestions(event) : jsonResult(event.text) ?? literal}` : '') + images;
+		return (event.text || answer ? `<label class="output-wrap"><input type="checkbox" aria-label="Wrap lines for ${escape(event.label || "tool output")}">Wrap lines</label>${answer ? answeredQuestions(event) : resultView(event.text)}` : '') + images;
 	}
 	if (event.kind === "prompt") {
-		const slash = slashCommand(event, fromClaude);
-		if (slash !== null) return `${literalPre(slash)}<details class="recorded-input"><summary>Raw input</summary>${literal}</details>`;
+		const envelope = claudeEnvelope(event, fromClaude);
+		if (envelope) return `${envelope.html}<details class="recorded-input"><summary>Raw input</summary>${literal}</details>`;
 		// Suppress only empty leading lines in the reading view. Preserve the
 		// first content line's indentation and keep the recorded input available.
 		const body = (fromClaude ? claudePasteBody(event.text) : null) ?? event.text;
@@ -185,12 +234,14 @@ export function buildTurnDetailsPage(details, responseUrl, label = "", appearanc
 	const input = e => e.kind === "prompt" || e.label === "User shell command";
 	const localOutput = e => e?.kind === "result" && !e.callId && ["Command output", "Command error output"].includes(e.label);
 	const localCommand = i => slashCommand(events[i], fromClaude) !== null && localOutput(events[i + 1]);
-	const rows = events.map((e, i) => `<details class="event ${e.kind}"${input(e) && !localCommand(i) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(slashCommand(e, fromClaude) !== null ? "Slash command" : e.label || e.kind)}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
+	const rows = events.map((e, i) => `<details class="event ${e.kind}"${input(e) && !localCommand(i) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(claudeEnvelope(e, fromClaude)?.label ?? (e.label || e.kind))}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Working</title><style>
 ${AGENT_PAGE_STYLE}
 ${appearanceStyle}
 main > nav { margin-bottom:18px } main > nav a { display:inline-flex; align-items:center; min-height:32px; padding:6px 10px; border:1px solid var(--line); border-radius:6px; color:inherit; font:600 12px/1.2 system-ui; text-decoration:none } main > nav a:hover { background:var(--hover) }
-.subtitle,.notices { color:var(--muted); font-size:12px } .subtitle { margin:0 0 8px; overflow-wrap:anywhere } .notices { margin:0 0 18px }
+.subtitle,.notices { color:var(--muted); font-size:12px } .subtitle { margin:0 0 8px; overflow-wrap:anywhere } .notices { margin:0 }
+.notices-row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 12px; margin:0 0 18px } .working-bulk { display:flex; gap:6px } .working-bulk[hidden] { display:none }
+.working-bulk button { min-height:28px; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; font:600 12px/1.2 system-ui; cursor:pointer } .working-bulk button:hover { background:var(--hover) } .working-bulk button:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 .event { margin:12px 0; border:1px solid var(--line); border-radius:10px; background:var(--panel); overflow:hidden } summary { padding:10px 14px; cursor:pointer; overflow-wrap:anywhere; font-weight:600 } summary:hover { background:var(--hover) } summary:focus-visible { outline:2px solid var(--muted); outline-offset:-4px; border-radius:6px } a:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 .number { color:var(--muted); font-variant-numeric:tabular-nums; margin-right:8px }
 .event-content { border-top:1px solid var(--line) }
@@ -199,7 +250,7 @@ pre { margin:0; padding:12px 14px; background:transparent; font:0.9em/1.6 ui-mon
 .tool-path { padding:12px 14px } .tool-path pre { padding:2px 0 0 } .field-label,.tool-field h3,.edit-replacement h2 { font:600 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--muted); margin:0 }
 .edit-replacement { padding:0 14px 14px } .edit-replacement h2 { margin:0 0 10px } .tool-field { margin:8px 0 } .tool-field pre { padding:4px 0 } .empty-text { color:var(--muted); font-size:12px; margin:4px 0 } .edit-replacement .tool-options { margin:12px 0 0 }
 .tool-options { display:grid; grid-template-columns:fit-content(40%) minmax(0,1fr); gap:6px 12px; margin:0 14px 12px; font-size:12px } .tool-options dt { color:var(--muted); overflow-wrap:anywhere } .tool-options dd { margin:0; min-width:0 } .tool-options pre { padding:0; font-size:12px }
-.tool-fields { padding:12px 14px 2px } .tool-fields .tool-options { margin:0 0 10px } .tool-fields .tool-field { margin:0 0 10px } .tool-fields .empty-text { margin:0 }
+.task-summary { margin:12px 14px 0; white-space:pre-wrap; overflow-wrap:anywhere } .tool-fields { padding:12px 14px 2px } .tool-fields .tool-options { margin:0 0 10px } .tool-fields .tool-field { margin:0 0 10px } .tool-fields .empty-text { margin:0 }
 .recorded-arguments,.recorded-input { border-top:1px solid var(--line) } .recorded-arguments > summary,.recorded-input > summary { color:var(--muted); font-size:12px; font-weight:400 }
 .prompt pre,.progress pre,.reasoning pre { font:inherit }
 .asked-question,.question-reply { margin:14px } .asked-question h2,.question-reply h3 { font-family:inherit; font-size:1em; font-weight:600; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 8px } .question-header { color:var(--muted); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 6px }
@@ -212,6 +263,6 @@ pre { margin:0; padding:12px 14px; background:transparent; font:0.9em/1.6 ui-mon
 .recorded-image-open img { display:block; width:auto; height:auto; max-width:100%; max-height:220px; object-fit:contain } .recorded-image-open span { display:block; padding-top:4px } .recorded-image figcaption,.recorded-image-error { font-size:12px; color:var(--muted); overflow-wrap:anywhere } .recorded-image figcaption { margin-top:6px } .event-content > .recorded-image-error { margin:14px } .inline-expanded { cursor:zoom-out } .inline-expanded img { max-height:none }
 .recorded-image-dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:12px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:auto } .recorded-image-dialog::backdrop { background:#000a } .recorded-image-dialog-header { display:flex; align-items:center; justify-content:space-between; gap:16px; font-size:12px; margin-bottom:8px } .recorded-image-dialog button { font:inherit; color:inherit; background:var(--hover); border:1px solid var(--line); border-radius:6px; min-height:44px; min-width:44px; padding:6px 12px; cursor:pointer } .recorded-image-dialog img { display:block; width:auto; height:auto; max-width:100%; max-height:calc(100dvh - 120px); object-fit:contain }
 @media print { .recorded-image-open { border:0; padding:0 } .recorded-image-open span,.recorded-image-dialog { display:none } }
-@media(max-width:500px) { pre { padding:12px } } @media(pointer:coarse) { .event summary { min-height:44px } .output-wrap { min-height:44px; top:0 } } @media print { nav,.output-wrap { display:none } .event { break-inside:avoid } .result pre { white-space:pre-wrap; overflow-wrap:anywhere } }
-</style></head><body class="pi-preview-working"><main id="preview-root">${responseUrl ? `<nav><a href="${escape(responseUrl)}">← Preview</a></nav>` : ""}<h1>Working</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Prompt and activity for this response.</p><p class="notices">Read-only view; some conversation content may be missing or shortened.</p>${rows || "<p>No matching prompt or working details are available.</p>"}</main></body></html>`;
+@media(max-width:500px) { pre { padding:12px } } @media(pointer:coarse) { .event summary, .working-bulk button { min-height:44px } .output-wrap { min-height:44px; top:0 } } @media print { nav,.output-wrap,.working-bulk { display:none } .event { break-inside:avoid } .result pre { white-space:pre-wrap; overflow-wrap:anywhere } }
+</style></head><body class="pi-preview-working"><main id="preview-root">${responseUrl ? `<nav><a href="${escape(responseUrl)}">← Preview</a></nav>` : ""}<h1>Working</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Prompt and activity for this response.</p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p>${rows ? '<div class="working-bulk" role="group" aria-label="All cards" hidden><button type="button" data-working-bulk="expand">Expand all</button><button type="button" data-working-bulk="collapse">Collapse all</button></div>' : ""}</div>${rows || "<p>No matching prompt or working details are available.</p>"}</main></body></html>`;
 }
