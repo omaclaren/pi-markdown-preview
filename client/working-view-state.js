@@ -2,8 +2,36 @@
 (function (globalObject) {
  "use strict";
  globalObject.PiMarkdownPreviewWorkingState = {
+  // A scope enables saved open/wrap/scroll state (Working). Without one (Live,
+  // whose cards change), only the Expand all/Collapse all button is installed.
   install(root, scope, retainedScopes) {
-   if (!root || !scope) return;
+   if (!root) return;
+   // One button acts on event cards only, never nested raw sections. Its label
+   // is always the action a click takes: Collapse all only when every card is
+   // open. It stays hidden unless this script runs and there are cards.
+   const bulk = root.querySelector('.working-bulk');
+   const cards = () => Array.from(root.querySelectorAll('details.event')).slice(0, 1000);
+   if (bulk) {
+    let pending = false;
+    const label = () => {
+     pending = false;
+     const current = cards();
+     bulk.hidden = !current.length;
+     bulk.textContent = current.length && current.every(card => card.open) ? 'Collapse all' : 'Expand all';
+    };
+    label();
+    bulk.addEventListener('click', () => {
+     const current = cards();
+     const open = !current.every(card => card.open);
+     for (const card of current) card.open = open;
+     label();
+    });
+    // Manual opening/closing and added cards update the label, once per frame.
+    const later = () => { if (!pending) { pending = true; requestAnimationFrame(label); } };
+    root.addEventListener('toggle', event => { if (event.target instanceof Element && event.target.matches('details.event')) later(); }, true);
+    root.addEventListener('pi-markdown-preview-cards-changed', later);
+   }
+   if (!scope) return;
    const prefix = 'pi-markdown-preview:working-ui:';
    const key = prefix + scope;
    const details = Array.from(root.querySelectorAll('details')).slice(0, 1000);
@@ -20,26 +48,7 @@
      if (Array.isArray(state.left) && state.left.length <= 250) outputs.forEach((e, i) => { if (Number.isFinite(state.left[i])) e.scrollLeft = Math.max(0, state.left[i]); });
     }
    } catch { /* Storage denial must not prevent reading or navigation. */ }
-   // One button acts on event cards only, never nested raw sections. Its label
-   // is always the action a click takes: Collapse all only when every card is
-   // open. It stays hidden unless this script runs.
-   const bulk = root.querySelector('.working-bulk');
-   const cards = Array.from(root.querySelectorAll('details.event')).slice(0, 1000);
-   if (bulk && cards.length) {
-    let pending = false;
-    const label = () => { pending = false; bulk.textContent = cards.every(card => card.open) ? 'Collapse all' : 'Expand all'; };
-    bulk.hidden = false; label();
-    bulk.addEventListener('click', () => {
-     const open = !cards.every(card => card.open);
-     for (const card of cards) card.open = open;
-     label();
-    });
-    // Manual opening/closing updates the label, coalesced per frame.
-    root.addEventListener('toggle', event => {
-     if (pending || !cards.includes(event.target)) return;
-     pending = true; requestAnimationFrame(label);
-    }, true);
-   }
+   if (bulk) root.dispatchEvent(new CustomEvent('pi-markdown-preview-cards-changed'));
    window.addEventListener('pagehide', () => {
     try {
      sessionStorage.setItem(key, JSON.stringify({

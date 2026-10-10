@@ -221,21 +221,13 @@ function eventContent(event, fromClaude = false) {
 	return literal;
 }
 
-/** Recorded text stays inert; only validated raster bytes become image elements. */
-export function buildTurnDetailsPage(details, responseUrl, label = "", appearanceStyle = "") {
-	const bounded = createTurnDetails();
-	for (const e of Array.isArray(details?.events) ? details.events.slice(0, 251) : []) {
-		if (["prompt", "progress", "reasoning", "tool", "result"].includes(e?.kind)) bounded.add(e.kind, e.label, e.text, e.callId, e.images, details?.sourceAgent === "claude" ? e.questionAnswers : undefined);
-	}
-	const { events } = bounded.result;
-	const fromClaude = details?.sourceAgent === "claude";
-	// Inputs open by default. Only recognised local-command history (a slash
-	// command answered by local command output) starts collapsed.
-	const input = e => e.kind === "prompt" || e.label === "User shell command";
-	const localOutput = e => e?.kind === "result" && !e.callId && ["Command output", "Command error output"].includes(e.label);
-	const localCommand = i => slashCommand(events[i], fromClaude) !== null && localOutput(events[i + 1]);
-	const rows = events.map((e, i) => `<details class="event ${e.kind}"${input(e) && !localCommand(i) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(claudeEnvelope(e, fromClaude)?.label ?? (e.label || e.kind))}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
-	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Working</title><style>
+const LIVE_STYLE = `.live-omitted { color:var(--muted); font-size:12px; margin:0 0 12px } .live-status a,[data-live-status] a { color:inherit; text-underline-offset:3px }
+.live-newer { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50; min-height:32px; padding:6px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; box-shadow:0 2px 8px #0002; cursor:pointer } .live-newer[hidden] { display:none } .live-newer:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+@media(pointer:coarse) { .live-newer { min-height:44px } } @media print { .live-newer { display:none } }`;
+
+// Shared head for Working and Live pages: same tokens, cards and controls.
+function pageHead(title, appearanceStyle = "") {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title><style>
 ${AGENT_PAGE_STYLE}
 ${appearanceStyle}
 main > nav { margin-bottom:18px } main > nav a { display:inline-flex; align-items:center; min-height:32px; padding:6px 10px; border:1px solid var(--line); border-radius:6px; color:inherit; font:600 12px/1.2 system-ui; text-decoration:none } main > nav a:hover { background:var(--hover) }
@@ -264,5 +256,50 @@ pre { margin:0; padding:12px 14px; background:transparent; font:0.9em/1.6 ui-mon
 .recorded-image-dialog { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:12px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); overflow:auto } .recorded-image-dialog::backdrop { background:#000a } .recorded-image-dialog-header { display:flex; align-items:center; justify-content:space-between; gap:16px; font-size:12px; margin-bottom:8px } .recorded-image-dialog button { font:inherit; color:inherit; background:var(--hover); border:1px solid var(--line); border-radius:6px; min-height:44px; min-width:44px; padding:6px 12px; cursor:pointer } .recorded-image-dialog img { display:block; width:auto; height:auto; max-width:100%; max-height:calc(100dvh - 120px); object-fit:contain }
 @media print { .recorded-image-open { border:0; padding:0 } .recorded-image-open span,.recorded-image-dialog { display:none } }
 @media(max-width:500px) { pre { padding:12px } } @media(pointer:coarse) { .event summary, .working-bulk { min-height:44px } .output-wrap { min-height:44px; top:0 } } @media print { nav,.output-wrap,.working-bulk { display:none } .event { break-inside:avoid } .result pre { white-space:pre-wrap; overflow-wrap:anywhere } }
-</style></head><body class="pi-preview-working"><main id="preview-root">${responseUrl ? `<nav><a href="${escape(responseUrl)}">← Preview</a></nav>` : ""}<h1>Working</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Prompt and activity for this response.</p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p>${rows ? '<button type="button" class="working-bulk" hidden>Expand all</button>' : ""}</div>${rows || "<p>No matching prompt or working details are available.</p>"}</main></body></html>`;
+${LIVE_STYLE}
+</style></head>`;
+}
+
+/** Recorded text stays inert; only validated raster bytes become image elements. */
+export function buildTurnDetailsPage(details, responseUrl, label = "", appearanceStyle = "") {
+	const bounded = createTurnDetails();
+	for (const e of Array.isArray(details?.events) ? details.events.slice(0, 251) : []) {
+		if (["prompt", "progress", "reasoning", "tool", "result"].includes(e?.kind)) bounded.add(e.kind, e.label, e.text, e.callId, e.images, details?.sourceAgent === "claude" ? e.questionAnswers : undefined);
+	}
+	const { events } = bounded.result;
+	const fromClaude = details?.sourceAgent === "claude";
+	// Inputs open by default. Only recognised local-command history (a slash
+	// command answered by local command output) starts collapsed.
+	const input = e => e.kind === "prompt" || e.label === "User shell command";
+	const localOutput = e => e?.kind === "result" && !e.callId && ["Command output", "Command error output"].includes(e.label);
+	const localCommand = i => slashCommand(events[i], fromClaude) !== null && localOutput(events[i + 1]);
+	const rows = events.map((e, i) => `<details class="event ${e.kind}"${input(e) && !localCommand(i) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(claudeEnvelope(e, fromClaude)?.label ?? (e.label || e.kind))}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
+	return `${pageHead("Working", appearanceStyle)}<body class="pi-preview-working"><main id="preview-root">${responseUrl ? `<nav><a href="${escape(responseUrl)}">← Preview</a></nav>` : ""}<h1>Working</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Prompt and activity for this response.</p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p>${rows ? '<button type="button" class="working-bulk" hidden>Expand all</button>' : ""}</div>${rows || "<p>No matching prompt or working details are available.</p>"}</main></body></html>`;
+}
+
+
+// ---- Live: recorded activity of one in-progress turn ----
+/** One live card, from the same escaping renderer as Working. Inputs start open. */
+export function renderLiveCard(event, number, fromClaude = true) {
+	const open = event.kind === "prompt" || event.label === "User shell command";
+	const label = claudeEnvelope(event, fromClaude)?.label ?? (event.label || event.kind);
+	return `<details class="event ${escape(event.kind)}" data-event-id="${escape(event.id)}" data-event-version="${escape(event.version)}"${open ? " open" : ""}><summary><span class="number"${event.callId ? ` title="Call ID: ${escape(event.callId)}"` : ""}>${number}</span> ${escape(label)}</summary><div class="event-content">${eventContent(event, fromClaude)}</div></details>`;
+}
+
+/** Status line: only what the record says. Links are server-built, same-origin. */
+export function liveStatusHtml({ status, completedHref, workingHref, newerHref } = {}) {
+	const parts = [];
+	if (status === "completed") parts.push(completedHref
+		? `Turn completed. <a href="${escape(completedHref)}">Open its response</a>${workingHref ? ` · <a href="${escape(workingHref)}">Working</a>` : ""}`
+		: "Turn completed; its response will appear in Preview shortly.");
+	else if (status === "interrupted") parts.push("Turn interrupted.");
+	else if (status === "error") parts.push("Turn ended with an API error.");
+	if (newerHref) parts.push(`A newer turn has started. <a href="${escape(newerHref)}">Follow it</a>`);
+	return parts.join(" ");
+}
+
+export function buildLivePage(snapshot, { label = "", appearanceStyle = "", statusHtml = "" } = {}) {
+	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, true)).join("\n");
+	const omitted = snapshot.omitted;
+	return `${pageHead("Live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Live · recorded activity</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Updated <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices" data-live-status role="status">${statusHtml}</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;
 }

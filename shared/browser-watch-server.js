@@ -11,7 +11,7 @@ import { buildImagePagePreview, IMAGE_CONTENT_TYPES as RESOURCE_CONTENT_TYPES } 
 import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
-import { buildTurnDetailsPage } from "./turn-details-page.js";
+import { buildTurnDetailsPage, buildLivePage, liveStatusHtml, renderLiveCard } from "./turn-details-page.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 
@@ -26,10 +26,12 @@ const ABSOLUTE_IMAGE_PREFIX = "/__pi_markdown_preview_absolute_image__/";
 const DOCUMENT_PREFIX = "/__pi_markdown_preview_document__/";
 const NATIVE_ACTION_PREFIX = "/__pi_markdown_preview_native_action__/";
 const TURN_PREFIX = "/__pi_markdown_preview_turn__/";
+const LIVE_PREFIX = "/__pi_markdown_preview_live__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-position.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WORKING_STATE_SOURCE = readFileSync(new URL("../client/working-view-state.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WORKING_IMAGES_SOURCE = readFileSync(new URL("../client/working-images.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const LIVE_VIEW_SOURCE = readFileSync(new URL("../client/live-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_HISTORY_BYTE_LIMIT = 32 * 1024 * 1024;
@@ -296,7 +298,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 			: `${wrapScopeMeta}\n${watchedHtml}`;
 	}
 
-	const working = navigation.view === "working";
+	const live = navigation.view === "live";
+	// Live shares Working's scripts and history links, but keeps its own URL.
+	const working = navigation.view === "working" || live;
 	const preserveReadingPosition = !working && navigation.preserveReadingPosition === true && Boolean(navigation.wrapScope);
 	const positionBase = working ? `${navigation.wrapScope}:working:${navigation.instance}` : navigation.wrapScope;
 	const positionScope = preserveReadingPosition ? positionBase : `${positionBase}:revision:${navigation.revision}`;
@@ -306,7 +310,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const isWaiting = navigation.isWaiting === true;
 	const sourceLabel = navigation.sourceLabel?.trim();
 	if (sourceLabel) {
-		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — ${working ? "Working" : navigation.titleSuffix || "Markdown Preview"}`);
+		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — ${live ? "Live" : working ? "Working" : navigation.titleSuffix || "Markdown Preview"}`);
 		watchedHtml = /<title\b[^>]*>[\s\S]*?<\/title>/i.test(watchedHtml)
 			? watchedHtml.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, `<title>${escapedTitle}</title>`)
 			: watchedHtml.replace(/<\/head>/i, `<title>${escapedTitle}</title>\n</head>`);
@@ -332,7 +336,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
-  ${navigation.turnDetailsUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"${working ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)" aria-keyshortcuts="Control+Alt+W">Working</a></span>` : ""}
+  ${navigation.turnDetailsUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"${working && !live ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)" aria-keyshortcuts="Control+Alt+W">Working</a>${live ? '<a data-watch-control="live-current" aria-current="page">Live</a>' : ''}</span>` : ""}
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
     <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
     <span id="pi-markdown-preview-watch-new" data-watch-control="new" hidden>New</span>
@@ -344,10 +348,11 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left; add Shift for the oldest)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
       <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
       <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" title="Latest revision (Option/Alt+Shift+Right)" aria-keyshortcuts="Alt+Shift+ArrowRight" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
+      ${navigation.liveUrl ? `<a data-watch-control="live" href="${escapeBrowserWatchHtmlAttribute(navigation.liveUrl)}" title="Follow the current turn's recorded activity">Follow current turn</a>` : ""}
       <button data-watch-control="wrap-code" type="button" hidden></button>
     </div>
   </div>
-  <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" title="Copy an authenticated link for another browser" aria-live="polite">Copy link</button>
+  <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" ${live ? 'disabled title="Copy link is not available for a live turn. Open its response from the status line once the turn completes."' : 'title="Copy an authenticated link for another browser"'} aria-live="polite">Copy link</button>
   <div id="pi-markdown-preview-watch-share-panel" data-watch-control="share-panel" role="dialog" aria-label="Transferable preview link" hidden>
     <span>Copy this link:</span>
     <input data-watch-control="share-input" aria-label="Authenticated preview link" readonly />
@@ -363,7 +368,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const positionScope = ${JSON.stringify(positionScope)};
   const counterpartScope = ${JSON.stringify(counterpartScope)};
   const retainedScopes = ${JSON.stringify(revisions.map(r => `${positionBase}:revision:${r}`))};
-  window.PiMarkdownPreviewWorkingState?.install(document.getElementById('preview-root'), positionScope, retainedScopes);
+  const live = ${live};
+  window.PiMarkdownPreviewWorkingState?.install(document.getElementById('preview-root'), live ? null : positionScope, retainedScopes);
+  window.PiMarkdownPreviewLive?.install(document.getElementById('preview-root'));
   window.PiMarkdownPreviewWorkingImages?.install(document.getElementById('preview-root'));
   try {
     const prefix = 'pi-markdown-preview:reading-position:' + ${JSON.stringify(positionBase)} + ':revision:';
@@ -588,7 +595,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const canonicalTarget = new URL(revisionUrl(revision), window.location.href);
   if (previewLink && workingLink) { canonicalTarget.searchParams.set('identity', identity); canonicalTarget.searchParams.set('instance', instance); }
   const canonicalUrl = canonicalTarget.pathname + canonicalTarget.search + window.location.hash;
-  if (window.location.pathname + window.location.search + window.location.hash !== canonicalUrl) {
+  if (!live && window.location.pathname + window.location.search + window.location.hash !== canonicalUrl) {
     history.replaceState(null, '', canonicalUrl);
   }
   const setLink = (link, target) => {
@@ -824,7 +831,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 })();
 </script>`;
 
-	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}`;
+	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}${live ? `<script>${LIVE_VIEW_SOURCE}</script>\n` : ""}`;
 	const watchUi = `${readingPositionScript}${watchNavigation}\n${watchScript}`;
 	const completeHtml = /<\/body>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/body>/i, `${watchUi}\n</body>`)
@@ -877,7 +884,12 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  * `initialTurnDetails` and updateDocument's `turnDetails` opt in per response.
  * These lazy, read-only callbacks must bound reads and respect cancellation;
  * they are never called for root HTML, polling, HEAD, or unretained revisions.
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal, sourceRevision?: number) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void>, initialTurnDetails?: (signal: AbortSignal) => Promise<object> }} [options]
+ * `live` opts into Live: `current(signal)` returns the latest turn's anchor and
+ * `snapshot(anchor, signal)` that turn's bounded window (see
+ * createLiveTurnProjector). Both are host-owned and lease-renewing; neither is
+ * called for HEAD. `initialResponseKey`/updateDocument's `responseKey` let a
+ * completed live turn link to its exact retained response.
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal, sourceRevision?: number) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void>, initialTurnDetails?: (signal: AbortSignal) => Promise<object>, initialResponseKey?: string, live?: { current: (signal?: AbortSignal) => Promise<string | undefined>, snapshot: (anchor: string, signal?: AbortSignal) => Promise<any> } }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const fixedPort = options.port ?? 0;
@@ -953,7 +965,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			byteSize: Buffer.byteLength(rewrittenHtml, "utf8"),
 		};
 	};
-	let documents = [{ ...buildDocument(1, initialHtml, lexicalResourceRoot, options.htmlFile), turnDetails: options.initialTurnDetails }];
+	let documents = [{ ...buildDocument(1, initialHtml, lexicalResourceRoot, options.htmlFile), turnDetails: options.initialTurnDetails, responseKey: options.initialResponseKey }];
 	/** Per-document lazy reads: bounded concurrency, no persisted trace cache. */
 	const pendingTurns = new Map();
 	/** Recently opened document snapshots retain their exact media/link routes. */
@@ -1015,6 +1027,12 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 
 	// Only call after authentication and watcher identity checks. Preserve the
 	// error status and exact-instance boundary; recovery requires a real click.
+	/** @param {import("node:http").ServerResponse} res @param {number} status @param {object} value */
+	const respondJson = (res, status, value) => {
+		res.writeHead(status, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" });
+		res.end(JSON.stringify(value));
+	};
+
 	const respondRecovery = (req, res, status, title, message, document, bootstrap = false, retry = false) => {
 		const actions = [];
 		if (retry && document) actions.push({ name: "retry", label: "Try again", href: `${TURN_PREFIX}${document.revision}?identity=${identity}&instance=${instance}` });
@@ -1090,6 +1108,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				revisions: documents.map((document) => document.revision),
 				isWaiting: !hasHistoryDocument,
 				turnDetailsUrl: selectedDocument.turnDetails ? `${TURN_PREFIX}${selectedDocument.revision}?identity=${identity}&instance=${instance}` : undefined,
+				liveUrl: options.live ? `${LIVE_PREFIX}?identity=${identity}&instance=${instance}` : undefined,
 				sourceLabel: options.sourceLabel,
 				titleSuffix: options.titleSuffix,
 				wrapScope,
@@ -1158,6 +1177,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				const html = prepareBrowserWatchHtml(page, {
 					view: "working", revision: document.revision, revisions: documents.map(d => d.revision),
 					turnDetailsUrl: `${TURN_PREFIX}${document.revision}?identity=${identity}&instance=${instance}`,
+					liveUrl: options.live ? `${LIVE_PREFIX}?identity=${identity}&instance=${instance}` : undefined,
 					sourceLabel: options.sourceLabel, wrapScope, identity, instance, reconnectAfterStop: fixedPort !== 0,
 				}, scriptNonce);
 				res.writeHead(200, turnSecurityHeaders(scriptNonce));
@@ -1167,6 +1187,77 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const retained = documents.includes(document);
 					respondRecovery(req, res, retained ? 503 : 404, retained ? "Working unavailable" : "Response no longer retained",
 						retained ? "Recorded turn details could not be read. You can try again or view this response in Preview." : "This exact response is no longer available in the retained history.", retained ? document : undefined, false, retained);
+				}
+			}
+			return;
+		}
+
+		if (requestUrl.pathname.startsWith(LIVE_PREFIX)) {
+			if (!options.live) { respondText(res, 404, "Live is not enabled for this preview."); return; }
+			if (requestedIdentity !== identity) { respondText(res, 409, "This live link belongs to a different preview."); return; }
+			if (requestUrl.searchParams.get("instance") !== instance) {
+				respondRecovery(req, res, 409, "Live link expired", "This live view belongs to an earlier preview run. Open the current preview to reconnect."); return;
+			}
+			const rest = requestUrl.pathname.slice(LIVE_PREFIX.length);
+			const match = /^([A-Za-z0-9_-]{1,128})(\/updates)?$/.exec(rest);
+			if (rest !== "" && !match) { respondText(res, 404, "Unknown live view."); return; }
+			const scriptNonce = randomBytes(18).toString("base64url");
+			// HEAD never starts a lease or reads recorded activity.
+			if (method === "HEAD") { res.writeHead(200, match?.[2] ? { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" } : turnSecurityHeaders(scriptNonce)); res.end(); return; }
+			const query = `identity=${identity}&instance=${instance}`;
+			const controller = new AbortController();
+			res.once("close", () => controller.abort());
+			// Status: only what the record says; completion links to the exact retained response.
+			const statusFor = snapshot => {
+				const document = snapshot.finalKey ? documents.find(d => d.responseKey === snapshot.finalKey) : undefined;
+				return liveStatusHtml({
+					status: snapshot.status,
+					completedHref: document ? `/?revision=${document.revision}&${query}` : undefined,
+					workingHref: document?.turnDetails ? `${TURN_PREFIX}${document.revision}?${query}` : undefined,
+					newerHref: snapshot.newerAnchor ? `${LIVE_PREFIX}${encodeURIComponent(snapshot.newerAnchor)}?${query}` : undefined,
+				});
+			};
+			try {
+				if (rest === "") {
+					const anchor = await options.live.current(controller.signal);
+					if (closed || res.destroyed) return;
+					if (typeof anchor !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(anchor)) {
+						respondRecovery(req, res, 404, "No turn recorded yet", "Live shows a turn once its first prompt is recorded in this session. Try again after sending a prompt."); return;
+					}
+					res.writeHead(302, { ...NON_HTML_SECURITY_HEADERS, Location: `${LIVE_PREFIX}${anchor}?${query}` }); res.end(); return;
+				}
+				const snapshot = await options.live.snapshot(match[1], controller.signal);
+				if (closed || res.destroyed) return;
+				if (match[2]) {
+					if (!snapshot) { respondJson(res, 404, { gone: true }); return; }
+					const [generation, sequenceText] = (requestUrl.searchParams.get("cursor") ?? "").split(":");
+					const since = Number(sequenceText);
+					const resync = generation !== snapshot.generation || !Number.isInteger(since) || since > snapshot.sequence;
+					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: statusFor(snapshot), updatedAt: snapshot.updatedAt, omitted: snapshot.omitted };
+					if (!resync && since === snapshot.sequence) { respondJson(res, 200, { ...base, unchanged: true }); return; }
+					const upserts = snapshot.events.flatMap((event, i) => resync || event.changed > since
+						? [{ id: event.id, version: event.version, html: renderLiveCard(event, snapshot.omitted + i + 1, true) }] : []);
+					respondJson(res, 200, { ...base, resync, ids: snapshot.events.map(event => event.id), upserts });
+					return;
+				}
+				if (!snapshot) {
+					respondRecovery(req, res, 404, "Turn no longer retained", "Live keeps only the latest turns of a session. Open the current preview, then follow the current turn from its controls."); return;
+				}
+				const latest = documents[documents.length - 1];
+				const latestWorking = documents.findLast(d => d.turnDetails);
+				const page = buildLivePage(snapshot, { label: options.sourceLabel, appearanceStyle: previewAppearanceStyle(latest.html), statusHtml: statusFor(snapshot) });
+				const html = prepareBrowserWatchHtml(page, {
+					view: "live", revision: latest.revision, revisions: documents.map(d => d.revision),
+					turnDetailsUrl: latestWorking ? `${TURN_PREFIX}${latestWorking.revision}?${query}` : undefined,
+					liveUrl: `${LIVE_PREFIX}?${query}`,
+					sourceLabel: options.sourceLabel, wrapScope, identity, instance, reconnectAfterStop: fixedPort !== 0,
+				}, scriptNonce);
+				res.writeHead(200, turnSecurityHeaders(scriptNonce));
+				res.end(html);
+			} catch {
+				if (!closed && !res.destroyed) {
+					if (match?.[2]) respondJson(res, 503, { error: "unavailable" });
+					else respondRecovery(req, res, 503, "Live unavailable", "Recorded activity could not be read. Try again shortly.");
 				}
 			}
 			return;
@@ -1477,11 +1568,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			prunePollingClients();
 			return eventClients.size + pollingClients.size;
 		},
-		/** @param {string} html @param {{ appendToHistory?: boolean, turnDetails?: (signal: AbortSignal) => Promise<object> }} [update] */
-		updateDocument(html, { appendToHistory = true, turnDetails } = {}) {
+		/** @param {string} html @param {{ appendToHistory?: boolean, turnDetails?: (signal: AbortSignal) => Promise<object>, responseKey?: string }} [update] */
+		updateDocument(html, { appendToHistory = true, turnDetails, responseKey } = {}) {
 			if (closed) return documents[documents.length - 1].revision;
 			revision += 1;
-			const nextDocument = { ...buildDocument(revision, html, lexicalResourceRoot, options.htmlFile), turnDetails };
+			const nextDocument = { ...buildDocument(revision, html, lexicalResourceRoot, options.htmlFile), turnDetails, responseKey };
 			if (appendToHistory && hasHistoryDocument) {
 				documents.push(nextDocument);
 			} else {

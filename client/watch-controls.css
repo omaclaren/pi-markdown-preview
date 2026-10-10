@@ -51,6 +51,7 @@ body.pi-preview-working main { padding-top: max(72px, calc(var(--pi-preview-watc
 #pi-markdown-preview-watch-nav button[aria-disabled="true"] { opacity: 0.45; cursor: default; }
 #pi-markdown-preview-watch-nav a[aria-disabled="true"] { pointer-events: none; }
 #pi-markdown-preview-watch-copy-link { min-width: 7em; }
+#pi-markdown-preview-watch-copy-link:disabled { opacity: .5; cursor: not-allowed; }
 #pi-markdown-preview-watch-status {
   color: var(--warn, #b86e00);
   font-weight: 600;

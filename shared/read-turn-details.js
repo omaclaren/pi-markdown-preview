@@ -8,6 +8,12 @@ export const TURN_RECORD_BYTES = 1024 * 1024;
 export const TURN_RECORD_LIMIT = 10_000;
 
 export async function readTurnDetails(path, agent, target, signal) {
+	const { records, incomplete } = await readRecordTail(path, signal);
+	return turnDetailsFromRecords(agent, records, target, incomplete);
+}
+
+/** Complete JSONL records from a bounded snapshot of a file's tail, oldest first. Also used to start a live view. */
+export async function readRecordTail(path, signal) {
 	signal?.throwIfAborted();
 	const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
 	try {
@@ -39,6 +45,6 @@ export async function readTurnDetails(path, agent, target, signal) {
 			try { records.push(JSON.parse(line.toString("utf8"))); } catch { incomplete = true; }
 		}
 		signal?.throwIfAborted();
-		return turnDetailsFromRecords(agent, records.reverse(), target, incomplete);
+		return { records: records.reverse(), incomplete };
 	} finally { await file.close(); }
 }
