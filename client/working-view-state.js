@@ -20,18 +20,25 @@
      if (Array.isArray(state.left) && state.left.length <= 250) outputs.forEach((e, i) => { if (Number.isFinite(state.left[i])) e.scrollLeft = Math.max(0, state.left[i]); });
     }
    } catch { /* Storage denial must not prevent reading or navigation. */ }
-   // Expand/Collapse all acts on event cards only, never nested raw sections.
-   // The controls stay hidden unless this script runs.
+   // One button acts on event cards only, never nested raw sections. Its label
+   // is always the action a click takes: Collapse all only when every card is
+   // open. It stays hidden unless this script runs.
    const bulk = root.querySelector('.working-bulk');
    const cards = Array.from(root.querySelectorAll('details.event')).slice(0, 1000);
    if (bulk && cards.length) {
-    bulk.hidden = false;
-    bulk.addEventListener('click', event => {
-     const button = event.target.closest?.('[data-working-bulk]');
-     if (!button || !bulk.contains(button)) return;
-     const open = button.getAttribute('data-working-bulk') === 'expand';
+    let pending = false;
+    const label = () => { pending = false; bulk.textContent = cards.every(card => card.open) ? 'Collapse all' : 'Expand all'; };
+    bulk.hidden = false; label();
+    bulk.addEventListener('click', () => {
+     const open = !cards.every(card => card.open);
      for (const card of cards) card.open = open;
+     label();
     });
+    // Manual opening/closing updates the label, coalesced per frame.
+    root.addEventListener('toggle', event => {
+     if (pending || !cards.includes(event.target)) return;
+     pending = true; requestAnimationFrame(label);
+    }, true);
    }
    window.addEventListener('pagehide', () => {
     try {

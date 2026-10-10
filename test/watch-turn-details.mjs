@@ -490,10 +490,10 @@ test("Working page uses one short disclaimer instead of reader diagnostics", () 
  assert.match(clipped, /\[… truncated\]/, 'Keep the short inline marker where actual text is clipped.');
 });
 
-test("Working browser view: Expand all and Collapse all act on event cards only and survive Back", async t => {
- // Static: the controls render hidden (script-revealed) only when there are cards.
- assert.match(buildTurnDetailsPage({ events: [{ kind: "prompt", label: "Prompt", text: "x" }] }, "#"), /<div class="working-bulk" role="group" aria-label="All cards" hidden><button type="button" data-working-bulk="expand">Expand all<\/button><button type="button" data-working-bulk="collapse">Collapse all<\/button><\/div>/);
- assert.doesNotMatch(buildTurnDetailsPage({ events: [] }, "#"), /data-working-bulk/);
+test("Working browser view: one Expand all/Collapse all button acts on event cards, labels its next action and survives Back", async t => {
+ // Static: one button, rendered hidden (script-revealed), only when there are cards.
+ assert.match(buildTurnDetailsPage({ events: [{ kind: "prompt", label: "Prompt", text: "x" }] }, "#"), /<button type="button" class="working-bulk" hidden>Expand all<\/button>/);
+ assert.doesNotMatch(buildTurnDetailsPage({ events: [] }, "#"), /class="working-bulk"/);
  if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
  const { default: puppeteer } = await import("puppeteer-core");
  const dir = await temp(t);
@@ -506,17 +506,22 @@ test("Working browser view: Expand all and Collapse all act on event cards only 
  try {
   const page = await browser.newPage(); await page.goto(server.url);
   await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="turn-details"]')]);
-  const state = () => page.evaluate(() => ({ cards: [...document.querySelectorAll("details.event")].map(e => e.open), nested: [...document.querySelectorAll("details.event details")].map(e => e.open) }));
-  assert.equal(await page.$eval(".working-bulk", e => e.hidden), false, "the script reveals the controls");
-  assert.deepEqual((await state()).cards, [true, false, false, false]);
-  await page.click('[data-working-bulk="expand"]');
-  assert.deepEqual(await state(), { cards: [true, true, true, true], nested: [false, false, false] }, "nested raw sections stay closed");
-  await page.click('[data-working-bulk="collapse"]');
-  assert.deepEqual((await state()).cards, [false, false, false, false]);
-  await page.click('[data-working-bulk="expand"]');
+  const state = () => page.evaluate(() => ({ cards: [...document.querySelectorAll("details.event")].map(e => e.open), nested: [...document.querySelectorAll("details.event details")].map(e => e.open), label: document.querySelector(".working-bulk").textContent, hidden: document.querySelector(".working-bulk").hidden }));
+  const labelIs = text => page.waitForFunction(t => document.querySelector(".working-bulk").textContent === t, {}, text);
+  assert.deepEqual(await state(), { cards: [true, false, false, false], nested: [false, false, false], label: "Expand all", hidden: false });
+  await page.click(".working-bulk");
+  assert.deepEqual(await state(), { cards: [true, true, true, true], nested: [false, false, false], label: "Collapse all", hidden: false }, "nested raw sections stay closed");
+  await page.click(".working-bulk");
+  assert.deepEqual((await state()).cards, [false, false, false, false]); await labelIs("Expand all");
+  // Opening every card by hand offers Collapse all; closing one offers Expand all again.
+  for (const summary of await page.$$("details.event > summary")) await summary.click();
+  await labelIs("Collapse all");
+  await page.click("details.event:nth-of-type(2) > summary"); await labelIs("Expand all");
+  await page.click(".working-bulk"); await labelIs("Collapse all");
   await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="preview"]')]);
   await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="turn-details"]')]);
   assert.deepEqual((await state()).cards, [true, true, true, true], "the expanded state is restored on return");
+  await labelIs("Collapse all");
  } finally { await browser.close(); await server.close(); }
 });
 
