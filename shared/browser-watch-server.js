@@ -32,6 +32,7 @@ const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-po
 const WORKING_STATE_SOURCE = readFileSync(new URL("../client/working-view-state.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WORKING_IMAGES_SOURCE = readFileSync(new URL("../client/working-images.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const LIVE_VIEW_SOURCE = readFileSync(new URL("../client/live-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const FOLLOW_ACTIVITY_SOURCE = readFileSync(new URL("../client/follow-activity.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_HISTORY_BYTE_LIMIT = 32 * 1024 * 1024;
@@ -349,6 +350,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
       <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" title="Latest revision (Option/Alt+Shift+Right)" aria-keyshortcuts="Alt+Shift+ArrowRight" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
       ${navigation.liveUrl ? `<a data-watch-control="live" href="${escapeBrowserWatchHtmlAttribute(navigation.liveUrl)}" title="Follow the current turn's recorded activity">Follow current turn</a>` : ""}
+      ${navigation.liveUrl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: open Live when a turn starts and return to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity: Off</button>` : ""}
       <button data-watch-control="wrap-code" type="button" hidden></button>
     </div>
   </div>
@@ -371,6 +373,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const live = ${live};
   window.PiMarkdownPreviewWorkingState?.install(document.getElementById('preview-root'), live ? null : positionScope, retainedScopes);
   window.PiMarkdownPreviewLive?.install(document.getElementById('preview-root'));
+  window.PiMarkdownPreviewFollowActivity?.install();
   window.PiMarkdownPreviewWorkingImages?.install(document.getElementById('preview-root'));
   try {
     const prefix = 'pi-markdown-preview:reading-position:' + ${JSON.stringify(positionBase)} + ':revision:';
@@ -831,7 +834,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 })();
 </script>`;
 
-	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}${live ? `<script>${LIVE_VIEW_SOURCE}</script>\n` : ""}`;
+	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}${live ? `<script>${LIVE_VIEW_SOURCE}</script>\n` : ""}${navigation.liveUrl ? `<script>${FOLLOW_ACTIVITY_SOURCE}</script>\n` : ""}`;
 	const watchUi = `${readingPositionScript}${watchNavigation}\n${watchScript}`;
 	const completeHtml = /<\/body>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/body>/i, `${watchUi}\n</body>`)
@@ -1208,20 +1211,30 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const controller = new AbortController();
 			res.once("close", () => controller.abort());
 			// Status: only what the record says; completion links to the exact retained response.
-			const statusFor = snapshot => {
+			const linksFor = snapshot => {
 				const document = snapshot.finalKey ? documents.find(d => d.responseKey === snapshot.finalKey) : undefined;
-				return liveStatusHtml({
+				return {
 					status: snapshot.status,
 					completedHref: document ? `/?revision=${document.revision}&${query}` : undefined,
 					workingHref: document?.turnDetails ? `${TURN_PREFIX}${document.revision}?${query}` : undefined,
 					newerHref: snapshot.newerAnchor ? `${LIVE_PREFIX}${encodeURIComponent(snapshot.newerAnchor)}?${query}` : undefined,
-				});
+					newerAnchor: snapshot.newerAnchor,
+				};
 			};
+			const statusFor = snapshot => liveStatusHtml(linksFor(snapshot));
 			try {
 				if (rest === "") {
 					const anchor = await options.live.current(controller.signal);
 					if (closed || res.destroyed) return;
-					if (typeof anchor !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(anchor)) {
+					const validAnchor = typeof anchor === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(anchor);
+					// Follow activity asks for the current turn's state as JSON instead of a redirect.
+					if (requestUrl.searchParams.get("format") === "json") {
+						const current = validAnchor ? await options.live.snapshot(anchor, controller.signal) : undefined;
+						if (closed || res.destroyed) return;
+						respondJson(res, 200, current ? { anchor, status: current.status, liveHref: `${LIVE_PREFIX}${anchor}?${query}` } : { anchor: null });
+						return;
+					}
+					if (!validAnchor) {
 						respondRecovery(req, res, 404, "No turn recorded yet", "Live shows a turn once its first prompt is recorded in this session. Try again after sending a prompt."); return;
 					}
 					res.writeHead(302, { ...NON_HTML_SECURITY_HEADERS, Location: `${LIVE_PREFIX}${anchor}?${query}` }); res.end(); return;
@@ -1233,7 +1246,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const [generation, sequenceText] = (requestUrl.searchParams.get("cursor") ?? "").split(":");
 					const since = Number(sequenceText);
 					const resync = generation !== snapshot.generation || !Number.isInteger(since) || since > snapshot.sequence;
-					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: statusFor(snapshot), updatedAt: snapshot.updatedAt, omitted: snapshot.omitted };
+					const links = linksFor(snapshot);
+					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, omitted: snapshot.omitted };
 					if (!resync && since === snapshot.sequence) { respondJson(res, 200, { ...base, unchanged: true }); return; }
 					const upserts = snapshot.events.flatMap((event, i) => resync || event.changed > since
 						? [{ id: event.id, version: event.version, html: renderLiveCard(event, snapshot.omitted + i + 1, true) }] : []);
@@ -1247,7 +1261,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				const latestWorking = documents.findLast(d => d.turnDetails);
 				const page = buildLivePage(snapshot, { label: options.sourceLabel, appearanceStyle: previewAppearanceStyle(latest.html), statusHtml: statusFor(snapshot) });
 				const html = prepareBrowserWatchHtml(page, {
-					view: "live", revision: latest.revision, revisions: documents.map(d => d.revision),
+					view: "live", liveAnchor: match[1], revision: latest.revision, revisions: documents.map(d => d.revision),
 					turnDetailsUrl: latestWorking ? `${TURN_PREFIX}${latestWorking.revision}?${query}` : undefined,
 					liveUrl: `${LIVE_PREFIX}?${query}`,
 					sourceLabel: options.sourceLabel, wrapScope, identity, instance, reconnectAfterStop: fixedPort !== 0,

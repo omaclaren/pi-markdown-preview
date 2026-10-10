@@ -101,6 +101,9 @@
      failures = 0;
      if (status && typeof data.statusHtml === 'string') status.innerHTML = data.statusHtml;
      showTime(data.updatedAt);
+     const publish = () => document.dispatchEvent(new CustomEvent('pi-markdown-preview-live-update', { detail: {
+      status: data.status, completedHref: data.completedHref, newerHref: data.newerHref, newerAnchor: data.newerAnchor, paused: Boolean(queued),
+     } }));
      if (!data.unchanged) {
       const following = atBottom();
       const growing = newCount(data) > 0;
@@ -114,6 +117,7 @@
        showNewer(data);
       }
      }
+     publish();
     } catch {
      failures++;
     } finally {

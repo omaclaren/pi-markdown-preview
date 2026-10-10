@@ -273,3 +273,93 @@ test("Live browser view: appends while following, holds a paused reader, keeps o
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
  } finally { await browser.close(); }
 });
+
+test("Follow activity state: JSON current turn and machine-readable live status", async t => {
+ const dir = await temp(t);
+ const live = createLiveTurnProjector();
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
+ t.after(() => server.close());
+ const session = await auth(server);
+ const toggle = session.text.match(/<button data-watch-control="follow-activity"[^>]*>/)?.[0];
+ assert.ok(toggle, "the history menu has a Follow activity toggle when Live is available");
+ assert.match(toggle, /aria-pressed="false" hidden/); assert.match(toggle, /data-view="preview"/); assert.match(toggle, /data-latest="true"/);
+ const state = toggle.match(/data-live-state="([^"]+)"/)[1].replaceAll("&amp;", "&");
+ const json = async path => (await fetch(new URL(path, session.origin), { headers: { cookie: session.cookie } })).json();
+ assert.deepEqual(await json(state), { anchor: null });
+ live.push({ type: "user", uuid: "p", message: { role: "user", content: "Go" } }, 1);
+ const current = await json(state);
+ assert.equal(current.anchor, "p"); assert.equal(current.status, "running"); assert.match(current.liveHref, /^\/__pi_markdown_preview_live__\/p\?identity=/);
+ live.push({ type: "assistant", uuid: "f", message: { role: "assistant", id: "m1", content: [{ type: "text", text: "Done" }], stop_reason: "end_turn" } }, 2);
+ const revision = server.updateDocument(html, { appendToHistory: true, responseKey: "claude:m1" });
+ const updates = await json(`${current.liveHref.replace("?", "/updates?")}&cursor=`);
+ assert.equal(updates.status, "completed");
+ assert.match(updates.completedHref, new RegExp(`^/\\?revision=${revision}&identity=`));
+ live.push({ type: "user", uuid: "p2", message: { role: "user", content: "Next" } }, 3);
+ const later = await json(`${current.liveHref.replace("?", "/updates?")}&cursor=`);
+ assert.equal(later.newerAnchor, "p2"); assert.match(later.newerHref, /\/__pi_markdown_preview_live__\/p2\?/);
+ // The live page's toggle knows its anchor.
+ const livePage = await (await fetch(new URL(current.liveHref, session.origin), { headers: { cookie: session.cookie } })).text();
+ assert.match(livePage, /data-view="live"[^>]*data-anchor="p"/);
+});
+
+test("Follow activity browser view: Live when a turn starts, back to its Preview when it finishes, only when it owns the page", { timeout: 120_000 }, async t => {
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ const dir = await temp(t);
+ const live = createLiveTurnProjector();
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
+ t.after(() => server.close());
+ const user = (uuid, text) => live.push({ type: "user", uuid, message: { role: "user", content: text } }, Date.now());
+ const work = (uuid, id, tall = false) => {
+  live.push({ type: "assistant", uuid: `${uuid}-c`, message: { role: "assistant", id: `${id}-c`, content: [{ type: "tool_use", id: `${uuid}-k`, name: "Bash", input: { command: "ls" } }], stop_reason: "tool_use" } }, Date.now());
+  live.push({ type: "user", uuid: `${uuid}-r`, message: { role: "user", content: [{ type: "tool_result", tool_use_id: `${uuid}-k`, content: tall ? "line\n".repeat(400) : "ok" }] } }, Date.now());
+ };
+ const done = (uuid, id, text) => {
+  live.push({ type: "assistant", uuid, message: { role: "assistant", id, content: [{ type: "text", text }], stop_reason: "end_turn" } }, Date.now());
+  return server.updateDocument(html.replace("Answer", text), { appendToHistory: true, responseKey: `claude:${id}` });
+ };
+ const finish = (uuid, id, text) => { work(uuid, id); return done(uuid, id, text); };
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ try {
+  const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
+  await page.goto(server.url);
+  const heading = () => page.$eval("h1, main p", e => e.textContent).catch(() => "");
+  const onLive = () => page.waitForFunction(() => document.querySelector("h1")?.textContent === "Live · recorded activity", { timeout: 15_000 });
+  const onPreview = text => page.waitForFunction(t => location.pathname === "/" && document.body.textContent.includes(t), { timeout: 15_000 }, text);
+  // Off by default; turning it on is remembered for this preview address.
+  await page.$eval('[data-watch-control="follow-activity"]', e => e.click());
+  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => `${e.textContent}|${e.getAttribute("aria-pressed")}`), "Follow activity: On|true");
+  assert.equal(await page.evaluate(() => localStorage.getItem("pi-markdown-preview:follow-activity")), "on");
+  user("p1", "First");
+  await onLive();
+  assert.match(page.url(), /\/__pi_markdown_preview_live__\/p1\?/);
+  finish("f1", "m1", "First done");
+  await onPreview("First done");
+  // The next turn is followed too.
+  user("p2", "Second");
+  await onLive();
+  // A paused reader (scrolled up) is not moved until back at the bottom.
+  work("f2", "m2", true);
+  await page.waitForFunction(() => document.querySelectorAll(".live-events > details.event").length >= 3, { timeout: 10_000 });
+  await page.$$eval(".live-events > details.event.result", cards => cards.forEach(c => { c.open = true; }));
+  await page.evaluate(() => window.scrollTo(0, 0));
+  done("f2", "m2", "Second done");
+  await page.waitForFunction(() => /Open its response/.test(document.querySelector("[data-live-status]")?.textContent ?? ""), { timeout: 10_000 });
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.match(page.url(), /\/__pi_markdown_preview_live__\/p2\?/, "a reader scrolled up stays on Live");
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await onPreview("Second done");
+  // Ctrl+Alt+A turns it off: a turn opened by hand in Live is not left automatically.
+  await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyA"); await page.keyboard.up("Alt"); await page.keyboard.up("Control");
+  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => e.textContent), "Follow activity: Off");
+  user("p3", "Third");
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(new URL(page.url()).pathname, "/", "with Follow activity off, a new turn does not move the page");
+  await page.$eval('[data-watch-control="live"]', e => e.click());
+  await onLive();
+  finish("f3", "m3", "Third done");
+  await page.waitForFunction(() => document.querySelector("[data-live-status] a")?.textContent === "Open its response", { timeout: 10_000 });
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  assert.match(page.url(), /\/__pi_markdown_preview_live__\/p3\?/, "Live opened by hand stays put at completion");
+ } finally { await browser.close(); }
+});
