@@ -549,11 +549,13 @@ for (const functionName of [
 	"parsePreviewArgs",
 	"prepareFilePreview",
 	"resolvePiAgentDir",
+	"selectHistoryResponses",
 ]) {
 	transpiledIndex = exposeTranspiledFunction(transpiledIndex, functionName);
 }
 
 let extensionFactory;
+let selectHistoryResponses;
 let buildBlockAwarePageClips;
 let buildMermaidBrowserModule;
 let collectInlineLocalPdfData;
@@ -577,7 +579,7 @@ let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectInlineLocalPdfData, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getBrowserFileWatchId, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, markPandocPdfEmbeds, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectInlineLocalPdfData, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getBrowserFileWatchId, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, markPandocPdfEmbeds, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, selectHistoryResponses, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
@@ -676,6 +678,23 @@ assert.equal(parsePreviewArgs("-b -w --working").turnDetails, true);
 assert.equal(parsePreviewArgs("-b -w --turn-details").turnDetails, true, "--turn-details stays a hidden alias of --working.");
 assert.match(parsePreviewArgs("-b --working").error ?? "", /--working is only available for the assistant-response/);
 assert.match(parsePreviewArgs("-b -w --working report.md").error ?? "", /assistant-response/);
+assert.equal(parsePreviewArgs("-b -w").history, undefined, "Without --history the watcher uses its default.");
+assert.equal(parsePreviewArgs("-b -w --history 5").history, 5);
+assert.equal(parsePreviewArgs("-b -w --history=0").history, 0);
+assert.equal(parsePreviewArgs("-b -w --working --history 20").history, 20);
+for (const [args, pattern] of [["-b -w --history", /Missing count/], ["-b -w --history --working", /Missing count/], ["-b -w --history 21", /0 to 20/], ["-b -w --history -1", /0 to 20/],
+	["-b -w --history 2.5", /0 to 20/], ["-b -w --history abc", /0 to 20/], ["-b -w --history=", /Missing count/], ["-b --history 3", /assistant-response/], ["-b -w --history 3 report.md", /assistant-response/]]) {
+	assert.match(parsePreviewArgs(args).error ?? "", pattern, args);
+}
+const historyMessage = (key, final = true) => ({ entryId: key, index: 0, markdown: key, preview: key, responseKey: key, final });
+const historyMessages = [historyMessage("a"), historyMessage("progress", false), historyMessage("b"), historyMessage("c"), historyMessage("aborted", false), historyMessage("d")];
+assert.deepEqual(selectHistoryResponses(historyMessages, { markdown: "d", responseKey: "d" }, 10).map(m => m.responseKey), ["a", "b", "c"], "History seeds earlier finished responses only, oldest first, without the latest.");
+assert.deepEqual(selectHistoryResponses(historyMessages, { markdown: "d", responseKey: "d" }, 2).map(m => m.responseKey), ["b", "c"], "The count keeps the most recent earlier responses.");
+assert.deepEqual(selectHistoryResponses(historyMessages, { markdown: "aborted", responseKey: "aborted" }, 10).map(m => m.responseKey), ["a", "b", "c"], "An unfinished latest response still gets earlier finished history.");
+assert.deepEqual(selectHistoryResponses(historyMessages, { markdown: "d", responseKey: "d" }, 0), []);
+assert.deepEqual(selectHistoryResponses(historyMessages, undefined, 10), [], "No latest response means a waiting page with no history.");
+const sameKey = [{ ...historyMessage("e1"), responseKey: "response-time:1" }, { ...historyMessage("e2"), responseKey: "response-time:1" }];
+assert.deepEqual(selectHistoryResponses(sameKey, { entryId: "e2", markdown: "e2", responseKey: "response-time:1" }, 10).map(m => m.entryId), ["e1"], "Entry ids, not repeatable response keys, identify the latest response.");
 const parsedShortBrowserWatch = parsePreviewArgs("-b -w");
 assert.equal(parsedShortBrowserWatch.target, "browser", "-b should select the browser target.");
 assert.equal(parsedShortBrowserWatch.watch, true, "-w should enable browser watch mode.");

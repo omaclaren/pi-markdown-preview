@@ -981,6 +981,8 @@ interface AssistantMessage {
 	markdown: string;
 	preview: string;
 	responseKey: string;
+	/** stopReason "stop": the message that finished its turn. */
+	final: boolean;
 }
 
 interface AssistantResponseSnapshot {
@@ -1026,7 +1028,8 @@ function getAssistantMessages(ctx: ExtensionContext): AssistantMessage[] {
 		const preview = firstLine.replace(/^#+\s*/, "").slice(0, 80);
 		const entryFallback = typeof entry.id === "string" && entry.id ? `session:${entry.id}` : `session-index:${messageIndex}`;
 		const responseKey = getAssistantResponseKey(msg, entryFallback);
-		messages.push({ entryId: entry.id, index: messageIndex, markdown, preview, responseKey });
+		const final = "stopReason" in msg && msg.stopReason === "stop";
+		messages.push({ entryId: entry.id, index: messageIndex, markdown, preview, responseKey, final });
 		messageIndex++;
 	}
 
@@ -1038,6 +1041,19 @@ function getLastAssistantResponse(ctx: ExtensionContext): AssistantResponseSnaps
 	if (messages.length === 0) return undefined;
 	const latest = messages[messages.length - 1]!;
 	return { entryId: latest.entryId, markdown: latest.markdown, responseKey: latest.responseKey };
+}
+
+const DEFAULT_RESPONSE_HISTORY = 10;
+const MAX_RESPONSE_HISTORY = 20;
+
+/** Up to `count` earlier finished responses on the current branch, oldest first, before the latest one. */
+function selectHistoryResponses(messages: AssistantMessage[], latest: AssistantResponseSnapshot | undefined, count: number): AssistantMessage[] {
+	if (!latest || count <= 0) return [];
+	// Prefer the session entry id: response keys can repeat (same-millisecond timestamps).
+	const isLatest = (message: AssistantMessage) => latest.entryId ? message.entryId === latest.entryId : message.responseKey === latest.responseKey;
+	let latestIndex = messages.length;
+	for (let index = messages.length - 1; index >= 0; index--) if (isLatest(messages[index]!)) { latestIndex = index; break; }
+	return messages.slice(0, latestIndex).filter((message) => message.final && !isLatest(message)).slice(-count);
 }
 
 function piTurnDetails(ctx: ExtensionContext, response: AssistantResponseSnapshot | undefined, enabled: boolean) {
@@ -4663,6 +4679,7 @@ interface ParsedPreviewArgs {
 	fontSizePx?: number;
 	watch?: boolean;
 	turnDetails?: boolean;
+	history?: number;
 	stop?: boolean;
 	stopAll?: boolean;
 	stopResponses?: boolean;
@@ -4680,6 +4697,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 	let fontSizePx: number | undefined;
 	let watch = false;
 	let turnDetails = false;
+	let history: number | undefined;
 	let stop = false;
 	let stopAll = false;
 	let stopResponses = false;
@@ -4754,6 +4772,16 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 			continue;
 		}
 
+		const historyEquals = token.match(/^--history=(.*)$/);
+		if (token === "--history" || historyEquals) {
+			const value = historyEquals ? historyEquals[1] : tokens[i + 1];
+			if (!value || (!historyEquals && value.startsWith("-") && !/^-\d/.test(value))) return { error: "Missing count after --history." };
+			if (!/^\d{1,2}$/.test(value) || Number(value) > MAX_RESPONSE_HISTORY) return { error: `--history must be a whole number from 0 to ${MAX_RESPONSE_HISTORY}.` };
+			history = Number(value);
+			if (!historyEquals) i++;
+			continue;
+		}
+
 		if (token === "--font-size" || token === "--font-size-px" || token === "--fs") {
 			const next = tokens[i + 1];
 			if (!next || next.startsWith("-")) {
@@ -4819,10 +4847,11 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 			continue;
 		}
 
-		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
+		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
 	if (turnDetails && (!watch || file !== undefined)) return { error: "--working is only available for the assistant-response browser watcher (--watch without a file)." };
+	if (history !== undefined && (!watch || file !== undefined)) return { error: "--history is only available for the assistant-response browser watcher (--watch without a file)." };
 	if (file && pick) return { error: "Cannot use --pick and --file together." };
 	if (watch && stop) return { error: "Cannot use --watch and --stop together." };
 	if (watch && list) return { error: "Cannot use --watch and --list together." };
@@ -4841,7 +4870,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		return { error: "--list cannot be combined with a file, --pick, --font-size, --responses, or --all." };
 	}
 
-	return { target, pick, file, fontSizePx, watch, turnDetails, stop, stopAll, stopResponses, list };
+	return { target, pick, file, fontSizePx, watch, turnDetails, history, stop, stopAll, stopResponses, list };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -5371,7 +5400,7 @@ export default function (pi: ExtensionAPI) {
 		}, BROWSER_FILE_WATCH_DEBOUNCE_MS);
 	};
 
-	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number, turnDetails = false): Promise<void> => {
+	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number, turnDetails = false, history?: number): Promise<void> => {
 		const id = RESPONSE_BROWSER_WATCH_ID;
 		if (pendingBrowserWatchCleanups.has(id)) {
 			throw new Error("The previous assistant-response watcher did not clean up completely. Retry /preview-browser --stop --responses first.");
@@ -5391,7 +5420,8 @@ export default function (pi: ExtensionAPI) {
 			await openFileInDefaultBrowser(existingWatch.server.url, true);
 			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(existingWatch)) return;
 			hasShownBrowserWatchHint = true;
-			ctx.ui.notify("Browser response watch is already running; opened it again. Stop with /preview-browser --stop --responses.", "info");
+			ctx.ui.notify("Browser response watch is already running; opened it again. Stop with /preview-browser --stop --responses."
+				+ (history !== undefined ? " --history applies when a watcher starts; stop it first to change it." : ""), "info");
 			return;
 		}
 
@@ -5427,13 +5457,34 @@ export default function (pi: ExtensionAPI) {
 			const resourcePath = ctx.cwd;
 			const style = getPreviewStyle(ctx.ui.theme);
 			const response = getLastAssistantResponse(ctx);
+			// Earlier finished responses on this branch start the page's history,
+			// oldest first, so the history menu is useful from the first open.
+			const earlier = selectHistoryResponses(getAssistantMessages(ctx), response, history ?? DEFAULT_RESPONSE_HISTORY);
+			let seeded: { snapshot: AssistantResponseSnapshot; html: string }[] = [];
 			let html: string;
 			let renderKey: string;
 			if (response) {
 				const renderController = beginBrowserWatchRender(provisional);
 				try {
-					const rendered = await renderPreviewHtmlDocument(response.markdown, style, resourcePath, false, previewFontSizePx, renderController.signal);
-					html = rendered.html;
+					const render = async (markdown: string) => (await renderPreviewHtmlDocument(markdown, style, resourcePath, false, previewFontSizePx, renderController.signal)).html;
+					html = await render(response.markdown);
+					// A few renders at a time; an earlier response that fails to render is skipped.
+					const earlierHtml: (string | undefined)[] = new Array(earlier.length);
+					let next = 0;
+					await Promise.all(Array.from({ length: Math.min(3, earlier.length) }, async () => {
+						while (next < earlier.length) {
+							const index = next++;
+							try {
+								earlierHtml[index] = await render(earlier[index]!.markdown);
+							} catch (error) {
+								if (renderController.signal.aborted) throw error;
+							}
+						}
+					}));
+					seeded = earlier.flatMap((message, index) => {
+						const earlierPage = earlierHtml[index];
+						return earlierPage === undefined ? [] : [{ snapshot: { entryId: message.entryId, markdown: message.markdown, responseKey: message.responseKey }, html: earlierPage }];
+					});
 				} finally {
 					finishBrowserWatchRender(provisional, renderController);
 				}
@@ -5450,15 +5501,21 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) return;
 
-			const server = await createBrowserWatchServer(html, resourcePath, {
+			const first = seeded[0];
+			const server = await createBrowserWatchServer(first?.html ?? html, resourcePath, {
 				initialDocumentIsHistory: !!response,
-				initialTurnDetails: piTurnDetails(ctx, response, provisional.turnDetails === true),
+				initialTurnDetails: piTurnDetails(ctx, first?.snapshot ?? response, provisional.turnDetails === true),
 				sourceLabel: provisional.sourceLabel,
 				renderLocalDocument: (path, signal) => renderBrowserWatchLinkedDocument(path, getPreviewStyle(ctx.ui.theme), newWatch?.fontSizePx ?? provisional.requestedFontSizePx, signal),
 			});
 			if (!ownsBrowserWatchOperation(operation) || provisionalBrowserWatches.get(id) !== provisional) {
 				await server.close();
 				return;
+			}
+			if (first && response) {
+				for (const document of [...seeded.slice(1), { snapshot: response, html }]) {
+					server.updateDocument(document.html, { appendToHistory: true, turnDetails: piTurnDetails(ctx, document.snapshot, provisional.turnDetails === true) });
+				}
 			}
 			provisional.server = server;
 			newWatch = {
@@ -5703,7 +5760,7 @@ export default function (pi: ExtensionAPI) {
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only).", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only).\nA new response watcher starts with up to 10 earlier finished responses; --history <n> sets 0-20.", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
@@ -5763,7 +5820,7 @@ export default function (pi: ExtensionAPI) {
 				if (parsed.file) {
 					await startBrowserFileWatch(ctx, parsed.file, parsed.fontSizePx);
 				} else {
-					await startBrowserResponseWatch(ctx, parsed.fontSizePx, parsed.turnDetails);
+					await startBrowserResponseWatch(ctx, parsed.fontSizePx, parsed.turnDetails, parsed.history);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -5930,7 +5987,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --working opts into recorded inputs/tools for response watchers)",
+		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --working opts into recorded inputs/tools and --history <n> sets earlier responses for response watchers)",
 		handler: async (args, ctx) => {
 			await run(`--browser ${args}`.trim(), ctx);
 		},

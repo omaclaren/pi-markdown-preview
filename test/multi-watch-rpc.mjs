@@ -41,6 +41,10 @@ await writeFile(one, "# One\n\nVersion one\n\n[Report](<docs/linked report.md#de
 await writeFile(two, "# Two\n\nIndependent\n");
 // Seed a real assistant response without calling a model or using user logs.
 const session = SessionManager.create(root, join(root, "sessions"));
+// An earlier finished exchange: response watchers seed it as history.
+session.appendMessage({ role: "user", content: "Earlier question", timestamp: Date.now() - 60_000 });
+session.appendMessage({ role: "assistant", content: [{ type: "text", text: "Earlier finished answer" }], api: "openai-responses", provider: "openai", model: "test-fixture", stopReason: "stop", timestamp: Date.now() - 59_000,
+	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
 session.appendMessage({ role: "user", content: "Show the report", timestamp: Date.now() });
 const recordedImage = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT1kAAAAASUVORK5CYII=";
 const fixtureUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -207,11 +211,16 @@ try {
 	const responseSession = await bootstrap(urls[4]);
 	assert.match(responseSession.html, /<title>Assistant responses — Markdown Preview<\/title>/);
 	assert.doesNotMatch(responseSession.html, /<a\b[^>]*data-watch-control="turn-details"/);
+	const responseRevision = revisionOf(responseSession.html);
+	assert.equal(responseRevision, 2, "The latest response follows one seeded earlier response.");
+	assert.match(responseSession.html, /data-watch-control="count"[^>]*>2\/2</);
+	const seededPage = await fetch(new URL("/?revision=1", responseSession.origin), { headers: { cookie: responseSession.cookie } });
+	assert.match(await seededPage.text(), /Earlier finished answer/, "The seeded history holds the earlier finished response.");
 	assert.ok(notifications.some(e => e.message?.includes("Tip: start with /preview-browser --watch --working to see prompts and activity.")), "A response watcher without Working suggests --working.");
 	const beforeDetailsUpgrade = notifications.length;
 	await command("/preview-browser -w --working");
 	assert.ok(notifications.slice(beforeDetailsUpgrade).some(e => e.notifyType === "error" && e.message.includes("fresh private preview link")), "Do not upgrade an already-shared preview to expose traces.");
-	assert.match(responseSession.html, /const positionScope = "[^"]+:revision:1"/, "Response-watch commands must scope Back restoration to their current revision.");
+	assert.match(responseSession.html, new RegExp(`const positionScope = "[^"]+:revision:${responseRevision}"`), "Response-watch commands must scope Back restoration to their current revision.");
 	assert.equal(new Set([oneSession.origin, twoSession.origin, responseSession.origin]).size, 3);
 	const responseLinks = documentLinks(responseSession.html);
 	assert.equal(responseLinks.length, 2, "real response watch must rewrite absolute and relative links");
@@ -233,7 +242,7 @@ try {
 	}, "first file update");
 	assert.equal(revisionOf(oneUpdated), beforeEditRevision + 1);
 	assert.equal(revisionOf(await getPage(twoSession)), 1, "The second file must not change with the first.");
-	assert.equal(revisionOf(await getPage(responseSession)), 1, "The response watcher must not change with a file.");
+	assert.equal(revisionOf(await getPage(responseSession)), responseRevision, "The response watcher must not change with a file.");
 
 	await command(`/preview-browser --stop --file ${JSON.stringify(oneAlias)}`);
 	assert.equal(await waitFor(() => isClosed(oneSession), "first watcher shutdown"), true);
@@ -311,6 +320,19 @@ try {
 	await command("/preview-browser --list");
 	assert.ok(notifications.slice(beforeRaceList).some((event) => /Browser preview watchers \(1\/8\)/.test(event.message)));
 	await command("/preview-browser --stop --all");
+
+	// --history 0 starts with only the latest response; repeating it on a running watcher explains that it applies at start.
+	const opensBeforeNoHistory = (await openedUrls()).length;
+	await command("/preview-browser -w --history 0");
+	const noHistorySession = await bootstrap((await waitOpenCount(opensBeforeNoHistory + 1)).at(-1));
+	assert.equal(revisionOf(noHistorySession.html), 1);
+	assert.match(noHistorySession.html, /data-watch-control="count"[^>]*>1\/1</);
+	const beforeRepeatHistory = notifications.length;
+	await command("/preview-browser -w --history 5");
+	assert.ok(notifications.slice(beforeRepeatHistory).some(e => e.message?.includes("--history applies when a watcher starts")), "A running watcher keeps its history and says so.");
+	assert.equal(revisionOf(await getPage(noHistorySession)), 1);
+	await command("/preview-browser --stop --responses");
+	assert.equal(await waitFor(() => isClosed(noHistorySession), "no-history watcher shutdown"), true);
 
 	// HTML input is a real isolated page, even without spelling --watch.
 	const htmlFile = join(root, "dashboard.html");
