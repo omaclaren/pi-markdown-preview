@@ -9,6 +9,9 @@
  'use strict';
  const ENABLED = 'pi-markdown-preview:follow-activity';
  const OWNED = 'pi-markdown-preview:follow-activity:owned';
+ // A turn whose live page the reader left themselves: like Pi Studio, no
+ // switching back until the next turn starts.
+ const DECLINED = 'pi-markdown-preview:follow-activity:declined';
  const POLL_MS = 2000;
  globalObject.PiMarkdownPreviewFollowActivity = {
   install() {
@@ -57,7 +60,7 @@
       const state = await response.json();
       const running = enabled && state.status === 'running' && state.liveHref;
       showLiveWorking(running ? state.liveHref : null);
-      if (running) { go(state.liveHref, state.anchor); return; }
+      if (running && state.anchor !== read(sessionStorage, DECLINED)) { go(state.liveHref, state.anchor); return; }
      }
     } catch {}
     timer = setTimeout(poll, POLL_MS);
@@ -76,6 +79,7 @@
     write(localStorage, ENABLED, enabled ? 'on' : null);
     // Turning it on while viewing Live adopts this turn; turning it off releases it.
     write(sessionStorage, OWNED, enabled && view === 'live' ? anchor : null);
+    write(sessionStorage, DECLINED, null);
     render();
     if (enabled) void poll(); else { clearTimeout(timer); showLiveWorking(null); }
    };
@@ -89,6 +93,15 @@
     toggle();
    });
    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void poll(); else clearTimeout(timer); });
+   if (view === 'live' && anchor) {
+    // A reload is not leaving: keep following this turn.
+    const reload = performance.getEntriesByType?.('navigation')?.[0]?.type === 'reload';
+    if (reload && enabled && read(sessionStorage, DECLINED) === anchor) { write(sessionStorage, DECLINED, null); write(sessionStorage, OWNED, anchor); }
+    // Leaving a followed live page yourself (Preview, Back, a link) ends following for this turn.
+    window.addEventListener('pagehide', () => {
+     if (enabled && !navigating && ownsThisPage()) { write(sessionStorage, DECLINED, anchor); write(sessionStorage, OWNED, null); }
+    });
+   }
    render();
    void poll();
   }

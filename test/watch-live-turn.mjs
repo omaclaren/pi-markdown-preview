@@ -352,6 +352,20 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   assert.match(page.url(), /\/__pi_markdown_preview_live__\/p2\?/, "a reader scrolled up stays on Live");
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await onPreview("Second done");
+  // Leaving live Working yourself (Ctrl+Alt+P) is respected for the rest of that turn.
+  user("p2b", "Side question");
+  await onLive();
+  await Promise.all([page.waitForNavigation(), (async () => { await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyP"); await page.keyboard.up("Alt"); await page.keyboard.up("Control"); })()]);
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  assert.equal(new URL(page.url()).pathname, "/", "following does not pull the reader back during that turn");
+  assert.match(await page.$eval('[data-watch-control="turn-details"]', e => e.getAttribute("href")), /\/__pi_markdown_preview_live__\/p2b\?/, "Working still leads to the live turn");
+  finish("f2b", "m2b", "Side done");
+  await onPreview("Side done");
+  // The next turn is followed again.
+  user("p2c", "Back to work");
+  await onLive();
+  finish("f2c", "m2c", "Work done");
+  await onPreview("Work done");
   // Off: a new turn moves nothing and Working stays the finished response's fixed view.
   const toggleKeys = async () => { await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyA"); await page.keyboard.up("Alt"); await page.keyboard.up("Control"); };
   await toggleKeys();
