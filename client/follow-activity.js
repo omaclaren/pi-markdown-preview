@@ -22,8 +22,9 @@
    let timer, navigating = false;
    const render = () => {
     button.hidden = false;
-    // Same pressed look as the current view tab; the label stays put.
+    // The label says the state (as in Pi Studio); on also gets the current-tab background.
     button.setAttribute('aria-pressed', String(enabled));
+    button.textContent = `Follow activity: ${enabled ? 'On' : 'Off'}`;
     button.title = `Follow activity is ${enabled ? 'on' : 'off'}: switch to Live when a turn starts and back to its response when it finishes (Ctrl+Alt+A)`;
    };
    const go = (href, owned) => {

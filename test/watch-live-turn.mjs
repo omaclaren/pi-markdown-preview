@@ -282,7 +282,7 @@ test("Follow activity state: JSON current turn and machine-readable live status"
  const session = await auth(server);
  const toggle = session.text.match(/<button data-watch-control="follow-activity"[^>]*>/)?.[0];
  assert.ok(toggle, "the toolbar has a Follow activity toggle when Live is available");
- assert.match(session.text, /<button data-watch-control="follow-activity"[^>]*>Follow activity<\/button>/);
+ assert.match(session.text, /<button data-watch-control="follow-activity"[^>]*>Follow activity: Off<\/button>/);
  assert.match(toggle, /aria-pressed="false" hidden/); assert.match(toggle, /data-view="preview"/); assert.match(toggle, /data-latest="true"/);
  const state = toggle.match(/data-live-state="([^"]+)"/)[1].replaceAll("&amp;", "&");
  const json = async path => (await fetch(new URL(path, session.origin), { headers: { cookie: session.cookie } })).json();
@@ -329,7 +329,7 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   const onPreview = text => page.waitForFunction(t => location.pathname === "/" && document.body.textContent.includes(t), { timeout: 15_000 }, text);
   // Off by default; turning it on is remembered for this preview address.
   await page.$eval('[data-watch-control="follow-activity"]', e => e.click());
-  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => `${e.textContent}|${e.getAttribute("aria-pressed")}|${e.hidden}`), "Follow activity|true|false");
+  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => `${e.textContent}|${e.getAttribute("aria-pressed")}|${e.hidden}`), "Follow activity: On|true|false");
   assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => getComputedStyle(e).backgroundColor === getComputedStyle(document.querySelector('[data-watch-control="preview"][aria-current="page"]')).backgroundColor), true, "on looks like the current view tab");
   assert.equal(await page.evaluate(() => localStorage.getItem("pi-markdown-preview:follow-activity")), "on");
   user("p1", "First");
@@ -353,7 +353,7 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   await onPreview("Second done");
   // Ctrl+Alt+A turns it off: a turn opened by hand in Live is not left automatically.
   await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyA"); await page.keyboard.up("Alt"); await page.keyboard.up("Control");
-  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => e.getAttribute("aria-pressed")), "false");
+  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => `${e.textContent}|${e.getAttribute("aria-pressed")}`), "Follow activity: Off|false");
   user("p3", "Third");
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(new URL(page.url()).pathname, "/", "with Follow activity off, a new turn does not move the page");
