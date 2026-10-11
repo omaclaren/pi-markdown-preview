@@ -1,8 +1,10 @@
-// Follow activity (off by default, like Pi Studio): when a turn starts, open
-// Live for it; when that turn finishes and its response is retained, return to
-// that response's Preview. It returns only from a Live page it opened itself,
-// and only while the reader is at the bottom. Remembered per preview address;
-// Ctrl+Alt+A toggles it. Nothing is polled while it is off.
+// Follow activity (off by default, like Pi Studio). On: while a turn runs, the
+// latest response's Working tab shows that turn live, and the page switches to
+// it; when the turn finishes and its response is retained, it returns to that
+// response's Preview (only from a live page it opened itself, and only while
+// the reader is at the bottom). Off: Working is the finished response's fixed
+// activity and nothing switches. Older responses' Working is always fixed.
+// Remembered per preview address; Ctrl+Alt+A toggles it. Nothing is polled while off.
 (function (globalObject) {
  'use strict';
  const ENABLED = 'pi-markdown-preview:follow-activity';
@@ -19,6 +21,15 @@
    const read = (store, key) => { try { return store.getItem(key); } catch { return null; } };
    const write = (store, key, value) => { try { if (value === null) store.removeItem(key); else store.setItem(key, value); } catch {} };
    let enabled = read(localStorage, ENABLED) === 'on';
+   // The Working tab: fixed by default; live only while following a running turn.
+   const working = document.querySelector('[data-watch-control="turn-details"]');
+   const fixedHref = working?.getAttribute('href') ?? null;
+   const showLiveWorking = href => {
+    if (!working || view === 'live') return;
+    if (href) { working.setAttribute('href', href); working.setAttribute('aria-disabled', 'false'); working.setAttribute('tabindex', '0'); return; }
+    if (fixedHref) working.setAttribute('href', fixedHref);
+    else { working.removeAttribute('href'); working.setAttribute('aria-disabled', 'true'); working.setAttribute('tabindex', '-1'); }
+   };
    let timer, navigating = false;
    const render = () => {
     button.hidden = false;
@@ -44,7 +55,9 @@
      const response = await fetch(stateUrl, { cache: 'no-store', credentials: 'same-origin' });
      if (response.ok) {
       const state = await response.json();
-      if (enabled && state.status === 'running' && state.liveHref) { go(state.liveHref, state.anchor); return; }
+      const running = enabled && state.status === 'running' && state.liveHref;
+      showLiveWorking(running ? state.liveHref : null);
+      if (running) { go(state.liveHref, state.anchor); return; }
      }
     } catch {}
     timer = setTimeout(poll, POLL_MS);
@@ -64,7 +77,7 @@
     // Turning it on while viewing Live adopts this turn; turning it off releases it.
     write(sessionStorage, OWNED, enabled && view === 'live' ? anchor : null);
     render();
-    if (enabled) void poll(); else clearTimeout(timer);
+    if (enabled) void poll(); else { clearTimeout(timer); showLiveWorking(null); }
    };
    button.addEventListener('click', toggle);
    window.addEventListener('keydown', event => {

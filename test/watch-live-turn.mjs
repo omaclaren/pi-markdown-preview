@@ -125,13 +125,14 @@ async function auth(server) {
  return { text: await r.text(), cookie: r.headers.get("set-cookie").split(";")[0], origin: new URL(server.url).origin };
 }
 const attr = (text, control) => text.match(new RegExp(`data-watch-control="${control}" href="([^"]+)"`))?.[1].replaceAll("&amp;", "&");
+const liveEntry = text => text.match(/data-live-state="([^"]+)"/)?.[1].replaceAll("&amp;", "&").replace(/&format=json$/, "");
 
 test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded live page", async t => {
  const dir = await temp(t);
  const plain = await createBrowserWatchServer(html, dir, { initialTurnDetails: async () => ({ events: [] }) });
  t.after(() => plain.close());
  const plainSession = await auth(plain);
- assert.doesNotMatch(plainSession.text, /<a data-watch-control="live"|<button data-watch-control="follow-activity"/, "no Live tab or Follow activity without the live option");
+ assert.doesNotMatch(plainSession.text, /<button data-watch-control="follow-activity"|data-live-state=/, "no Follow activity or live state without the live option");
  assert.equal((await fetch(new URL("/__pi_markdown_preview_live__/?identity=x&instance=y", plainSession.origin), { headers: { cookie: plainSession.cookie } })).status, 404);
 
  const live = createLiveTurnProjector();
@@ -140,10 +141,10 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  const server = await createBrowserWatchServer(html, dir, { live: provider, initialTurnDetails: async () => ({ events: [] }), initialResponseKey: "claude:old" });
  t.after(() => server.close());
  const session = await auth(server);
- const entry = attr(session.text, "live");
- assert.ok(entry?.startsWith("/__pi_markdown_preview_live__/?identity="), "the toolbar offers a Live view");
- assert.match(session.text, /<a data-watch-control="live" href="[^"]+" title="Live: the current turn's recorded activity \(Ctrl\+Alt\+L\)" aria-keyshortcuts="Control\+Alt\+L">Live<\/a>/);
- assert.doesNotMatch(session.text, /Follow current turn/);
+ const entry = liveEntry(session.text);
+ assert.ok(entry?.startsWith("/__pi_markdown_preview_live__/?identity="), "Follow activity knows the live entry");
+ assert.doesNotMatch(session.text, /<a data-watch-control="live"|>Live<\/a>|Follow current turn/, "no separate Live tab");
+ assert.match(session.text, /<a data-watch-control="turn-details" href="\/__pi_markdown_preview_turn__\/1\?[^"]+" title="Working \(Ctrl\+Alt\+W\)\. With Follow activity on, Working shows the current turn live"/, "Working links the finished response's fixed view by default");
  const get = (path, extra = {}) => fetch(new URL(path, session.origin), { redirect: "manual", ...extra, headers: { cookie: session.cookie, ...(extra.headers ?? {}) } });
  assert.equal((await fetch(new URL(entry, session.origin), { redirect: "manual" })).status, 403, "cookie required");
  assert.equal((await get(entry.replace(/instance=[^&]+/, "instance=stale"))).status, 409);
@@ -157,10 +158,10 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  const pageUrl = redirect.headers.get("location");
  assert.match(pageUrl, /^\/__pi_markdown_preview_live__\/p1\?identity=/);
  const page = await (await get(pageUrl)).text();
- assert.match(page, /<h1>Live · recorded activity<\/h1>/);
+ assert.match(page, /<h1>Working · live<\/h1>/);
  assert.match(page, /data-event-id="p1:0"/);
  assert.match(page, /Run &lt;checks&gt;/);
- assert.match(page, /<a data-watch-control="live" href="[^"]+" aria-current="page"[^>]*>Live<\/a>/);
+ assert.match(page, /<a data-watch-control="turn-details"[^>]* aria-current="page"[^>]*>Working<\/a>/, "the live page is the Working view");
  assert.match(page, /data-watch-control="copy-link" type="button" disabled/);
  assert.match(page, /script-src 'nonce-|<script nonce=/);
  assert.doesNotMatch(page, /<script>(?!\s*$)/, "every script carries the page nonce");
@@ -174,7 +175,7 @@ test("Live updates: unchanged cursors, new cards only, resync, completion and ne
  const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
  t.after(() => server.close());
  const session = await auth(server);
- const query = attr(session.text, "live").split("?")[1];
+ const query = liveEntry(session.text).split("?")[1];
  const updates = async (anchor, cursor) => {
   const r = await fetch(new URL(`/__pi_markdown_preview_live__/${anchor}/updates?${query}&cursor=${encodeURIComponent(cursor)}`, session.origin), { headers: { cookie: session.cookie } });
   return { status: r.status, type: r.headers.get("content-type"), cache: r.headers.get("cache-control"), body: await r.json() };
@@ -229,8 +230,8 @@ test("Live browser view: appends while following, holds a paused reader, keeps o
  try {
   const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
   await page.goto(server.url);
-  await Promise.all([page.waitForNavigation(), (async () => { await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyL"); await page.keyboard.up("Alt"); await page.keyboard.up("Control"); })()]);
-  assert.equal(await page.$eval("h1", e => e.textContent), "Live · recorded activity", "Ctrl+Alt+L opens Live");
+  await page.goto(new URL(liveEntry(await page.content()), server.url).href);
+  assert.equal(await page.$eval("h1", e => e.textContent), "Working · live");
   assert.equal(await page.$eval('[data-watch-control="copy-link"]', e => e.disabled), true);
   const count = () => page.$$eval(".live-events > details.event", cards => cards.length);
   const bottom = () => page.evaluate(() => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80);
@@ -317,7 +318,7 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
  };
  const done = (uuid, id, text) => {
   live.push({ type: "assistant", uuid, message: { role: "assistant", id, content: [{ type: "text", text }], stop_reason: "end_turn" } }, Date.now());
-  return server.updateDocument(html.replace("Answer", text), { appendToHistory: true, responseKey: `claude:${id}` });
+  return server.updateDocument(html.replace("Answer", text), { appendToHistory: true, responseKey: `claude:${id}`, turnDetails: async () => ({ events: [] }) });
  };
  const finish = (uuid, id, text) => { work(uuid, id); return done(uuid, id, text); };
  const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
@@ -325,7 +326,7 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
   await page.goto(server.url);
   const heading = () => page.$eval("h1, main p", e => e.textContent).catch(() => "");
-  const onLive = () => page.waitForFunction(() => document.querySelector("h1")?.textContent === "Live · recorded activity", { timeout: 15_000 });
+  const onLive = () => page.waitForFunction(() => document.querySelector("h1")?.textContent === "Working · live", { timeout: 15_000 });
   const onPreview = text => page.waitForFunction(t => location.pathname === "/" && document.body.textContent.includes(t), { timeout: 15_000 }, text);
   // Off by default; turning it on is remembered for this preview address.
   await page.$eval('[data-watch-control="follow-activity"]', e => e.click());
@@ -351,17 +352,29 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   assert.match(page.url(), /\/__pi_markdown_preview_live__\/p2\?/, "a reader scrolled up stays on Live");
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await onPreview("Second done");
-  // Ctrl+Alt+A turns it off: a turn opened by hand in Live is not left automatically.
-  await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyA"); await page.keyboard.up("Alt"); await page.keyboard.up("Control");
+  // Off: a new turn moves nothing and Working stays the finished response's fixed view.
+  const toggleKeys = async () => { await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyA"); await page.keyboard.up("Alt"); await page.keyboard.up("Control"); };
+  await toggleKeys();
   assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => `${e.textContent}|${e.getAttribute("aria-pressed")}`), "Follow activity: Off|false");
   user("p3", "Third");
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(new URL(page.url()).pathname, "/", "with Follow activity off, a new turn does not move the page");
-  await page.$eval('[data-watch-control="live"]', e => e.click());
+  assert.match(await page.$eval('[data-watch-control="turn-details"]', e => e.getAttribute("href")), /^\/__pi_markdown_preview_turn__\//, "Working is fixed while off");
+  // An older response's Working stays fixed even while following.
+  await page.goto(new URL("/?revision=1", server.url).href);
+  await toggleKeys();
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(new URL(page.url()).searchParams.get("revision"), "1", "an older response is never moved");
+  // On the latest response, following opens the running turn as live Working.
+  await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="latest"]', { delay: 10 }).catch(() => page.goto(new URL("/", server.url).href))]);
   await onLive();
+  assert.match(page.url(), /\/__pi_markdown_preview_live__\/p3\?/);
+  assert.equal(await page.$eval('[data-watch-control="turn-details"]', e => e.getAttribute("aria-current")), "page");
+  // Turning it off on the live page stays put at completion.
+  await toggleKeys();
   finish("f3", "m3", "Third done");
   await page.waitForFunction(() => document.querySelector("[data-live-status] a")?.textContent === "Open its response", { timeout: 10_000 });
   await new Promise(resolve => setTimeout(resolve, 2500));
-  assert.match(page.url(), /\/__pi_markdown_preview_live__\/p3\?/, "Live opened by hand stays put at completion");
+  assert.match(page.url(), /\/__pi_markdown_preview_live__\/p3\?/, "with following turned off, the live page stays put");
  } finally { await browser.close(); }
 });
