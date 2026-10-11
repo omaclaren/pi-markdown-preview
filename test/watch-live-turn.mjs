@@ -131,7 +131,7 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  const plain = await createBrowserWatchServer(html, dir, { initialTurnDetails: async () => ({ events: [] }) });
  t.after(() => plain.close());
  const plainSession = await auth(plain);
- assert.doesNotMatch(plainSession.text, /data-watch-control="live"/, "no live entry without the live option");
+ assert.doesNotMatch(plainSession.text, /<a data-watch-control="live"|<button data-watch-control="follow-activity"/, "no Live tab or Follow activity without the live option");
  assert.equal((await fetch(new URL("/__pi_markdown_preview_live__/?identity=x&instance=y", plainSession.origin), { headers: { cookie: plainSession.cookie } })).status, 404);
 
  const live = createLiveTurnProjector();
@@ -141,8 +141,9 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  t.after(() => server.close());
  const session = await auth(server);
  const entry = attr(session.text, "live");
- assert.ok(entry?.startsWith("/__pi_markdown_preview_live__/?identity="), "the history menu offers Follow current turn");
- assert.match(session.text, />Follow current turn</);
+ assert.ok(entry?.startsWith("/__pi_markdown_preview_live__/?identity="), "the toolbar offers a Live view");
+ assert.match(session.text, /<a data-watch-control="live" href="[^"]+" title="Live: the current turn's recorded activity \(Ctrl\+Alt\+L\)" aria-keyshortcuts="Control\+Alt\+L">Live<\/a>/);
+ assert.doesNotMatch(session.text, /Follow current turn/);
  const get = (path, extra = {}) => fetch(new URL(path, session.origin), { redirect: "manual", ...extra, headers: { cookie: session.cookie, ...(extra.headers ?? {}) } });
  assert.equal((await fetch(new URL(entry, session.origin), { redirect: "manual" })).status, 403, "cookie required");
  assert.equal((await get(entry.replace(/instance=[^&]+/, "instance=stale"))).status, 409);
@@ -159,7 +160,7 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  assert.match(page, /<h1>Live · recorded activity<\/h1>/);
  assert.match(page, /data-event-id="p1:0"/);
  assert.match(page, /Run &lt;checks&gt;/);
- assert.match(page, /<a data-watch-control="live-current" aria-current="page">Live<\/a>/);
+ assert.match(page, /<a data-watch-control="live" href="[^"]+" aria-current="page"[^>]*>Live<\/a>/);
  assert.match(page, /data-watch-control="copy-link" type="button" disabled/);
  assert.match(page, /script-src 'nonce-|<script nonce=/);
  assert.doesNotMatch(page, /<script>(?!\s*$)/, "every script carries the page nonce");
@@ -228,9 +229,8 @@ test("Live browser view: appends while following, holds a paused reader, keeps o
  try {
   const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
   await page.goto(server.url);
-  await page.$eval('[data-watch-control="toggle"]', e => e.click());
-  await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="live"]')]);
-  assert.equal(await page.$eval("h1", e => e.textContent), "Live · recorded activity");
+  await Promise.all([page.waitForNavigation(), (async () => { await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyL"); await page.keyboard.up("Alt"); await page.keyboard.up("Control"); })()]);
+  assert.equal(await page.$eval("h1", e => e.textContent), "Live · recorded activity", "Ctrl+Alt+L opens Live");
   assert.equal(await page.$eval('[data-watch-control="copy-link"]', e => e.disabled), true);
   const count = () => page.$$eval(".live-events > details.event", cards => cards.length);
   const bottom = () => page.evaluate(() => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80);
@@ -281,7 +281,8 @@ test("Follow activity state: JSON current turn and machine-readable live status"
  t.after(() => server.close());
  const session = await auth(server);
  const toggle = session.text.match(/<button data-watch-control="follow-activity"[^>]*>/)?.[0];
- assert.ok(toggle, "the history menu has a Follow activity toggle when Live is available");
+ assert.ok(toggle, "the toolbar has a Follow activity toggle when Live is available");
+ assert.match(session.text, /<button data-watch-control="follow-activity"[^>]*>Follow activity<\/button>/);
  assert.match(toggle, /aria-pressed="false" hidden/); assert.match(toggle, /data-view="preview"/); assert.match(toggle, /data-latest="true"/);
  const state = toggle.match(/data-live-state="([^"]+)"/)[1].replaceAll("&amp;", "&");
  const json = async path => (await fetch(new URL(path, session.origin), { headers: { cookie: session.cookie } })).json();
@@ -328,7 +329,8 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   const onPreview = text => page.waitForFunction(t => location.pathname === "/" && document.body.textContent.includes(t), { timeout: 15_000 }, text);
   // Off by default; turning it on is remembered for this preview address.
   await page.$eval('[data-watch-control="follow-activity"]', e => e.click());
-  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => `${e.textContent}|${e.getAttribute("aria-pressed")}`), "Follow activity: On|true");
+  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => `${e.textContent}|${e.getAttribute("aria-pressed")}|${e.hidden}`), "Follow activity|true|false");
+  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => getComputedStyle(e).backgroundColor === getComputedStyle(document.querySelector('[data-watch-control="preview"][aria-current="page"]')).backgroundColor), true, "on looks like the current view tab");
   assert.equal(await page.evaluate(() => localStorage.getItem("pi-markdown-preview:follow-activity")), "on");
   user("p1", "First");
   await onLive();
@@ -351,7 +353,7 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   await onPreview("Second done");
   // Ctrl+Alt+A turns it off: a turn opened by hand in Live is not left automatically.
   await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyA"); await page.keyboard.up("Alt"); await page.keyboard.up("Control");
-  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => e.textContent), "Follow activity: Off");
+  assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => e.getAttribute("aria-pressed")), "false");
   user("p3", "Third");
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(new URL(page.url()).pathname, "/", "with Follow activity off, a new turn does not move the page");

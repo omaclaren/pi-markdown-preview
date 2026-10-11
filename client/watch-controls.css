@@ -37,7 +37,8 @@
 }
 #pi-markdown-preview-watch-nav > button { border-radius: 999px; }
 .pi-preview-view-switch { display: inline-flex; gap: 0.15rem; }
-#pi-markdown-preview-watch-nav a[aria-current="page"] { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
+#pi-markdown-preview-watch-nav a[aria-current="page"],
+#pi-markdown-preview-watch-nav button[aria-pressed="true"] { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }
 body.pi-preview-working main { padding-top: max(72px, calc(var(--pi-preview-watch-nav-height, 3rem) + 24px)); }
 #pi-markdown-preview-watch-nav a:hover,
 #pi-markdown-preview-watch-nav button:hover { background: var(--panel-2, rgba(127, 127, 127, 0.16)); }

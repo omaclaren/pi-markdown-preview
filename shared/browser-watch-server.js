@@ -337,7 +337,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
-  ${navigation.turnDetailsUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"${working && !live ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)" aria-keyshortcuts="Control+Alt+W">Working</a>${live ? '<a data-watch-control="live-current" aria-current="page">Live</a>' : ''}</span>` : ""}
+  ${navigation.turnDetailsUrl || navigation.liveUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P)" aria-keyshortcuts="Control+Alt+P">Preview</a>${navigation.turnDetailsUrl ? `<a data-watch-control="turn-details" href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"${working && !live ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)" aria-keyshortcuts="Control+Alt+W">Working</a>` : ""}${navigation.liveUrl ? `<a data-watch-control="live" href="${escapeBrowserWatchHtmlAttribute(navigation.liveUrl)}"${live ? ' aria-current="page"' : ''} title="Live: the current turn's recorded activity (Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+L">Live</a>` : ""}</span>` : ""}
+  ${navigation.liveUrl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: switch to Live when a turn starts and back to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity</button>` : ""}
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
     <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
     <span id="pi-markdown-preview-watch-new" data-watch-control="new" hidden>New</span>
@@ -349,8 +350,6 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       <a id="pi-markdown-preview-watch-previous" data-watch-control="previous" title="Previous revision (Option/Alt+Left; add Shift for the oldest)" aria-keyshortcuts="Alt+ArrowLeft" ${linkAttributes(isWaiting ? undefined : previousRevision)}>← Previous</a>
       <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
       <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" title="Latest revision (Option/Alt+Shift+Right)" aria-keyshortcuts="Alt+Shift+ArrowRight" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
-      ${navigation.liveUrl ? `<a data-watch-control="live" href="${escapeBrowserWatchHtmlAttribute(navigation.liveUrl)}" title="Follow the current turn's recorded activity">Follow current turn</a>` : ""}
-      ${navigation.liveUrl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: open Live when a turn starts and return to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity: Off</button>` : ""}
       <button data-watch-control="wrap-code" type="button" hidden></button>
     </div>
   </div>
@@ -401,6 +400,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   window.addEventListener('load', updateNavigationHeight, { once: true });
   const previewLink = navigation?.querySelector('[data-watch-control="preview"]');
   const workingLink = navigation?.querySelector('[data-watch-control="turn-details"]');
+  const liveLink = navigation?.querySelector('[data-watch-control="live"]');
   const previousLink = navigation?.querySelector('[data-watch-control="previous"]');
   const countLabel = navigation?.querySelector('[data-watch-control="count"]');
   const nextLink = navigation?.querySelector('[data-watch-control="next"]');
@@ -733,7 +733,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     } catch {}
     navigateTo(url.href, false, link, keyboard);
   };
-  for (const link of [previewLink, workingLink]) link?.addEventListener('click', event => {
+  for (const link of [previewLink, workingLink, liveLink]) link?.addEventListener('click', event => {
     if (!plainClick(event)) return;
     event.preventDefault(); navigateView(link, event.detail === 0);
   });
@@ -759,7 +759,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     if (event.ctrlKey) {
       if (event.shiftKey) return;
       const key = event.key.toLowerCase();
-      const link = event.code === 'KeyP' || key === 'p' ? previewLink : event.code === 'KeyW' || key === 'w' ? workingLink : null;
+      const link = event.code === 'KeyP' || key === 'p' ? previewLink : event.code === 'KeyW' || key === 'w' ? workingLink : event.code === 'KeyL' || key === 'l' ? liveLink : null;
       if (link) { event.preventDefault(); navigateView(link, true); }
       return;
     }
@@ -1255,7 +1255,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					return;
 				}
 				if (!snapshot) {
-					respondRecovery(req, res, 404, "Turn no longer retained", "Live keeps only the latest turns of a session. Open the current preview, then follow the current turn from its controls."); return;
+					respondRecovery(req, res, 404, "Turn no longer retained", "Live keeps only the latest turns of a session. Open the current preview, then choose Live in its toolbar."); return;
 				}
 				const latest = documents[documents.length - 1];
 				const latestWorking = documents.findLast(d => d.turnDetails);
