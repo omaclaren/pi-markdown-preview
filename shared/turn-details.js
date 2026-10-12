@@ -315,13 +315,15 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		return turn ? { turn } : { gone: true };
 	};
 	const linked = e => "parentUuid" in e || "logicalParentUuid" in e;
+	// The record's own turn (which its children join) follows its recorded parent;
+	// without a known parent, the turn of a call it answers. Result blocks are
+	// then placed by their own calls (see push).
 	const ownerOf = e => {
-		// Exact call membership first: parallel results can name a sibling as parent.
+		const parent = e.parentUuid ?? e.logicalParentUuid;
+		if (typeof parent === "string" && owners.has(parent)) return owners.get(parent);
 		if (e.type === "user") for (const b of blocks(e.message?.content)) {
 			if (b?.type === "tool_result" && typeof b.tool_use_id === "string" && calls.has(b.tool_use_id.slice(0, 160))) return calls.get(b.tool_use_id.slice(0, 160));
 		}
-		const parent = e.parentUuid ?? e.logicalParentUuid;
-		return typeof parent === "string" ? owners.get(parent) : undefined;
 	};
 	const touch = (turn, at) => { turn.sequence++; turn.updatedAt = at.time; turn.loaded = at.loaded; };
 	const newTurn = anchor => {
@@ -337,29 +339,34 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 			turn.events.shift(); turn.bytes -= turn.sizes.shift(); turn.omitted++;
 		}
 	};
-	const recordEvents = (details, e) => {
+	const recordEvents = (details, e, block) => {
 		const m = e.message;
 		if (!m || !["user", "assistant"].includes(m.role)) return [];
+		// One block of a record split between turns: no record-level sidecar, a block-index id.
+		const content = block === undefined ? m.content : [blocks(m.content)[block]];
 		const before = details.result.events.length;
-		claudeContent(details, m.content, m.role, false, blocks(m.content).filter(b => b?.type === "tool_result").length === 1 ? e.toolUseResult : undefined);
+		claudeContent(details, content, m.role, false, block === undefined && blocks(content).filter(b => b?.type === "tool_result").length === 1 ? e.toolUseResult : undefined);
 		// The projection's own list stays empty; turns keep the bounded window.
-		return details.result.events.splice(before).map((event, k) => ({ ...event, id: `${e.uuid}:${k}` }));
+		return details.result.events.splice(before).map((event, k) => ({ ...event, id: `${e.uuid}:${block ?? k}` }));
 	};
-	const project = (turn, e, at) => {
-		const produced = recordEvents(turn.details, e);
-		if (!produced.length) return false;
+	const answeredCall = b => b?.type === "tool_result" && typeof b.tool_use_id === "string" ? b.tool_use_id.slice(0, 160) : undefined;
+	const pendingCall = (turn, callId) => {
+		for (let i = turn.events.length - 1; i >= 0; i--) {
+			const call = turn.events[i];
+			if (call.kind === "tool" && call.callId === callId) return call.pending ? call : undefined;
+		}
+	};
+	const project = (turn, e, at, block) => {
+		const produced = recordEvents(turn.details, e, block);
+		// A result record answers its call even when it has nothing to show (empty output).
+		const answered = e.type !== "user" ? [] : (block === undefined ? blocks(e.message?.content) : [blocks(e.message?.content)[block]])
+			.flatMap(b => { const call = pendingCall(turn, answeredCall(b)); return call ? [call] : []; });
+		if (!produced.length && !answered.length) return false;
 		touch(turn, at);
+		for (const call of answered) { delete call.pending; call.changed = turn.sequence; call.version = liveEventVersion(call); }
 		for (const event of produced) {
 			// A call says "No result recorded yet" until its result is recorded.
 			if (event.kind === "tool" && event.callId) { event.pending = true; remember(calls, event.callId, turn.owner, LIVE_CALL_LIMIT); }
-			if (event.kind === "result" && event.callId) {
-				for (let i = turn.events.length - 1; i >= 0; i--) {
-					const call = turn.events[i];
-					if (call.kind !== "tool" || call.callId !== event.callId) continue;
-					if (call.pending) { delete call.pending; call.changed = turn.sequence; call.version = liveEventVersion(call); }
-					break;
-				}
-			}
 			event.changed = turn.sequence;
 			event.version = liveEventVersion(event);
 			admit(turn, event, liveEventBytes(event));
@@ -434,6 +441,19 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		if (target?.held && (role === "activity" || role === "error")) target = { turn: open(target.held.anchor, at) };
 		const turn = target?.turn;
 		remember(owners, id, target?.held ?? turn?.owner ?? (target?.gone ? owner : UNPLACED), LIVE_RECORD_LIMIT);
+		// Results in one record are placed by their own calls, so a late result
+		// never takes a current turn's result with it (or the reverse).
+		if (role === "activity" && e.type === "user") {
+			const placed = blocks(e.message?.content).map(b => {
+				const call = answeredCall(b);
+				return call && calls.has(call) ? lookup(calls.get(call))?.turn ?? null : turn;
+			});
+			if (placed.some(t => t !== turn)) {
+				let changed = false;
+				placed.forEach((t, block) => { if (t) changed = project(t, e, at, block) || changed; });
+				return changed;
+			}
+		}
 		if (!turn || role === "skip") return false;
 		const active = turn.status === "running";
 		if (role === "meta") { if (active) turn.details.note("Known harness-injected context is omitted; it is not labelled as a user prompt."); return false; }

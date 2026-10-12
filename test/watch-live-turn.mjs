@@ -181,6 +181,37 @@ test("Live projection: membership follows recorded links, so late results stay w
  assert.deepEqual(parallel.snapshot("s").events.map(e => e.id), ["s:0"]);
 });
 
+test("Live projection: each result in a record joins its own call's turn; an empty result still answers its call", () => {
+ // Pi's mixedResults: one record answers a finished turn's call and the current turn's call.
+ const live = createLiveTurnProjector();
+ live.push(linkedUser("p1", null, "First"), 1);
+ live.push(linkedCall("c1", "p1", "k1"), 2);
+ live.push(linkedFinal("f1", "c1", "First done"), 3);
+ live.push(linkedUser("p2", "f1", "Second"), 4);
+ live.push(linkedCall("c2", "p2", "k2"), 5);
+ live.push(linkedUser("mixed", "c2", [{ type: "tool_result", tool_use_id: "k1", content: "late" }, { type: "tool_result", tool_use_id: "k2", content: "current" }]), 6);
+ live.push(assistant("next", "m-next", [txt("Continuing")], null, { parentUuid: "mixed" }), 7);
+ assert.deepEqual(live.snapshot("p1").events.map(e => e.id), ["p1:0", "c1:0", "f1:0", "mixed:0"]);
+ assert.deepEqual(live.snapshot("p2").events.map(e => [e.id, e.pending === true]), [["p2:0", false], ["c2:0", false], ["mixed:1", false], ["next:0", false]], "the current call is answered and the turn continues");
+ // In either order.
+ const reversed = createLiveTurnProjector();
+ for (const r of [linkedUser("p1", null, "First"), linkedCall("c1", "p1", "k1"), linkedFinal("f1", "c1", "Done"), linkedUser("p2", "f1", "Second"), linkedCall("c2", "p2", "k2")]) reversed.push(r, 1);
+ reversed.push(linkedUser("mixed", "c2", [{ type: "tool_result", tool_use_id: "k2", content: "current" }, { type: "tool_result", tool_use_id: "k1", content: "late" }]), 2);
+ assert.deepEqual(reversed.snapshot("p1").events.map(e => e.id).at(-1), "mixed:1");
+ assert.deepEqual(reversed.snapshot("p2").events.map(e => e.id).at(-1), "mixed:0");
+ // Pi's emptyResults: a recorded result with nothing to show is not "No result recorded yet".
+ const empty = createLiveTurnProjector();
+ empty.push(user("p", "Run them"), 1);
+ const contents = ["", [], [{ type: "text", text: "" }], "  \n "];
+ contents.forEach((content, i) => empty.push(call(`c${i}`, `m${i}`, `k${i}`, "Bash", { command: "true" }), 2));
+ const before = empty.snapshot("p");
+ assert.ok(before.events.slice(1).every(e => e.pending === true));
+ contents.forEach((content, i) => assert.equal(empty.push(result(`r${i}`, `k${i}`, content), 3), true));
+ const after = empty.snapshot("p");
+ assert.deepEqual(after.events.map(e => [e.id, e.pending === true]), [["p:0", false], ["c0:0", false], ["c1:0", false], ["c2:0", false], ["c3:0", false]]);
+ assert.ok(after.sequence > before.sequence, "the change reaches the client");
+});
+
 test("Live projection: a lone slash command or ! command is context, never a running turn", () => {
  const live = createLiveTurnProjector();
  live.push(linkedUser("p", null, "Earlier"), 1);
