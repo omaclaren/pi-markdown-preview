@@ -13,8 +13,11 @@ const textOf = value => blocks(value).filter(b => ["text", "input_text", "output
 const injected = value => /^\s*(?:<(?:system-reminder|user_instructions|environment_context|permissions_instructions)\b|# AGENTS\.md instructions\b)/i.test(text(value));
 const json = value => typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2);
 
-/** Limits default to the retrospective view; live projection keeps its own window. */
-export function createTurnDetails(notices = [], { eventLimit = TURN_EVENT_LIMIT, totalLimit = TURN_TOTAL_LIMIT } = {}) {
+/**
+ * Limits default to the retrospective view; live projection keeps its own
+ * window and bounds the call names it remembers for labelling results.
+ */
+export function createTurnDetails(notices = [], { eventLimit = TURN_EVENT_LIMIT, totalLimit = TURN_TOTAL_LIMIT, toolNameLimit = Infinity } = {}) {
 	/** @type {{ events: { kind: string, label: string, text: string, callId?: string, images?: object[], questionAnswers?: string }[], notices: string[], sourceAgent?: string }} */
 	const result = { events: [], notices: [...notices] };
 	let size = 0;
@@ -42,7 +45,11 @@ export function createTurnDetails(notices = [], { eventLimit = TURN_EVENT_LIMIT,
 		if (clipped) note("Long entries are truncated. This is not the complete session transcript.");
 		size += body.length + answerData.length;
 		const call = text(callId).slice(0, 160);
-		if (kind === "tool" && call) toolNames.set(call, text(label).replace(/^Tool:\s*/, "").slice(0, 100));
+		if (kind === "tool" && call) {
+			toolNames.delete(call);
+			toolNames.set(call, text(label).replace(/^Tool:\s*/, "").slice(0, 100));
+			if (toolNames.size > toolNameLimit) toolNames.delete(toolNames.keys().next().value);
+		}
 		const displayLabel = kind === "result" && toolNames.has(call) && /^Tool result(?: \(error\))?$/.test(label) ? `${label}: ${toolNames.get(call)}` : label;
 		result.events.push({ kind, label: text(displayLabel).slice(0, 160), text: body, ...(call ? { callId: call } : {}), ...(admitted.length ? { images: admitted } : {}), ...(answerData ? { questionAnswers: answerData } : {}) });
 	};
@@ -222,24 +229,49 @@ function codexDetails(rows, target, t) {
 }
 
 // ---- Live: recorded activity of one in-progress turn (milestone 1: Claude) ----
-// Records are pushed in file order as they become readable. Each turn starts at
-// its first real prompt (or task notification, or slash command) after the
-// previous turn ended; local commands and their output join it as context.
-// Completion comes only from an explicit recorded end; silence means nothing.
+// Records are pushed in file order as they become readable. Claude Code appends
+// records and never rewrites one: a uuid names one record's content for good, so
+// a repeated uuid (backfill and subscription overlap) is ignored, and a message's
+// blocks and its recorded end arrive as separate records with their own uuids.
+// Membership follows each record's own links, not its position: a record joins
+// the turn of the call it answers or of its recorded parent, so a late result of
+// a finished turn never becomes another turn's activity. A prompt or task
+// notification starts a turn. Local commands and their output (/theme, !ls) wait
+// as context for the next turn and never start one themselves. Completion comes
+// only from an explicit recorded end; silence means nothing.
 export const LIVE_EVENT_WINDOW = 250;
+/** A turn's cards are bounded by UTF-8 size as well as count; two turns are kept. */
+export const LIVE_TURN_BYTES = 3 * 1024 * 1024;
 const LIVE_TURNS_KEPT = 2;
-const LIVE_SEEN_LIMIT = 20_000;
+// Remembered uuids (dedupe and ancestry) and call ids (exact result membership).
+const LIVE_RECORD_LIMIT = 10_000;
+const LIVE_CALL_LIMIT = 2 * LIVE_EVENT_WINDOW;
+// Local-command context waiting for the next turn.
+const LIVE_HELD_EVENTS = 20;
+const LIVE_HELD_BYTES = 256 * 1024;
+const LIVE_HELD_LINKS = 100;
 const LIVE_INTERRUPTION = /^\[Request interrupted by user(?: for tool use)?\]$/;
-const LIVE_CONTEXT_WRAPPER = /^<(?:bash-input|bash-stdout|local-command-stdout|local-command-stderr)>/;
+const LIVE_CONTEXT_WRAPPER = /^<(?:command-(?:name|message|args)|bash-input|bash-stdout|local-command-stdout|local-command-stderr)>/;
 
 // FNV-1a over the projected fields: a version changes only when a card's content does.
 function liveEventVersion(event) {
 	const images = (event.images ?? []).map(image => image.unavailable ?? `${image.mimeType}:${image.byteLength}:${image.data?.length}`);
-	const source = JSON.stringify([event.kind, event.label, event.text, event.callId ?? "", event.questionAnswers ?? "", images]);
+	const source = JSON.stringify([event.kind, event.label, event.text, event.callId ?? "", event.questionAnswers ?? "", images, event.pending === true]);
 	let hash = 0x811c9dc5;
 	for (let i = 0; i < source.length; i++) { hash ^= source.charCodeAt(i); hash = Math.imul(hash, 0x01000193) >>> 0; }
 	return hash.toString(36);
 }
+
+function utf8Bytes(value) {
+	let bytes = 0;
+	for (let i = 0; i < value.length; i++) {
+		const c = value.charCodeAt(i);
+		bytes += c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xd800 && c < 0xdc00 ? 4 : c >= 0xdc00 && c < 0xe000 ? 0 : 3;
+	}
+	return bytes;
+}
+const liveEventBytes = event => 64 + utf8Bytes(text(event.text)) + utf8Bytes(text(event.label)) + utf8Bytes(text(event.questionAnswers))
+	+ (event.images ?? []).reduce((total, image) => total + (image.data?.length ?? 0), 0);
 
 function claudeLiveRole(e) {
 	if (!e || typeof e !== "object" || e.isSidechain === true) return "skip";
@@ -256,67 +288,161 @@ function claudeLiveRole(e) {
 	return "start";
 }
 
-/** Incremental, bounded projection of the latest turns of one Claude session. */
-export function createLiveTurnProjector(agent = "claude") {
+/**
+ * Incremental, bounded projection of the latest turns of one Claude session.
+ * `partialStart`: the records begin partway through the session (a bounded
+ * backfill), so activity before the first retained prompt forms a turn whose
+ * prompt is not retained. Otherwise unlinked activity never starts a turn.
+ */
+export function createLiveTurnProjector(agent = "claude", { partialStart = false } = {}) {
 	if (agent !== "claude") throw new Error("Live recorded activity currently supports Claude Code sessions only.");
 	const generation = Math.random().toString(36).slice(2, 10);
 	const turns = [];
-	const seen = new Set(), seenOrder = [];
-	const touch = (turn, observedAt) => { turn.sequence++; turn.updatedAt = observedAt; };
-	const newTurn = (anchor, observedAt) => {
-		const details = createTurnDetails([], { eventLimit: Infinity, totalLimit: Infinity });
-		const turn = { anchor, status: "running", finalKey: undefined, details, events: [], omitted: 0, sequence: 0, updatedAt: observedAt };
+	// Owner links: a turn's `owner` object (resolved among retained turns, so a
+	// dropped turn's cards are freed), or a held-context link, adopted by the
+	// turn that context joins. UNPLACED records stay unknown to their children.
+	const owners = new Map(), calls = new Map();
+	const UNPLACED = Object.freeze({});
+	let held, fallback, started = false;
+	const remember = (map, key, owner, limit) => {
+		map.delete(key); map.set(key, owner);
+		if (map.size > limit) map.delete(map.keys().next().value);
+	};
+	const lookup = owner => {
+		if (!owner || owner === UNPLACED) return undefined;
+		if (owner.held && !owner.adopted) return { held: owner };
+		const turn = turns.find(t => t.owner === (owner.adopted ?? owner));
+		return turn ? { turn } : { gone: true };
+	};
+	const linked = e => "parentUuid" in e || "logicalParentUuid" in e;
+	const ownerOf = e => {
+		// Exact call membership first: parallel results can name a sibling as parent.
+		if (e.type === "user") for (const b of blocks(e.message?.content)) {
+			if (b?.type === "tool_result" && typeof b.tool_use_id === "string" && calls.has(b.tool_use_id.slice(0, 160))) return calls.get(b.tool_use_id.slice(0, 160));
+		}
+		const parent = e.parentUuid ?? e.logicalParentUuid;
+		return typeof parent === "string" ? owners.get(parent) : undefined;
+	};
+	const touch = (turn, at) => { turn.sequence++; turn.updatedAt = at.time; turn.loaded = at.loaded; };
+	const newTurn = anchor => {
+		const details = createTurnDetails([], { eventLimit: Infinity, totalLimit: Infinity, toolNameLimit: LIVE_EVENT_WINDOW });
+		const turn = { owner: {}, anchor, status: "running", finalKey: undefined, details, events: [], sizes: [], bytes: 0, omitted: 0, sequence: 0, updatedAt: 0, loaded: false };
 		turns.push(turn);
 		while (turns.length > LIVE_TURNS_KEPT) turns.shift();
 		return turn;
 	};
-	const project = (turn, e, observedAt) => {
-		const m = e.message;
-		if (!m || !["user", "assistant"].includes(m.role)) return;
-		const before = turn.details.result.events.length;
-		claudeContent(turn.details, m.content, m.role, false, blocks(m.content).filter(b => b?.type === "tool_result").length === 1 ? e.toolUseResult : undefined);
-		// Keep the projection's own list empty; the turn keeps the bounded window.
-		const produced = turn.details.result.events.splice(before);
-		if (!produced.length) return;
-		touch(turn, observedAt);
-		produced.forEach((event, k) => turn.events.push({ ...event, id: `${e.uuid}:${k}`, version: liveEventVersion(event), changed: turn.sequence }));
-		if (turn.events.length > LIVE_EVENT_WINDOW) {
-			const drop = turn.events.length - LIVE_EVENT_WINDOW;
-			turn.events.splice(0, drop);
-			turn.omitted += drop;
+	const admit = (turn, event, size) => {
+		turn.events.push(event); turn.sizes.push(size); turn.bytes += size;
+		while (turn.events.length > LIVE_EVENT_WINDOW || (turn.bytes > LIVE_TURN_BYTES && turn.events.length > 1)) {
+			turn.events.shift(); turn.bytes -= turn.sizes.shift(); turn.omitted++;
 		}
 	};
+	const recordEvents = (details, e) => {
+		const m = e.message;
+		if (!m || !["user", "assistant"].includes(m.role)) return [];
+		const before = details.result.events.length;
+		claudeContent(details, m.content, m.role, false, blocks(m.content).filter(b => b?.type === "tool_result").length === 1 ? e.toolUseResult : undefined);
+		// The projection's own list stays empty; turns keep the bounded window.
+		return details.result.events.splice(before).map((event, k) => ({ ...event, id: `${e.uuid}:${k}` }));
+	};
+	const project = (turn, e, at) => {
+		const produced = recordEvents(turn.details, e);
+		if (!produced.length) return false;
+		touch(turn, at);
+		for (const event of produced) {
+			// A call says "No result recorded yet" until its result is recorded.
+			if (event.kind === "tool" && event.callId) { event.pending = true; remember(calls, event.callId, turn.owner, LIVE_CALL_LIMIT); }
+			if (event.kind === "result" && event.callId) {
+				for (let i = turn.events.length - 1; i >= 0; i--) {
+					const call = turn.events[i];
+					if (call.kind !== "tool" || call.callId !== event.callId) continue;
+					if (call.pending) { delete call.pending; call.changed = turn.sequence; call.version = liveEventVersion(call); }
+					break;
+				}
+			}
+			event.changed = turn.sequence;
+			event.version = liveEventVersion(event);
+			admit(turn, event, liveEventBytes(event));
+		}
+		return true;
+	};
+	const hold = (e, link) => {
+		held ??= { details: createTurnDetails([], { eventLimit: Infinity, totalLimit: Infinity, toolNameLimit: 0 }), events: [], sizes: [], bytes: 0, links: [] };
+		if (!held.links.includes(link)) { held.links.push(link); if (held.links.length > LIVE_HELD_LINKS) held.links.shift(); }
+		for (const event of recordEvents(held.details, e)) {
+			const size = liveEventBytes(event);
+			held.events.push(event); held.sizes.push(size); held.bytes += size;
+			while (held.events.length > LIVE_HELD_EVENTS || (held.bytes > LIVE_HELD_BYTES && held.events.length > 1)) { held.events.shift(); held.bytes -= held.sizes.shift(); }
+		}
+	};
+	// A turn starts with any context held for it.
+	const open = (anchor, at) => {
+		const turn = newTurn(anchor);
+		touch(turn, at);
+		if (held) {
+			for (const link of held.links) link.adopted = turn.owner;
+			held.events.forEach((event, i) => { event.changed = turn.sequence; event.version = liveEventVersion(event); admit(turn, event, held.sizes[i]); });
+			held = undefined;
+		}
+		started = true;
+		return turn;
+	};
 	/** @returns true when the record changed what a live view shows. */
-	const push = (e, observedAt = Date.now()) => {
+	const push = (e, observedAt = Date.now(), loaded = false) => {
 		const id = typeof e?.uuid === "string" ? e.uuid : undefined;
-		if (!id || seen.has(id)) return false;
-		seen.add(id); seenOrder.push(id);
-		if (seenOrder.length > LIVE_SEEN_LIMIT) seen.delete(seenOrder.shift());
+		if (!id || owners.has(id)) return false;
+		const at = { time: observedAt, loaded };
 		const role = claudeLiveRole(e);
-		if (role === "skip") return false;
-		let turn = turns.at(-1);
-		const open = turn?.status === "running";
-		if (role === "meta") { if (open) turn.details.note("Known harness-injected context is omitted; it is not labelled as a user prompt."); return false; }
-		if (role === "start" || role === "context") {
-			if (!open) turn = newTurn(id, observedAt);
-			const before = turn.sequence;
-			project(turn, e, observedAt);
-			if (turn.sequence === before) touch(turn, observedAt);
+		const latest = turns.at(-1);
+		const running = latest?.status === "running" ? latest : undefined;
+		const owner = ownerOf(e);
+		let target = lookup(owner);
+		// Records without recorded links (other formats, fixtures) fall back to file order.
+		const sameTurn = running && (target?.turn === running || (!target && !linked(e)));
+		if (role === "start") {
+			// Input during a running turn steers it; otherwise it starts the next turn.
+			const turn = sameTurn ? running : open(id, at);
+			remember(owners, id, turn.owner, LIVE_RECORD_LIMIT);
+			if (!project(turn, e, at)) touch(turn, at);
 			return true;
 		}
-		if (!open) {
-			// Activity without a retained prompt: the turn began before the
-			// retained records, or continued after a recorded end.
-			if (role !== "activity" && role !== "error") return false;
-			turn = newTurn(id, observedAt);
-			turn.details.note("This turn's prompt is not in the retained recorded activity.");
+		if (role === "context") {
+			if (sameTurn) {
+				remember(owners, id, running.owner, LIVE_RECORD_LIMIT);
+				if (!project(running, e, at)) touch(running, at);
+				return true;
+			}
+			const link = target?.held ?? { held: true, anchor: id, adopted: undefined };
+			remember(owners, id, link, LIVE_RECORD_LIMIT);
+			hold(e, link);
+			return false;
 		}
-		if (role === "interrupted") { turn.status = "interrupted"; touch(turn, observedAt); return true; }
-		if (role === "compaction") { turn.details.note("Context was compacted during this turn."); touch(turn, observedAt); return true; }
-		project(turn, e, observedAt);
-		if (role === "error") { turn.status = "error"; touch(turn, observedAt); }
-		else if (isClaudeFinal(e)) { turn.status = "completed"; turn.finalKey = `claude:${e.message?.id ?? e.uuid}`; touch(turn, observedAt); }
-		return true;
+		if (!target) {
+			// No link to anything retained: a gap in what was read, or a format without links.
+			if (running) {
+				target = { turn: running };
+				if (linked(e) && !["skip", "meta"].includes(role)) running.details.note("Some recorded activity is not linked to retained records; it is shown in file order.");
+			} else if (held && !linked(e)) target = { held: held.links[0] };
+			else if (partialStart && !started && role !== "skip" && role !== "meta") {
+				if (!fallback || !turns.includes(fallback)) {
+					fallback = newTurn(id);
+					fallback.details.note("This turn's prompt is not in the retained recorded activity.");
+				}
+				target = { turn: fallback };
+			}
+		}
+		if (target?.held && (role === "activity" || role === "error")) target = { turn: open(target.held.anchor, at) };
+		const turn = target?.turn;
+		remember(owners, id, target?.held ?? turn?.owner ?? (target?.gone ? owner : UNPLACED), LIVE_RECORD_LIMIT);
+		if (!turn || role === "skip") return false;
+		const active = turn.status === "running";
+		if (role === "meta") { if (active) turn.details.note("Known harness-injected context is omitted; it is not labelled as a user prompt."); return false; }
+		if (role === "compaction") { if (!active) return false; turn.details.note("Context was compacted during this turn."); touch(turn, at); return true; }
+		if (role === "interrupted") { if (!active) return false; turn.status = "interrupted"; touch(turn, at); return true; }
+		const changed = project(turn, e, at);
+		if (active && role === "error") { turn.status = "error"; touch(turn, at); return true; }
+		if (active && isClaudeFinal(e)) { turn.status = "completed"; turn.finalKey = `claude:${e.message?.id ?? e.uuid}`; touch(turn, at); return true; }
+		return changed;
 	};
 	return {
 		generation,
@@ -329,10 +455,16 @@ export function createLiveTurnProjector(agent = "claude") {
 			if (!turn) return undefined;
 			const latest = turns.at(-1);
 			return {
-				generation, anchor, status: turn.status, finalKey: turn.finalKey, sequence: turn.sequence, updatedAt: turn.updatedAt,
+				generation, anchor, status: turn.status, finalKey: turn.finalKey, sequence: turn.sequence, updatedAt: turn.updatedAt, loaded: turn.loaded,
 				omitted: turn.omitted, notices: [...turn.details.result.notices], events: turn.events.map(event => ({ ...event })),
 				...(latest !== turn ? { newerAnchor: latest.anchor } : {}),
 			};
 		},
+		/** Retained sizes, for bounds checks. */
+		stats: () => ({
+			records: owners.size, calls: calls.size, turns: turns.length,
+			events: turns.reduce((n, t) => n + t.events.length, 0) + (held?.events.length ?? 0),
+			bytes: turns.reduce((n, t) => n + t.bytes, 0) + (held?.bytes ?? 0),
+		}),
 	};
 }

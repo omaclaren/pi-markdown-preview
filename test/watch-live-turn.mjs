@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLiveTurnProjector, LIVE_EVENT_WINDOW } from "../shared/turn-details.js";
+import { createLiveTurnProjector, LIVE_EVENT_WINDOW, LIVE_TURN_BYTES } from "../shared/turn-details.js";
+import { renderLiveCard } from "../shared/turn-details-page.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const txt = text => ({ type: "text", text });
@@ -24,14 +25,22 @@ test("Live projection: one Claude turn from prompt to explicit end, with stable 
  assert.equal(snapshot.status, "running");
  assert.deepEqual(labels(snapshot), [["p:0", "prompt", "Prompt / input"], ["t1:0", "reasoning", "Recorded thinking / reasoning"], ["c1:0", "tool", "Tool: Bash"]]);
  assert.equal(snapshot.updatedAt, 1100, "Updated is the observation time of the newest record, not its recorded time");
- // A call without a result has no result card until one is recorded.
+ // A call without a result says so (and nothing more) until its result is recorded.
  assert.equal(snapshot.events.filter(e => e.kind === "result").length, 0);
+ assert.equal(snapshot.events[2].pending, true);
+ assert.match(renderLiveCard(snapshot.events[2], 3), /<summary>.*No result recorded yet<\/span><\/summary>/);
+ assert.doesNotMatch(renderLiveCard(snapshot.events[2], 3), /running|in progress/i);
+ const pendingVersion = snapshot.events[2].version;
  const before = snapshot.sequence;
  live.push(result("r1", "call-1", "ok"), 3000);
  live.push(assistant("a1", "m2", [txt("All green.")]), 3000);
  snapshot = live.snapshot("p");
  assert.ok(snapshot.sequence > before);
  assert.deepEqual(labels(snapshot).slice(3), [["r1:0", "result", "Tool result: Bash"], ["a1:0", "progress", "Assistant progress"]]);
+ assert.equal(snapshot.events[2].pending, undefined, "the result clears the call's pending note");
+ assert.notEqual(snapshot.events[2].version, pendingVersion, "so the call card is sent again");
+ assert.ok(snapshot.events[2].changed > before);
+ assert.doesNotMatch(renderLiveCard(snapshot.events[2], 3), /No result recorded yet/);
  assert.equal(snapshot.status, "running", "Text without a recorded end is not completion");
  const stable = Object.fromEntries(snapshot.events.map(e => [e.id, e.version]));
  live.push(assistant("a2", "m2", [txt("Done.")], "end_turn"), 5300);
@@ -57,26 +66,31 @@ test("Live projection: duplicates, sidechains, injected context and system recor
  assert.match(live.snapshot("p").notices.join(" "), /harness-injected context is omitted/);
 });
 
-test("Live projection: local commands join the next turn; task notifications and interruptions bound turns", () => {
+test("Live projection: local commands wait as context for the next turn; task notifications and interruptions bound turns", () => {
  const live = createLiveTurnProjector();
- live.push(user("cmd", "<command-name>/theme</command-name>\n<command-message>theme</command-message>\n<command-args></command-args>"), 1);
- live.push(user("out", "<local-command-stdout>Theme set to dark</local-command-stdout>"), 1);
+ assert.equal(live.push(user("cmd", "<command-name>/theme</command-name>\n<command-message>theme</command-message>\n<command-args></command-args>"), 1), false);
+ assert.equal(live.push(user("out", "<local-command-stdout>Theme set to dark</local-command-stdout>"), 1), false);
+ assert.equal(live.current(), undefined, "a lone local command is not a running turn");
  live.push(user("p", "Draft the exam"), 2);
- assert.equal(live.current(), "cmd", "context before the prompt belongs to the same turn");
- assert.deepEqual(live.snapshot("cmd").events.map(e => e.label), ["Prompt / input", "Command output", "Prompt / input"]);
+ assert.equal(live.current(), "p", "the prompt anchors its turn; the command before it is context");
+ assert.deepEqual(live.snapshot("p").events.map(e => e.label), ["Prompt / input", "Command output", "Prompt / input"]);
  live.push(assistant("a", "m1", [txt("Working on it")]), 3);
  live.push(user("stop", "[Request interrupted by user]"), 4);
- assert.equal(live.snapshot("cmd").status, "interrupted");
+ assert.equal(live.snapshot("p").status, "interrupted");
+ // After a recorded end, a command again waits instead of starting a turn.
+ live.push(user("cmd2", "<command-name>/cost</command-name>"), 4);
+ assert.equal(live.current(), "p");
  // A task notification starts the next turn.
  const notification = "<task-notification>\n<task-id>x</task-id>\n<status>completed</status>\n<summary>Background command finished</summary>\n</task-notification>";
  live.push(user("tn", notification), 5);
  assert.equal(live.current(), "tn");
- assert.equal(live.snapshot("cmd").newerAnchor, "tn", "an older turn points to the newer one and never becomes it");
+ assert.equal(live.snapshot("p").newerAnchor, "tn", "an older turn points to the newer one and never becomes it");
+ assert.equal(live.snapshot("tn").events[0].label, "Prompt / input", "held /cost output joins the next turn");
  live.push(assistant("err", "m3", [txt("API Error: overloaded")], "stop_sequence", { isApiErrorMessage: true }), 6);
  assert.equal(live.snapshot("tn").status, "error");
  // A third turn evicts the first: only the latest two are retained.
  live.push(user("p3", "Next"), 7);
- assert.equal(live.snapshot("cmd"), undefined);
+ assert.equal(live.snapshot("p"), undefined);
  assert.equal(live.snapshot("tn").newerAnchor, "p3");
 });
 
@@ -89,11 +103,15 @@ test("Live projection: mid-turn input, compaction and activity without a retaine
  live.push({ type: "system", uuid: "cb", subtype: "compact_boundary" }, 4);
  assert.equal(live.snapshot("p").status, "running");
  assert.match(live.snapshot("p").notices.join(" "), /compacted during this turn/);
- // A projector started mid-turn (backfill cut) still shows the activity it has.
- const late = createLiveTurnProjector();
+ // A projector whose records start partway (a bounded backfill) still shows the activity it has.
+ const late = createLiveTurnProjector("claude", { partialStart: true });
  late.push(call("c2", "m9", "k2", "Bash", { command: "ls" }), 1);
  assert.equal(late.current(), "c2");
  assert.match(late.snapshot("c2").notices.join(" "), /prompt is not in the retained recorded activity/);
+ // Otherwise activity without a prompt never starts a turn.
+ const strict = createLiveTurnProjector();
+ strict.push(call("c3", "m10", "k3", "Bash", { command: "ls" }), 1);
+ assert.equal(strict.current(), undefined);
 });
 
 test("Live projection: a long turn keeps a sliding window with stable ids and a count of known evictions", () => {
@@ -112,6 +130,130 @@ test("Live projection: a long turn keeps a sliding window with stable ids and a 
  // Snapshots are copies: changing one does not change the projection.
  snapshot.events[0].text = "changed";
  assert.notEqual(live.snapshot("p").events[0].text, "changed");
+});
+
+// Records with Claude's recorded links (parentUuid), as written by Claude Code.
+const linkedUser = (uuid, parentUuid, content, extra = {}) => user(uuid, content, { parentUuid, ...extra });
+const linkedCall = (uuid, parentUuid, callId) => ({ ...call(uuid, `m-${uuid}`, callId, "Bash", { command: "echo synthetic" }), parentUuid });
+const linkedResult = (uuid, parentUuid, callId) => ({ ...result(uuid, callId, "Earlier branch result"), parentUuid });
+const linkedFinal = (uuid, parentUuid, text) => assistant(uuid, `m-${uuid}`, [txt(text)], "end_turn", { parentUuid });
+
+test("Live projection: membership follows recorded links, so late results stay with their own turn and never start one", () => {
+ // Pi's lateEarlierBranch: a late result for the first turn's call arrives after the second prompt.
+ const branch = createLiveTurnProjector();
+ branch.push(linkedUser("p1", null, "First"), 1);
+ branch.push(linkedCall("c1", "p1", "k1"), 2);
+ branch.push(linkedFinal("f1", "c1", "First done"), 3);
+ branch.push(linkedUser("p2", "f1", "Second"), 4);
+ branch.push(linkedResult("late", "c1", "k1"), 5);
+ assert.equal(branch.current(), "p2");
+ assert.deepEqual(branch.snapshot("p2").events.map(e => e.id), ["p2:0"], "the second turn does not receive the first turn's result");
+ assert.deepEqual(branch.snapshot("p1").events.map(e => e.id), ["p1:0", "c1:0", "f1:0", "late:0"], "the result joins its own call's turn");
+ assert.equal(branch.snapshot("p1").status, "completed");
+ // Pi's lateResultPhantomTurn: the same result before any next prompt is not a new running turn.
+ const phantom = createLiveTurnProjector();
+ phantom.push(linkedUser("p1", null, "First"), 1);
+ phantom.push(linkedCall("c1", "p1", "k1"), 2);
+ phantom.push(linkedFinal("f1", "c1", "First done"), 3);
+ phantom.push(linkedResult("late", "c1", "k1"), 4);
+ assert.equal(phantom.current(), "p1");
+ assert.equal(phantom.snapshot("p1").status, "completed");
+ assert.equal(phantom.snapshot("late"), undefined);
+ // An unlinked result after completion is not shown anywhere, rather than guessed into a turn.
+ phantom.push(linkedResult("stray", "unknown-parent", "k-unknown"), 5);
+ assert.equal(phantom.current(), "p1");
+ assert.equal(phantom.snapshot("p1").events.some(e => e.id === "stray:0"), false);
+ // Parallel calls: results can name a sibling as parent; call membership places them exactly.
+ const parallel = createLiveTurnProjector();
+ parallel.push(linkedUser("p", null, "Both"), 1);
+ parallel.push(linkedCall("a1", "p", "k1"), 2);
+ parallel.push(linkedCall("a2", "a1", "k2"), 2);
+ parallel.push(linkedResult("r1", "a2", "k1"), 3);
+ parallel.push(linkedFinal("f", "r1", "Done"), 4);
+ parallel.push(linkedUser("q", "f", "Next"), 5);
+ parallel.push(linkedResult("r2", "r1", "k2"), 6);
+ assert.deepEqual(parallel.snapshot("q").events.map(e => e.id), ["q:0"]);
+ assert.deepEqual(parallel.snapshot("p").events.map(e => [e.id, e.pending === true]), [["p:0", false], ["a1:0", false], ["a2:0", false], ["r1:0", false], ["f:0", false], ["r2:0", false]]);
+ // A turn evicted from the projection takes its late records with it.
+ parallel.push(linkedFinal("qf", "q", "Next done"), 7);
+ parallel.push(linkedUser("s", "qf", "Third"), 8);
+ parallel.push(linkedResult("r3", "a2", "k2"), 9);
+ assert.deepEqual(parallel.snapshot("s").events.map(e => e.id), ["s:0"]);
+});
+
+test("Live projection: a lone slash command or ! command is context, never a running turn", () => {
+ const live = createLiveTurnProjector();
+ live.push(linkedUser("p", null, "Earlier"), 1);
+ live.push(linkedFinal("f", "p", "Earlier done"), 2);
+ // Pi's commandOnly probe: /theme and its output, then a real prompt.
+ live.push(linkedUser("theme", "f", "<command-name>/theme</command-name><command-message>theme</command-message><command-args></command-args>"), 3);
+ live.push(linkedUser("theme-out", "theme", "<local-command-stdout>Theme set</local-command-stdout>"), 3);
+ live.push(linkedUser("bang", "theme-out", "<bash-input>ls</bash-input>"), 4);
+ live.push(linkedUser("bang-out", "bang", "<bash-stdout>file.txt</bash-stdout><bash-stderr></bash-stderr>"), 4);
+ assert.equal(live.current(), "p");
+ assert.equal(live.snapshot("p").status, "completed", "nothing is running, so Follow activity has nothing to open");
+ live.push(linkedUser("real", "bang-out", "Actual prompt"), 5);
+ assert.equal(live.current(), "real", "the real prompt keeps its own anchor");
+ assert.deepEqual(live.snapshot("real").events.map(e => e.id), ["theme:0", "theme-out:0", "bang:0", "bang-out:0", "real:0"]);
+ // A command that expands into a prompt starts its turn when the model answers it.
+ live.push(linkedFinal("rf", "real", "Answered"), 6);
+ live.push(linkedUser("review", "rf", "<command-message>review</command-message>\n<command-name>/review</command-name>"), 7);
+ live.push(linkedUser("expanded", "review", "Review the diff", { isMeta: true }), 7);
+ assert.equal(live.current(), "real");
+ live.push(assistant("x", "m-x", [txt("Reviewing")], null, { parentUuid: "expanded" }), 8);
+ assert.equal(live.current(), "review");
+ assert.equal(live.snapshot("review").status, "running");
+ assert.deepEqual(live.snapshot("review").events.map(e => e.id), ["review:0", "x:0"]);
+});
+
+test("Live projection: Claude records are immutable; a reply's end arrives as its own record", () => {
+ const live = createLiveTurnProjector();
+ live.push(user("p", "First"), 1);
+ live.push(assistant("a", "m", [txt("Draft")]), 2);
+ // Pi's sameUuidUpdate: Claude Code never rewrites a record, so a repeated uuid is a duplicate read.
+ assert.equal(live.push(assistant("a", "m", [txt("Done")], "end_turn"), 3), false);
+ assert.equal(live.snapshot("p").status, "running");
+ assert.equal(live.snapshot("p").events.at(-1).text, "Draft");
+ // The recorded end comes as another record of the same message, with its own uuid.
+ assert.equal(live.push(assistant("a2", "m", [txt("Done")], "end_turn"), 4), true);
+ assert.equal(live.snapshot("p").status, "completed");
+ assert.equal(live.snapshot("p").finalKey, "claude:m");
+});
+
+test("Live projection: memory is bounded by remembered links and card bytes, not only by the card count", () => {
+ // Pi's long-turn probe: many calls with long (valid) ids.
+ const live = createLiveTurnProjector();
+ live.push(linkedUser("p", null, "Synthetic long turn"), 0);
+ let parent = "p";
+ for (let i = 1; i <= 30_000; i++) {
+  live.push({ ...call(`c${i}`, `m${i}`, String(i).padStart(160, "x"), "SyntheticTool", { command: "echo test" }), parentUuid: parent }, i);
+  parent = `c${i}`;
+ }
+ const stats = live.stats();
+ assert.ok(stats.records <= 10_000, `remembered records ${stats.records}`);
+ assert.ok(stats.calls <= 2 * LIVE_EVENT_WINDOW, `remembered calls ${stats.calls}`);
+ assert.equal(stats.events, LIVE_EVENT_WINDOW);
+ assert.equal(live.snapshot("p").omitted, 30_001 - LIVE_EVENT_WINDOW);
+ // A late result still joins the turn through its recorded parent.
+ live.push(linkedResult("late", "c29999", "x".repeat(155) + "29999"), 30_001);
+ assert.equal(live.snapshot("p").events.at(-1).id, "late:0");
+ // Pi's large-card probe: 16,384-character non-ASCII entries are bounded by size too.
+ const big = createLiveTurnProjector();
+ big.push(user("q", "Big"), 0);
+ for (let i = 0; i < LIVE_EVENT_WINDOW; i++) big.push(assistant(`b${i}`, `n${i}`, [txt("é漢".repeat(8192))]), i);
+ const window = big.snapshot("q");
+ assert.ok(big.stats().bytes <= LIVE_TURN_BYTES, `card bytes ${big.stats().bytes}`);
+ assert.ok(Buffer.byteLength(JSON.stringify(window)) < LIVE_TURN_BYTES * 1.1);
+ assert.equal(window.events.length + window.omitted, LIVE_EVENT_WINDOW + 1, "cards dropped for size are counted as omitted");
+ assert.equal(window.events.at(-1).id, `b${LIVE_EVENT_WINDOW - 1}:0`);
+});
+
+test("Live projection: Loaded for activity read at start, Updated for activity seen later", () => {
+ const live = createLiveTurnProjector();
+ live.push(user("p", "Go"), 100, true);
+ assert.deepEqual([live.snapshot("p").loaded, live.snapshot("p").updatedAt], [true, 100]);
+ live.push(assistant("a", "m", [txt("More")]), 200);
+ assert.deepEqual([live.snapshot("p").loaded, live.snapshot("p").updatedAt], [false, 200]);
 });
 
 test("Live projection: only Claude is supported in milestone 1", () => {
@@ -159,6 +301,8 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  assert.match(pageUrl, /^\/__pi_markdown_preview_live__\/p1\?identity=/);
  const page = await (await get(pageUrl)).text();
  assert.match(page, /<h1>Working · live<\/h1>/);
+ assert.match(page, /<p class="notices">Read-only view; some conversation content may be missing or shortened\.<\/p>/, "the Working disclaimer");
+ assert.match(page, /<span data-live-time-label>Updated<\/span> <time data-live-updated="1000">/);
  assert.match(page, /data-event-id="p1:0"/);
  assert.match(page, /Run &lt;checks&gt;/);
  assert.match(page, /<a data-watch-control="turn-details"[^>]* aria-current="page"[^>]*>Working<\/a>/, "the live page is the Working view");
@@ -167,6 +311,21 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  assert.doesNotMatch(page, /<script>(?!\s*$)/, "every script carries the page nonce");
  assert.equal((await get(pageUrl.replace("/p1?", "/bad%20id?"))).status, 404);
  assert.equal((await get(pageUrl.replace("/p1?", "/gone?"))).status, 404);
+
+ // A host following as many sessions as it allows says so instead of failing vaguely.
+ const busy = Object.assign(new Error("busy"), { code: "LIVE_BUSY" });
+ const full = await createBrowserWatchServer(html, dir, { live: { current: async () => { throw busy; }, snapshot: async () => { throw busy; } } });
+ t.after(() => full.close());
+ const fullSession = await auth(full);
+ const fullEntry = liveEntry(fullSession.text);
+ const fullGet = path => fetch(new URL(path, fullSession.origin), { redirect: "manual", headers: { cookie: fullSession.cookie } });
+ const busyPage = await fullGet(fullEntry);
+ assert.equal(busyPage.status, 503);
+ assert.match(await busyPage.text(), /Live Working is busy/);
+ const busyJson = await fullGet(`${fullEntry}&format=json`);
+ assert.deepEqual([busyJson.status, await busyJson.json()], [503, { error: "busy" }]);
+ const busyUpdates = await fullGet(fullEntry.replace("/?", "/p1/updates?") + "&cursor=");
+ assert.deepEqual([busyUpdates.status, await busyUpdates.json()], [503, { error: "busy" }]);
 });
 
 test("Live updates: unchanged cursors, new cards only, resync, completion and newer turns", async t => {
@@ -184,6 +343,7 @@ test("Live updates: unchanged cursors, new cards only, resync, completion and ne
  live.push({ type: "assistant", uuid: "c", message: { role: "assistant", id: "m1", content: [{ type: "tool_use", id: "k", name: "Bash", input: { command: "ls" } }], stop_reason: "tool_use" } }, 2);
  let first = await updates("p", "");
  assert.equal(first.status, 200); assert.match(first.type, /application\/json/); assert.match(first.cache, /no-store/);
+ assert.equal(first.body.loaded, false);
  assert.equal(first.body.resync, true);
  assert.deepEqual(first.body.ids, ["p:0", "c:0"]);
  assert.deepEqual(first.body.upserts.map(u => u.id), ["p:0", "c:0"]);
@@ -193,8 +353,10 @@ test("Live updates: unchanged cursors, new cards only, resync, completion and ne
  live.push({ type: "user", uuid: "r", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "k", content: "file.txt" }] } }, 3);
  const next = await updates("p", first.body.cursor);
  assert.equal(next.body.resync, false);
- assert.deepEqual(next.body.upserts.map(u => u.id), ["r:0"], "only the new card is rendered");
- assert.match(next.body.upserts[0].html, /Tool result: Bash/);
+ assert.match(first.body.upserts[1].html, /No result recorded yet/);
+ assert.deepEqual(next.body.upserts.map(u => u.id), ["c:0", "r:0"], "only changed cards are rendered: the call loses its pending note");
+ assert.doesNotMatch(next.body.upserts[0].html, /No result recorded yet/);
+ assert.match(next.body.upserts[1].html, /Tool result: Bash/);
  assert.equal((await updates("p", "other:1")).body.resync, true, "a different generation resyncs");
  // Completion links to the exact retained response once the host appends it.
  live.push({ type: "assistant", uuid: "f", message: { role: "assistant", id: "m2", content: [{ type: "text", text: "Done" }], stop_reason: "end_turn" } }, 4);
@@ -390,5 +552,154 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   await page.waitForFunction(() => document.querySelector("[data-live-status] a")?.textContent === "Open its response", { timeout: 10_000 });
   await new Promise(resolve => setTimeout(resolve, 2500));
   assert.match(page.url(), /\/__pi_markdown_preview_live__\/p3\?/, "with following turned off, the live page stays put");
+ } finally { await browser.close(); }
+});
+
+test("Live browser view: a paused reader keeps their cards across a resync; selected or focused cards are not removed or rewritten", { timeout: 120_000 }, async t => {
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ const dir = await temp(t);
+ // The host can recreate its projection (a new generation), as after a lease expiry.
+ let live = createLiveTurnProjector();
+ const rows = [];
+ const push = record => { rows.push(record); live.push(record, Date.now()); };
+ const regenerate = () => { live = createLiveTurnProjector(); for (const record of rows) live.push(record, Date.now()); };
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
+ t.after(() => server.close());
+ const text = i => push({ type: "assistant", uuid: `a${i}`, message: { role: "assistant", id: `m${i}`, content: [{ type: "text", text: `Synthetic ${i}` }] } });
+ push({ type: "user", uuid: "p", message: { role: "user", content: "Synthetic prompt" } });
+ for (let i = 0; i < LIVE_EVENT_WINDOW - 1; i++) text(i);
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ try {
+  const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
+  const errors = []; page.on("pageerror", e => errors.push(e.message));
+  await page.goto(server.url);
+  await page.goto(new URL(liveEntry(await page.content()), server.url).href);
+  assert.match(await page.$eval("main", e => e.innerText), /Read-only view; some conversation content may be missing or shortened\./);
+  const count = () => page.$$eval(".live-events > details.event", cards => cards.length);
+  // Pi's selection_eviction: text selected in the first card, reader at the bottom, window advances.
+  const before = await page.evaluate(() => {
+   window.firstCard = document.querySelector(".live-events > details");
+   const range = document.createRange(); range.selectNodeContents(firstCard.querySelector("summary"));
+   getSelection().removeAllRanges(); getSelection().addRange(range);
+   window.scrollTo(0, document.documentElement.scrollHeight);
+   return getSelection().toString();
+  });
+  for (let i = 249; i < 259; i++) text(i);
+  await page.waitForSelector('[data-event-id="a258:0"]', { timeout: 10_000 });
+  assert.deepEqual(await page.evaluate(() => [getSelection().toString(), firstCard.isConnected]), [before, true], "the selected card stays while selected");
+  await page.evaluate(() => getSelection().removeAllRanges());
+  await page.waitForFunction(() => !firstCard.isConnected, { timeout: 5000 });
+  assert.equal(await count(), LIVE_EVENT_WINDOW, "once released, it leaves like any card outside the window");
+
+  // Pi's paused_resync: scrolled up when the generation changes and the window moves on.
+  await page.evaluate(() => { window.firstCard = document.querySelector(".live-events > details"); window.scrollTo(0, 0); });
+  for (let i = 259; i < 269; i++) text(i);
+  regenerate();
+  await page.waitForFunction(() => !document.querySelector(".live-newer").hidden, { timeout: 10_000 });
+  const paused = await page.evaluate(() => ({ connected: firstCard.isConnected, first: document.querySelector(".live-events > details").dataset.eventId, newer: document.querySelector(".live-newer").textContent, y: scrollY }));
+  assert.deepEqual(paused, { connected: true, first: paused.first, newer: "10 newer events ↓", y: 0 });
+  assert.equal(paused.first, await page.evaluate(() => firstCard.dataset.eventId));
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  assert.equal(await page.evaluate(() => firstCard.isConnected && scrollY === 0), true, "later polls keep holding the resync");
+  await page.click(".live-newer");
+  await page.waitForSelector('[data-event-id="a268:0"]', { timeout: 5000 });
+  assert.equal(await page.evaluate(() => firstCard.isConnected), false);
+  assert.equal(await count(), LIVE_EVENT_WINDOW);
+
+  // A card whose content changes (a call's result arrives) is not rewritten under the reader's focus.
+  push({ type: "assistant", uuid: "call", message: { role: "assistant", id: "mc", content: [{ type: "tool_use", id: "k", name: "Bash", input: { command: "sleep 1" } }], stop_reason: "tool_use" } });
+  await page.waitForSelector('[data-event-id="call:0"]', { timeout: 10_000 });
+  await page.evaluate(() => { window.focusedSummary = document.querySelector('[data-event-id="call:0"] > summary'); focusedSummary.focus(); });
+  push({ type: "user", uuid: "res", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "k", content: "done" }] } });
+  await page.waitForSelector('[data-event-id="res:0"]', { timeout: 10_000 });
+  assert.deepEqual(await page.evaluate(() => [document.activeElement === focusedSummary, focusedSummary.isConnected, /No result recorded yet/.test(focusedSummary.textContent)]), [true, true, true]);
+  await page.evaluate(() => focusedSummary.blur());
+  await page.waitForFunction(() => !/No result recorded yet/.test(document.querySelector('[data-event-id="call:0"] > summary').textContent), { timeout: 5000 });
+  assert.deepEqual(errors, []);
+ } finally { await browser.close(); }
+});
+
+test("Follow activity: Working that becomes older stays fixed; a scrolled-up reader is not moved; one bounded request at a time", { timeout: 150_000 }, async t => {
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+ const user = (uuid, content) => ({ type: "user", uuid, message: { role: "user", content } });
+ const reply = (uuid, text, stop_reason = null) => ({ type: "assistant", uuid, message: { role: "assistant", id: `m-${uuid}`, content: [{ type: "text", text }], stop_reason } });
+ const run = async fn => {
+  const dir = await temp(t);
+  const live = createLiveTurnProjector();
+  const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) }, initialTurnDetails: async () => ({ events: [] }), initialResponseKey: "initial" });
+  const context = await browser.createBrowserContext();
+  try {
+   const page = await context.newPage(); await page.setViewport({ width: 900, height: 700 });
+   await fn({ page, server, push: record => live.push(record, Date.now()) });
+  } finally { await context.close(); await server.close(); }
+ };
+ try {
+  // Pi's working_becomes_historical: Working of the latest response, following on; a short turn
+  // completes between polls, so this Working becomes 1/2; the next turn must not take it over.
+  await run(async ({ page, server, push }) => {
+   push(user("p0", "Original prompt")); push(reply("f0", "Original completed", "end_turn"));
+   await page.goto(server.url);
+   await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="turn-details"]')]);
+   await page.click('[data-watch-control="follow-activity"]');
+   const fixed = await page.$eval('[data-watch-control="turn-details"]', e => e.getAttribute("href"));
+   push(user("p1", "Short next turn")); push(reply("f1", "Short turn completed", "end_turn"));
+   server.updateDocument(html, { responseKey: "claude:m-f1", turnDetails: async () => ({ events: [] }) });
+   await page.waitForFunction(() => document.querySelector('[data-watch-control="count"]').textContent === "1/2", { timeout: 5000 });
+   assert.equal(await page.$eval('[data-watch-control="follow-activity"]', e => e.dataset.latest), "false");
+   const path = new URL(page.url()).pathname;
+   push(user("p2", "Next long turn"));
+   await sleep(4500);
+   assert.equal(new URL(page.url()).pathname, path, "older Working is never moved to a live turn");
+   assert.equal(await page.$eval('[data-watch-control="turn-details"]', e => e.getAttribute("href")), fixed, "and its Working stays the fixed view");
+  });
+  // Pi's paused_next_turn: an owned live page, scrolled up, when the next turn starts.
+  await run(async ({ page, server, push }) => {
+   push(user("p", "Synthetic prompt"));
+   for (let i = 0; i < 80; i++) push(reply(`a${i}`, `Synthetic ${i}`));
+   await page.goto(server.url);
+   await page.goto(new URL(liveEntry(await page.content()), server.url).href);
+   await page.click('[data-watch-control="follow-activity"]');
+   await page.evaluate(() => window.scrollTo(0, 0));
+   push(reply("final", "Synthetic end", "end_turn")); push(user("p2", "Synthetic next turn"));
+   await page.waitForFunction(() => /A newer turn has started/.test(document.querySelector("[data-live-status]").textContent), { timeout: 10_000 });
+   await sleep(2500);
+   assert.match(new URL(page.url()).pathname, /\/p$/, "a scrolled-up reader stays on their turn");
+   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+   await page.waitForFunction(() => location.pathname.endsWith("/p2"), { timeout: 10_000 });
+  });
+  // Pi's follow_request_overlap, plus recovery from a request that never answers.
+  await run(async ({ page, server }) => {
+   await page.goto(server.url);
+   const pending = new Set(); let most = 0; const seen = []; let hold = true;
+   await page.setRequestInterception(true);
+   page.on("request", request => {
+    if (!request.url().includes("/__pi_markdown_preview_live__/") || !request.url().includes("format=json")) { request.continue().catch(() => {}); return; }
+    seen.push(Date.now()); pending.add(request); most = Math.max(most, pending.size);
+    if (!hold) request.continue().catch(() => {});
+   });
+   const done = request => pending.delete(request);
+   page.on("requestfailed", done); page.on("requestfinished", done);
+   await page.click('[data-watch-control="follow-activity"]');
+   await sleep(100);
+   await page.evaluate(() => { document.dispatchEvent(new Event("visibilitychange")); document.dispatchEvent(new Event("visibilitychange")); });
+   await sleep(300);
+   assert.equal(most, 1, "visibility events do not start overlapping requests");
+   // Turning following off and on cancels the held request instead of adding to it.
+   await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press("KeyA"); await page.keyboard.press("KeyA"); await page.keyboard.up("Alt"); await page.keyboard.up("Control");
+   await sleep(300);
+   assert.equal(most, 1);
+   assert.equal(seen.length, 2, "one request per enable");
+   // The held request reaches its deadline; polling recovers on its own.
+   hold = false;
+   await page.waitForFunction(() => true);
+   const started = seen.length;
+   await sleep(14_000);
+   assert.ok(seen.length > started, "a request with no answer is abandoned and polling continues");
+   assert.equal(most, 1);
+  });
  } finally { await browser.close(); }
 });

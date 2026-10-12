@@ -411,6 +411,13 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const controlsToggle = navigation?.querySelector('[data-watch-control="toggle"]');
   const controlsPanel = navigation?.querySelector('[data-watch-control="controls"]');
   const newBadge = navigation?.querySelector('[data-watch-control="new"]');
+  const followButton = navigation?.querySelector('[data-watch-control="follow-activity"]');
+  // Follow activity acts only from the latest response; tell it when that changes.
+  const announceLatest = isLatest => {
+    if (!followButton || followButton.getAttribute('data-latest') === String(isLatest)) return;
+    followButton.setAttribute('data-latest', String(isLatest));
+    document.dispatchEvent(new CustomEvent('pi-markdown-preview-latest-changed', { detail: { latest: isLatest } }));
+  };
   // One-shot, tab-local handoff across this watcher's document navigations.
   // Never carry the sharing dialog or authenticated URLs into saved UI state.
   const controlsStateKey = ${navigation.wrapScope ? JSON.stringify("pi-markdown-preview:watch-controls:" + navigation.wrapScope) : "null"};
@@ -626,6 +633,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       if (countLabel) countLabel.textContent = (currentIndex + 1) + '/' + revisions.length;
     }
     const hasNewRevision = hasNewResponse && revision !== latestRevision;
+    if (!live) announceLatest(revision === latestRevision);
     if (newBadge) newBadge.hidden = !hasNewRevision;
     const position = currentIndex < 0 ? 'revision no longer retained' : 'revision ' + (currentIndex + 1) + ' of ' + revisions.length;
     controlsToggle?.setAttribute('aria-label', 'Preview controls, ' + position + (hasNewRevision ? ', new revision available' : ''));
@@ -782,6 +790,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       // The same watcher restarted: revision numbers belong to the old run.
       if (working) {
         instanceExpired = true;
+        announceLatest(false);
         setStatus('Preview restarted · reopen Preview');
         for (const link of [previousLink, nextLink, latestLink, workingLink]) setLink(link, undefined);
         if (previewLink) previewLink.href = withIdentity('/');
@@ -889,7 +898,8 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  * `live` opts into Live: `current(signal)` returns the latest turn's anchor and
  * `snapshot(anchor, signal)` that turn's bounded window (see
  * createLiveTurnProjector). Both are host-owned and lease-renewing; neither is
- * called for HEAD. `initialResponseKey`/updateDocument's `responseKey` let a
+ * called for HEAD. A host following as many sessions as it allows throws an
+ * error with `code: "LIVE_BUSY"`. `initialResponseKey`/updateDocument's `responseKey` let a
  * completed live turn link to its exact retained response.
  * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal, sourceRevision?: number) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void>, initialTurnDetails?: (signal: AbortSignal) => Promise<object>, initialResponseKey?: string, live?: { current: (signal?: AbortSignal) => Promise<string | undefined>, snapshot: (anchor: string, signal?: AbortSignal) => Promise<any> } }} [options]
  */
@@ -1246,7 +1256,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const since = Number(sequenceText);
 					const resync = generation !== snapshot.generation || !Number.isInteger(since) || since > snapshot.sequence;
 					const links = linksFor(snapshot);
-					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, omitted: snapshot.omitted };
+					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, loaded: snapshot.loaded === true, omitted: snapshot.omitted };
 					if (!resync && since === snapshot.sequence) { respondJson(res, 200, { ...base, unchanged: true }); return; }
 					const upserts = snapshot.events.flatMap((event, i) => resync || event.changed > since
 						? [{ id: event.id, version: event.version, html: renderLiveCard(event, snapshot.omitted + i + 1, true) }] : []);
@@ -1267,9 +1277,12 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				}, scriptNonce);
 				res.writeHead(200, turnSecurityHeaders(scriptNonce));
 				res.end(html);
-			} catch {
+			} catch (error) {
 				if (!closed && !res.destroyed) {
-					if (match?.[2]) respondJson(res, 503, { error: "unavailable" });
+					// The host bounds how many sessions it follows at once.
+					const busy = error?.code === "LIVE_BUSY";
+					if (match?.[2] || requestUrl.searchParams.get("format") === "json") respondJson(res, 503, { error: busy ? "busy" : "unavailable" });
+					else if (busy) respondRecovery(req, res, 503, "Live Working is busy", "Live Working follows a few sessions at a time. Close another live Working page, or wait 30 seconds after closing one, then try again.");
 					else respondRecovery(req, res, 503, "Live unavailable", "Recorded activity could not be read. Try again shortly.");
 				}
 			}

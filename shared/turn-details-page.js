@@ -222,6 +222,7 @@ function eventContent(event, fromClaude = false) {
 }
 
 const LIVE_STYLE = `.live-omitted { color:var(--muted); font-size:12px; margin:0 0 12px } .live-status a,[data-live-status] a { color:inherit; text-underline-offset:3px }
+.live-state { margin:0 0 18px } .live-state:empty { display:none } .live-pending { color:var(--muted); font-size:12px; font-weight:400 }
 .live-newer { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50; min-height:32px; padding:6px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; box-shadow:0 2px 8px #0002; cursor:pointer } .live-newer[hidden] { display:none } .live-newer:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 @media(pointer:coarse) { .live-newer { min-height:44px } } @media print { .live-newer { display:none } }`;
 
@@ -283,7 +284,9 @@ export function buildTurnDetailsPage(details, responseUrl, label = "", appearanc
 export function renderLiveCard(event, number, fromClaude = true) {
 	const open = event.kind === "prompt" || event.label === "User shell command";
 	const label = claudeEnvelope(event, fromClaude)?.label ?? (event.label || event.kind);
-	return `<details class="event ${escape(event.kind)}" data-event-id="${escape(event.id)}" data-event-version="${escape(event.version)}"${open ? " open" : ""}><summary><span class="number"${event.callId ? ` title="Call ID: ${escape(event.callId)}"` : ""}>${number}</span> ${escape(label)}</summary><div class="event-content">${eventContent(event, fromClaude)}</div></details>`;
+	// Only the record's absence is stated; nothing is inferred about the call.
+	const pending = event.kind === "tool" && event.pending === true ? ' <span class="live-pending">· No result recorded yet</span>' : "";
+	return `<details class="event ${escape(event.kind)}" data-event-id="${escape(event.id)}" data-event-version="${escape(event.version)}"${open ? " open" : ""}><summary><span class="number"${event.callId ? ` title="Call ID: ${escape(event.callId)}"` : ""}>${number}</span> ${escape(label)}${pending}</summary><div class="event-content">${eventContent(event, fromClaude)}</div></details>`;
 }
 
 /** Status line: only what the record says. Links are server-built, same-origin. */
@@ -298,8 +301,11 @@ export function liveStatusHtml({ status, completedHref, workingHref, newerHref }
 	return parts.join(" ");
 }
 
+/** "Loaded" is when this view read activity already recorded; "Updated" is when it saw newer activity. */
+export const liveTimeLabel = loaded => loaded ? "Loaded" : "Updated";
+
 export function buildLivePage(snapshot, { label = "", appearanceStyle = "", statusHtml = "" } = {}) {
 	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, true)).join("\n");
 	const omitted = snapshot.omitted;
-	return `${pageHead("Working · live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Working · live</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Updated <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices" data-live-status role="status">${statusHtml}</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;
+	return `${pageHead("Working · live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Working · live</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}<span data-live-time-label>${liveTimeLabel(snapshot.loaded)}</span> <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="notices live-state" data-live-status role="status">${statusHtml}</p><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;
 }

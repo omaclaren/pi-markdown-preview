@@ -29,7 +29,8 @@ export async function readRecordTail(path, signal) {
 			offset += bytesRead;
 		}
 		signal?.throwIfAborted();
-		let buffer = data.subarray(0, offset), incomplete = start > 0;
+		// `startsMidway`: earlier records exist that were not read (bounded read).
+		let buffer = data.subarray(0, offset), incomplete = start > 0, startsMidway = start > 0;
 		if (start) buffer = buffer.subarray(buffer.indexOf(10) + 1 || buffer.length);
 		const records = [];
 		// Work backwards so both storage and parse attempts are bounded, even
@@ -38,13 +39,13 @@ export async function readRecordTail(path, signal) {
 		if (end < buffer.length - 1) incomplete = true; // Ignore a still-in-flight last line.
 		for (let i = end - 1; i >= -1; i--) {
 			if (i >= 0 && buffer[i] !== 10) continue;
-			if (++count > TURN_RECORD_LIMIT) { incomplete = true; break; }
+			if (++count > TURN_RECORD_LIMIT) { incomplete = startsMidway = true; break; }
 			const line = buffer.subarray(i + 1, end); end = i;
 			if (!line.length) continue;
 			if (line.length > TURN_RECORD_BYTES) { incomplete = true; continue; }
 			try { records.push(JSON.parse(line.toString("utf8"))); } catch { incomplete = true; }
 		}
 		signal?.throwIfAborted();
-		return { records: records.reverse(), incomplete };
+		return { records: records.reverse(), incomplete, startsMidway };
 	} finally { await file.close(); }
 }

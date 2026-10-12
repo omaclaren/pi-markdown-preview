@@ -1,7 +1,9 @@
-// Live recorded activity for one turn. Polls only while visible; reconciles
-// cards by id and version, keeping each card's open/wrap state and focus.
-// Follows the bottom only when the reader is already there; otherwise the
-// visible cards stay put and a button offers the newer activity.
+// Live recorded activity for one turn. Polls only while visible, one request at
+// a time with a deadline; reconciles cards by id and version, keeping each
+// card's open/wrap state. A card holding focus or a text selection is neither
+// removed nor rewritten until the reader lets go of it. Follows the bottom only
+// when the reader is already there; otherwise the visible cards stay put (even
+// across a resync) and a button offers the newer activity.
 (function (globalObject) {
  'use strict';
  globalObject.PiMarkdownPreviewLive = {
@@ -10,15 +12,20 @@
    const list = root.querySelector('.live-events');
    const status = root.querySelector('[data-live-status]');
    const updated = root.querySelector('[data-live-updated]');
+   const timeLabel = root.querySelector('[data-live-time-label]');
    const omittedLine = root.querySelector('.live-omitted');
    const newer = root.querySelector('.live-newer');
    if (!list) return;
-   const POLL_MS = 2000, FOLLOW_PX = 80;
+   const POLL_MS = 2000, REQUEST_MS = 8000, FOLLOW_PX = 80;
    let cursor = root.getAttribute('data-live-cursor') || '';
-   let timer, inFlight = false, stopped = false, failures = 0, queued = null;
+   let timer, request = null, stopped = false, failures = 0, queued = null;
+   // Cards kept for the reader (selection/focus) after leaving the window, and
+   // newer content waiting for a card the reader is holding.
+   const lingering = new Set(), deferred = new Map();
    const atBottom = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - FOLLOW_PX;
    const toBottom = () => window.scrollTo(0, document.documentElement.scrollHeight);
-   const showTime = ms => {
+   const showTime = (ms, loaded) => {
+    if (timeLabel && typeof loaded === 'boolean') timeLabel.textContent = loaded ? 'Loaded' : 'Updated';
     if (!updated) return;
     const date = new Date(Number(ms));
     if (Number.isFinite(date.getTime())) { updated.setAttribute('data-live-updated', String(ms)); updated.textContent = date.toLocaleTimeString(); }
@@ -26,7 +33,38 @@
    showTime(updated?.getAttribute('data-live-updated'));
    const fromHtml = html => { const template = document.createElement('template'); template.innerHTML = html; return template.content.firstElementChild; };
    const ids = () => Array.from(list.children, card => card.getAttribute('data-event-id'));
-   const newCount = data => data.ids.filter(id => !ids().includes(id)).length;
+   const newCount = data => { const shown = new Set(ids()); return data.ids.filter(id => !shown.has(id)).length; };
+   const held = card => {
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && card.contains(focused)) return true;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    for (let i = 0; i < selection.rangeCount; i++) if (selection.getRangeAt(i).intersectsNode(card)) return true;
+    return false;
+   };
+   const replaceContent = (card, fresh, version) => {
+    // Replace content inside the existing card: its open and wrap state stay.
+    const wrap = card.querySelector('.output-wrap input')?.checked;
+    card.replaceChildren(...Array.from(fresh.childNodes));
+    card.setAttribute('data-event-version', version);
+    const input = card.querySelector('.output-wrap input');
+    if (input && wrap !== undefined) input.checked = wrap;
+    globalObject.PiMarkdownPreviewWorkingImages?.install(card);
+   };
+   const changed = () => root.dispatchEvent(new CustomEvent('pi-markdown-preview-cards-changed'));
+   // The reader let go: drop cards that left the window, apply waiting content.
+   const settle = () => {
+    if (!lingering.size && !deferred.size) return;
+    let any = false;
+    for (const card of lingering) if (!card.isConnected || !held(card)) { card.remove(); lingering.delete(card); any = true; }
+    for (const [card, next] of deferred) {
+     if (!card.isConnected) { deferred.delete(card); continue; }
+     if (!held(card)) { replaceContent(card, next.fresh, next.version); deferred.delete(card); any = true; }
+    }
+    if (any) changed();
+   };
+   document.addEventListener('selectionchange', settle);
+   document.addEventListener('focusout', () => setTimeout(settle, 0));
 
    const apply = data => {
     const cards = new Map(Array.from(list.children, card => [card.getAttribute('data-event-id'), card]));
@@ -36,24 +74,24 @@
      if (!fresh || fresh.getAttribute('data-event-id') !== update.id) continue;
      const existing = cards.get(update.id);
      if (!existing) { cards.set(update.id, fresh); added.push(fresh); continue; }
-     if (existing.getAttribute('data-event-version') === update.version) continue;
-     // Replace content inside the existing card: its open and wrap state stay.
-     const wrap = existing.querySelector('.output-wrap input')?.checked;
-     existing.replaceChildren(...Array.from(fresh.childNodes));
-     existing.setAttribute('data-event-version', update.version);
-     const input = existing.querySelector('.output-wrap input');
-     if (input && wrap !== undefined) input.checked = wrap;
-     added.push(existing);
+     lingering.delete(existing);
+     if (existing.getAttribute('data-event-version') === update.version) { deferred.delete(existing); continue; }
+     if (held(existing)) deferred.set(existing, { fresh, version: update.version });
+     else { deferred.delete(existing); replaceContent(existing, fresh, update.version); }
     }
     const keep = new Set(data.ids);
-    const focused = document.activeElement;
-    for (const [id, card] of cards) if (!keep.has(id) && card.isConnected && !card.contains(focused)) card.remove();
+    for (const [id, card] of cards) {
+     if (keep.has(id) || !card.isConnected) continue;
+     if (held(card)) lingering.add(card); else { card.remove(); deferred.delete(card); }
+    }
+    // Order the window's cards; lingering cards stay where the reader left them.
     let previous = null;
     for (const id of data.ids) {
      const card = cards.get(id);
      if (!card) continue;
-     const expected = previous ? previous.nextElementSibling : list.firstElementChild;
-     if (card !== expected) { if (previous) previous.after(card); else list.prepend(card); }
+     let expected = previous ? previous.nextElementSibling : list.firstElementChild;
+     while (expected && lingering.has(expected)) expected = expected.nextElementSibling;
+     if (card !== expected) { if (previous) previous.after(card); else if (expected) expected.before(card); else list.append(card); }
      previous = card;
     }
     for (const card of added) globalObject.PiMarkdownPreviewWorkingImages?.install(card);
@@ -62,70 +100,77 @@
      omittedLine.hidden = !omitted;
      omittedLine.textContent = `${omitted} earlier event${omitted === 1 ? '' : 's'} not shown.`;
     }
-    root.dispatchEvent(new CustomEvent('pi-markdown-preview-cards-changed'));
+    changed();
     cursor = data.cursor;
    };
 
    const showNewer = data => {
     const count = newCount(data);
     if (!newer) return;
-    newer.hidden = !count;
-    newer.textContent = `${count} newer event${count === 1 ? '' : 's'} ↓`;
+    newer.hidden = false;
+    newer.textContent = count ? `${count} newer event${count === 1 ? '' : 's'} ↓` : 'Latest activity ↓';
    };
-   newer?.addEventListener('click', () => {
-    if (queued) { apply(queued); queued = null; }
-    newer.hidden = true;
-    toBottom();
-   });
-   window.addEventListener('scroll', () => {
-    if (queued && atBottom()) { apply(queued); queued = null; if (newer) newer.hidden = true; toBottom(); }
-   }, { passive: true });
+   const release = () => { if (queued) { apply(queued); queued = null; } if (newer) newer.hidden = true; toBottom(); };
+   newer?.addEventListener('click', release);
+   window.addEventListener('scroll', () => { if (queued && atBottom()) release(); }, { passive: true });
 
    const schedule = delay => { clearTimeout(timer); if (!stopped && document.visibilityState === 'visible') timer = setTimeout(poll, delay); };
+   const cancel = () => { clearTimeout(timer); request?.abort(); request = null; };
    async function poll() {
-    if (inFlight || stopped || document.visibilityState !== 'visible') return;
-    inFlight = true;
+    if (request || stopped || document.visibilityState !== 'visible') return;
+    const current = request = new AbortController();
+    const deadline = setTimeout(() => current.abort(), REQUEST_MS);
+    let ok = false;
     try {
      const url = new URL(window.location.href);
      url.pathname = `${url.pathname.replace(/\/$/, '')}/updates`;
      url.hash = '';
      url.searchParams.set('cursor', cursor);
-     const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+     const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin', signal: current.signal });
+     if (request !== current) return;
      if (response.status === 404 || response.status === 409) {
       stopped = true;
       if (status) status.textContent = 'This turn is no longer available here. Use Preview to reconnect.';
       return;
      }
-     if (!response.ok) throw new Error(String(response.status));
+     if (response.status === 503 && (await response.json().catch(() => ({}))).error === 'busy') {
+      if (status && request === current) status.textContent = 'Live updates are waiting: too many live sessions are open. Retrying…';
+      return;
+     }
+     if (!response.ok) return;
      const data = await response.json();
-     failures = 0;
+     // Cancelled while reading (hidden or left): a stale answer changes nothing.
+     if (request !== current) return;
+     ok = true;
      if (status && typeof data.statusHtml === 'string') status.innerHTML = data.statusHtml;
-     showTime(data.updatedAt);
-     const publish = () => document.dispatchEvent(new CustomEvent('pi-markdown-preview-live-update', { detail: {
-      status: data.status, completedHref: data.completedHref, newerHref: data.newerHref, newerAnchor: data.newerAnchor, paused: Boolean(queued),
-     } }));
+     showTime(data.updatedAt, data.loaded);
      if (!data.unchanged) {
       const following = atBottom();
-      const growing = newCount(data) > 0;
-      if (following || !growing || data.resync) {
+      if (following || (!queued && !data.resync && newCount(data) === 0)) {
+       // Updates are cumulative from the applied cursor, so this supersedes anything queued.
        apply(data); queued = null;
        if (newer) newer.hidden = true;
        if (following) toBottom();
       } else {
-       // Paused reader: keep the visible cards and offer the newer activity.
+       // Paused reader: keep the visible cards (also across a resync) and offer the newer activity.
        queued = data;
        showNewer(data);
       }
      }
-     publish();
-    } catch {
-     failures++;
-    } finally {
-     inFlight = false;
-     schedule(failures ? Math.min(15000, POLL_MS * 2 ** failures) : POLL_MS);
+     document.dispatchEvent(new CustomEvent('pi-markdown-preview-live-update', { detail: {
+      status: data.status, completedHref: data.completedHref, newerHref: data.newerHref, newerAnchor: data.newerAnchor, paused: Boolean(queued),
+     } }));
+    } catch {} finally {
+     clearTimeout(deadline);
+     if (request === current) {
+      request = null;
+      failures = ok ? 0 : failures + 1;
+      schedule(failures ? Math.min(15000, POLL_MS * 2 ** failures) : POLL_MS);
+     }
     }
    }
-   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') schedule(0); else clearTimeout(timer); });
+   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') schedule(0); else cancel(); });
+   window.addEventListener('pagehide', () => { stopped = true; cancel(); });
    requestAnimationFrame(() => { if (!window.location.hash) toBottom(); schedule(POLL_MS); });
   }
  };
