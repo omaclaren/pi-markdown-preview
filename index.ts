@@ -34,7 +34,7 @@ import {
 } from "./shared/annotation-scanner.js";
 import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
 import { readTurnDetails } from "./shared/read-turn-details.js";
-import { turnDetailsFromRecords } from "./shared/turn-details.js";
+import { createLiveTurnProjector, turnDetailsFromRecords } from "./shared/turn-details.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 import { isHtmlPagePath } from "./shared/html-page-preview.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
@@ -1076,6 +1076,45 @@ function piTurnDetails(ctx: ExtensionContext, response: AssistantResponseSnapsho
 		if (path) return readTurnDetails(path, "pi", target, signal);
 		const branch = manager.getBranch(entryId);
 		return turnDetailsFromRecords("pi", branch.slice(-10_000), target, branch.length > 10_000);
+	};
+}
+
+// The key a live turn's recorded end uses (pi:<entry id>), so a finished turn links to its response.
+const piResponseKey = (response: AssistantResponseSnapshot | undefined) => response?.entryId ? `pi:${response.entryId}` : undefined;
+
+const PI_LIVE_LEASE_MS = 30_000;
+const PI_LIVE_ENTRY_LIMIT = 10_000;
+/**
+ * Live recorded activity for this Pi session, read from Pi's own append-only
+ * session entries on each live request (no file tailing). Nothing is kept
+ * until a live page asks; 30 s without a request drops the projection. Another
+ * session (new, resumed or forked) starts a new generation.
+ */
+function piLiveSource(ctx: ExtensionContext) {
+	const manager = ctx.sessionManager;
+	let state: { sessionId: string; projector: ReturnType<typeof createLiveTurnProjector>; read: number; timer?: ReturnType<typeof setTimeout> } | undefined;
+	const release = () => { if (state) clearTimeout(state.timer); state = undefined; };
+	const sync = () => {
+		const sessionId = manager.getSessionId();
+		const entries = manager.getEntries();
+		let loaded = false;
+		if (!state || state.sessionId !== sessionId || entries.length < state.read) {
+			release();
+			const start = Math.max(0, entries.length - PI_LIVE_ENTRY_LIMIT);
+			state = { sessionId, projector: createLiveTurnProjector("pi", { partialStart: start > 0 }), read: start };
+			loaded = true;
+		}
+		const current = state;
+		const now = Date.now();
+		for (; current.read < entries.length; current.read++) current.projector.push(entries[current.read], now, loaded);
+		clearTimeout(current.timer);
+		current.timer = setTimeout(() => { if (state === current) release(); }, PI_LIVE_LEASE_MS);
+		current.timer.unref?.();
+		return current.projector;
+	};
+	return {
+		current: async (signal?: AbortSignal) => { signal?.throwIfAborted(); return sync().current(); },
+		snapshot: async (anchor: string, signal?: AbortSignal) => { signal?.throwIfAborted(); return sync().snapshot(anchor); },
 	};
 }
 
@@ -4679,6 +4718,7 @@ interface ParsedPreviewArgs {
 	fontSizePx?: number;
 	watch?: boolean;
 	turnDetails?: boolean;
+	live?: boolean;
 	history?: number;
 	stop?: boolean;
 	stopAll?: boolean;
@@ -4697,6 +4737,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 	let fontSizePx: number | undefined;
 	let watch = false;
 	let turnDetails = false;
+	let live = false;
 	let history: number | undefined;
 	let stop = false;
 	let stopAll = false;
@@ -4740,6 +4781,12 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		// --turn-details is the undocumented 0.21.x spelling of --working.
 		if (token === "--working" || token === "--turn-details") {
 			turnDetails = true;
+			continue;
+		}
+
+		// Live implies Working: the current turn's recorded activity, as it is recorded.
+		if (token === "--live") {
+			live = turnDetails = true;
 			continue;
 		}
 
@@ -4847,10 +4894,10 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 			continue;
 		}
 
-		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
+		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
-	if (turnDetails && (!watch || file !== undefined)) return { error: "--working is only available for the assistant-response browser watcher (--watch without a file)." };
+	if (turnDetails && (!watch || file !== undefined)) return { error: `${live ? "--live" : "--working"} is only available for the assistant-response browser watcher (--watch without a file).` };
 	if (history !== undefined && (!watch || file !== undefined)) return { error: "--history is only available for the assistant-response browser watcher (--watch without a file)." };
 	if (file && pick) return { error: "Cannot use --pick and --file together." };
 	if (watch && stop) return { error: "Cannot use --watch and --stop together." };
@@ -4870,7 +4917,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		return { error: "--list cannot be combined with a file, --pick, --font-size, --responses, or --all." };
 	}
 
-	return { target, pick, file, fontSizePx, watch, turnDetails, history, stop, stopAll, stopResponses, list };
+	return { target, pick, file, fontSizePx, watch, turnDetails, live, history, stop, stopAll, stopResponses, list };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -4879,6 +4926,7 @@ export default function (pi: ExtensionAPI) {
 	interface ResponseBrowserWatchSource {
 		kind: "responses";
 		turnDetails?: boolean;
+		live?: boolean;
 		lastResponseKey?: string;
 		queuedResponseOverride?: AssistantResponseSnapshot;
 	}
@@ -4920,6 +4968,7 @@ export default function (pi: ExtensionAPI) {
 		sourceLabel: string;
 		requestedFontSizePx: number;
 		turnDetails?: boolean;
+		live?: boolean;
 		promise: Promise<void>;
 		renderAbortController?: AbortController;
 		server?: BrowserWatchServer;
@@ -5232,6 +5281,7 @@ export default function (pi: ExtensionAPI) {
 			activeWatch.server.updateDocument(rendered.html, {
 				appendToHistory: response.responseKey !== activeWatch.source.lastResponseKey,
 				turnDetails: piTurnDetails(ctx, response, activeWatch.source.turnDetails === true),
+				responseKey: piResponseKey(response),
 			});
 			activeWatch.lastRenderKey = renderKey;
 			activeWatch.source.lastResponseKey = response.responseKey;
@@ -5400,7 +5450,7 @@ export default function (pi: ExtensionAPI) {
 		}, BROWSER_FILE_WATCH_DEBOUNCE_MS);
 	};
 
-	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number, turnDetails = false, history?: number): Promise<void> => {
+	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number, turnDetails = false, history?: number, live = false): Promise<void> => {
 		const id = RESPONSE_BROWSER_WATCH_ID;
 		if (pendingBrowserWatchCleanups.has(id)) {
 			throw new Error("The previous assistant-response watcher did not clean up completely. Retry /preview-browser --stop --responses first.");
@@ -5408,7 +5458,8 @@ export default function (pi: ExtensionAPI) {
 		const existingWatch = browserWatches.get(id);
 		if (existingWatch) {
 			if (existingWatch.source.kind !== "responses") throw new Error("Invalid response watcher state.");
-			if (turnDetails && !existingWatch.source.turnDetails) throw new Error("Working needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch --working.");
+			if (turnDetails && !existingWatch.source.turnDetails) throw new Error(`${live ? "Live" : "Working"} needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch ${live ? "--live" : "--working"}.`);
+			if (live && !existingWatch.source.live) throw new Error("Live needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch --live.");
 			const operation = claimBrowserWatchOperation(id);
 			const previewFontSizePx = fontSizePx === undefined
 				? existingWatch.fontSizePx
@@ -5428,6 +5479,7 @@ export default function (pi: ExtensionAPI) {
 		const existingProvisional = provisionalBrowserWatches.get(id);
 		if (existingProvisional) {
 			if (turnDetails && !existingProvisional.turnDetails) throw new Error("The response watcher is starting without prompt and working access. Wait for it, stop it, then start a fresh watch with --working.");
+			if (live && !existingProvisional.live) throw new Error("The response watcher is starting without Live. Wait for it, stop it, then start a fresh watch with --live.");
 			if (fontSizePx !== undefined) {
 				existingProvisional.requestedFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
 			}
@@ -5442,6 +5494,7 @@ export default function (pi: ExtensionAPI) {
 			operation,
 			sourceLabel: "Assistant responses",
 			turnDetails,
+			live,
 			requestedFontSizePx: previewFontSizePx,
 			promise: Promise.resolve(),
 		};
@@ -5505,6 +5558,8 @@ export default function (pi: ExtensionAPI) {
 			const server = await createBrowserWatchServer(first?.html ?? html, resourcePath, {
 				initialDocumentIsHistory: !!response,
 				initialTurnDetails: piTurnDetails(ctx, first?.snapshot ?? response, provisional.turnDetails === true),
+				initialResponseKey: piResponseKey(first?.snapshot ?? response),
+				...(provisional.live ? { live: piLiveSource(ctx) } : {}),
 				sourceLabel: provisional.sourceLabel,
 				renderLocalDocument: (path, signal) => renderBrowserWatchLinkedDocument(path, getPreviewStyle(ctx.ui.theme), newWatch?.fontSizePx ?? provisional.requestedFontSizePx, signal),
 			});
@@ -5514,7 +5569,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (first && response) {
 				for (const document of [...seeded.slice(1), { snapshot: response, html }]) {
-					server.updateDocument(document.html, { appendToHistory: true, turnDetails: piTurnDetails(ctx, document.snapshot, provisional.turnDetails === true) });
+					server.updateDocument(document.html, { appendToHistory: true, turnDetails: piTurnDetails(ctx, document.snapshot, provisional.turnDetails === true), responseKey: piResponseKey(document.snapshot) });
 				}
 			}
 			provisional.server = server;
@@ -5522,7 +5577,7 @@ export default function (pi: ExtensionAPI) {
 				id,
 				operationId: operation.operationId,
 				server,
-				source: { kind: "responses", turnDetails: provisional.turnDetails, lastResponseKey: response?.responseKey },
+				source: { kind: "responses", turnDetails: provisional.turnDetails, live: provisional.live, lastResponseKey: response?.responseKey },
 				sourceLabel: provisional.sourceLabel,
 				resourcePath,
 				fontSizePx: provisional.requestedFontSizePx,
@@ -5541,6 +5596,7 @@ export default function (pi: ExtensionAPI) {
 			if (!ownsBrowserWatchOperation(operation) || !isBrowserWatchActive(newWatch)) return;
 			hasShownBrowserWatchHint = true;
 			ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop --responses."
+				+ (newWatch.source.kind === "responses" && newWatch.source.live ? " Live is on: turn on Follow activity in the page's toolbar to see the current turn live in Working." : "")
 				+ (newWatch.source.kind === "responses" && newWatch.source.turnDetails ? " Working includes potentially sensitive input/tool text and recorded images; share only with trusted viewers."
 					: newWatch.source.kind === "responses" ? " Tip: start with /preview-browser --watch --working to see prompts and activity." : ""), "info");
 		})();
@@ -5760,7 +5816,7 @@ export default function (pi: ExtensionAPI) {
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only).\nA new response watcher starts with up to 10 earlier finished responses; --history <n> sets 0-20.", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only); --live also follows the current turn as it is recorded.\nA new response watcher starts with up to 10 earlier finished responses; --history <n> sets 0-20.", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
@@ -5820,7 +5876,7 @@ export default function (pi: ExtensionAPI) {
 				if (parsed.file) {
 					await startBrowserFileWatch(ctx, parsed.file, parsed.fontSizePx);
 				} else {
-					await startBrowserResponseWatch(ctx, parsed.fontSizePx, parsed.turnDetails, parsed.history);
+					await startBrowserResponseWatch(ctx, parsed.fontSizePx, parsed.turnDetails, parsed.history, parsed.live);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

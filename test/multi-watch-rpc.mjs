@@ -275,8 +275,34 @@ try {
 	assert.match(detailPage.headers.get("content-security-policy"), /img-src data:/);
 	assert.doesNotMatch(detailSession.html, /data-recorded-src=/);
 	assert.doesNotMatch(detailSession.html, /Show the report/);
+	const notesBeforeLiveUpgrade = notifications.length;
+	await command("/preview-browser -w --live");
+	assert.ok(notifications.slice(notesBeforeLiveUpgrade).some(e => e.notifyType === "error" && e.message.includes("Live needs a fresh private preview link")), "A Working watcher is not upgraded to Live in place.");
 	await command("/preview-browser --stop --responses");
 	assert.equal(await waitFor(() => isClosed(detailSession), "details watcher shutdown"), true);
+
+	// --live: the current turn from Pi's own session entries, linked to its exact retained response.
+	const opensBeforeLive = (await openedUrls()).length;
+	const notesBeforeLive = notifications.length;
+	await command("/preview-browser -w --live");
+	const liveSession = await bootstrap((await waitOpenCount(opensBeforeLive + 1)).at(-1));
+	assert.ok(notifications.slice(notesBeforeLive).some(e => e.message?.includes("Live is on: turn on Follow activity")), "The start message explains Follow activity.");
+	assert.match(liveSession.html, /<a data-watch-control="turn-details" href=/, "--live implies Working");
+	const liveState = liveSession.html.match(/data-live-state="([^"]+)"/)?.[1].replaceAll("&amp;", "&");
+	assert.ok(liveState, "A live response watcher offers Follow activity.");
+	const liveGet = path => fetch(new URL(path, liveSession.origin), { headers: { cookie: liveSession.cookie } });
+	const liveCurrent = await (await liveGet(liveState)).json();
+	assert.equal(liveCurrent.status, "completed", "The latest recorded turn has a recorded stop.");
+	const livePage = await liveGet(liveCurrent.liveHref);
+	assert.equal(livePage.status, 200);
+	const liveHtml = await livePage.text();
+	assert.match(liveHtml, /<h1>Working · live<\/h1>/);
+	assert.match(liveHtml, /Show the report/);
+	assert.match(liveHtml, /Tool: read/);
+	assert.doesNotMatch(liveHtml, /Earlier question/, "Only the current turn is shown.");
+	assert.match(liveHtml, /Turn completed\. <a href="\/\?revision=\d+&amp;identity=/, "The finished turn links to its exact retained response.");
+	await command("/preview-browser --stop --responses");
+	assert.equal(await waitFor(() => isClosed(liveSession), "live watcher shutdown"), true);
 
 	const limitFiles = [];
 	for (let index = 0; index < 9; index++) {
