@@ -899,9 +899,9 @@ export async function resolveBrowserWatchResource(rootPath, requestedPath) {
  * `snapshot(anchor, signal)` that turn's bounded window (see
  * createLiveTurnProjector). Both are host-owned and lease-renewing; neither is
  * called for HEAD. A host following as many sessions as it allows throws an
- * error with `code: "LIVE_BUSY"`. `initialResponseKey`/updateDocument's `responseKey` let a
+ * error with `code: "LIVE_BUSY"`. `live.close()`, if present, is called when the server closes. `initialResponseKey`/updateDocument's `responseKey` let a
  * completed live turn link to its exact retained response.
- * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal, sourceRevision?: number) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void>, initialTurnDetails?: (signal: AbortSignal) => Promise<object>, initialResponseKey?: string, live?: { current: (signal?: AbortSignal) => Promise<string | undefined>, snapshot: (anchor: string, signal?: AbortSignal) => Promise<any> } }} [options]
+ * @param {{ historyByteLimit?: number, historyLimit?: number, initialDocumentIsHistory?: boolean, sourceLabel?: string, preserveReadingPosition?: boolean, htmlFile?: string, port?: number, token?: string, titleSuffix?: string, expiredHint?: string, renderLocalDocument?: (path: string, signal: AbortSignal, sourceRevision?: number) => Promise<string>, nativePathAction?: (action: "open" | "reveal", path: string, kind: "file" | "directory") => Promise<void>, initialTurnDetails?: (signal: AbortSignal) => Promise<object>, initialResponseKey?: string, live?: { current: (signal?: AbortSignal) => Promise<string | undefined>, snapshot: (anchor: string, signal?: AbortSignal) => Promise<any>, close?: () => void } }} [options]
  */
 export async function createBrowserWatchServer(initialHtml, resourceRoot, options = {}) {
 	const fixedPort = options.port ?? 0;
@@ -1621,6 +1621,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const pending = [...pendingDocuments.values(), ...pendingTurns.values()];
 			for (const document of pending) document.controller.abort();
 			linkedDocuments.clear();
+			// Stopping the preview releases its live projection now, not at lease expiry.
+			try { options.live?.close?.(); } catch { /* Closing must still finish. */ }
 			if (htmlPageServerPromise) await (await htmlPageServerPromise.catch(() => undefined))?.close();
 			for (const client of eventClients) {
 				if (!client.writableEnded && !client.destroyed) {

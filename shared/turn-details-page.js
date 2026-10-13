@@ -300,7 +300,7 @@ export function liveStatusHtml({ status, completedHref, workingHref, newerHref }
 		: "Turn completed; its response will appear in Preview shortly.");
 	else if (status === "interrupted") parts.push("Turn interrupted.");
 	else if (status === "error") parts.push("Turn ended with an API error.");
-	else if (status === "incomplete") parts.push("Turn ended at the model's output limit, without a final answer.");
+	else if (status === "incomplete") parts.push("The response stopped at the model's output limit.");
 	if (newerHref) parts.push(`A newer turn has started. <a href="${escape(newerHref)}">Follow it</a>`);
 	return parts.join(" ");
 }

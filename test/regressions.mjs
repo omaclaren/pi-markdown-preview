@@ -9,6 +9,7 @@ import puppeteer from "puppeteer-core";
 import ts from "typescript";
 import { openWatchControls } from "./watch-controls.mjs";
 import { Check } from "typebox/value";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { BoundedProcessError, buildWindowsCmdCommandLine, isSpawnNotFoundError, runBoundedProcess } from "../shared/bounded-process.js";
 import {
 	createBrowserWatchServer,
@@ -547,6 +548,7 @@ for (const functionName of [
 	"getPreviewCacheDir",
 	"markPandocPdfEmbeds",
 	"parsePreviewArgs",
+	"piLiveSource",
 	"prepareFilePreview",
 	"resolvePiAgentDir",
 	"selectHistoryResponses",
@@ -573,13 +575,14 @@ let getPreviewBrowserLaunchOptions;
 let getPreviewCacheDir;
 let markPandocPdfEmbeds;
 let parsePreviewArgs;
+let piLiveSource;
 let prepareFilePreview;
 let resolvePiAgentDir;
 let throwIfMermaidRenderFailed;
 let usesSupportedMermaidIconPack;
 try {
 	await writeFile(transpiledIndexPath, transpiledIndex, "utf8");
-	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectInlineLocalPdfData, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getBrowserFileWatchId, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, markPandocPdfEmbeds, parsePreviewArgs, prepareFilePreview, resolvePiAgentDir, selectHistoryResponses, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
+	({ default: extensionFactory, buildBlockAwarePageClips, buildMermaidBrowserModule, collectInlineLocalPdfData, collectPreviewPageLayout, extractAssistantMarkdownContent, getAssistantResponseKey, findBrowserExecutable, getBrowserCandidates, getBrowserOpenTarget, getBrowserFileWatchId, getCmuxBrowserOpenCommand, getLastAssistantResponse, getPiManagedMermaidCliPath, getPreviewBrowserLaunchOptions, getPreviewCacheDir, markPandocPdfEmbeds, parsePreviewArgs, piLiveSource, prepareFilePreview, resolvePiAgentDir, selectHistoryResponses, throwIfMermaidRenderFailed, usesSupportedMermaidIconPack } = await import(`${pathToFileURL(transpiledIndexPath).href}?test=${Date.now()}`));
 } finally {
 	await rm(transpiledIndexPath, { force: true });
 }
@@ -679,6 +682,43 @@ assert.equal(parsePreviewArgs("-b -w --turn-details").turnDetails, true, "--turn
 assert.deepEqual([parsePreviewArgs("-b -w --live").live, parsePreviewArgs("-b -w --live").turnDetails], [true, true], "--live implies --working.");
 assert.match(parsePreviewArgs("-b --live").error ?? "", /--live is only available for the assistant-response/);
 assert.match(parsePreviewArgs("-b -w --live report.md").error ?? "", /--live is only available/);
+
+// The extension's live source follows Pi's active branch (review R2), reads
+// nothing when the leaf has not moved, and releases on close (R3).
+{
+	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	const reply = (content, stopReason) => ({ role: "assistant", content, api: "openai-responses", provider: "openai", model: "test-fixture", stopReason, timestamp: Date.now(), usage });
+	const manager = SessionManager.inMemory("/tmp");
+	let branchReads = 0;
+	const counted = new Proxy(manager, { get: (target, key) => key === "getBranch" ? (...args) => { branchReads++; return target.getBranch(...args); } : typeof target[key] === "function" ? target[key].bind(target) : target[key] });
+	const live = piLiveSource({ sessionManager: counted });
+	const firstPrompt = manager.appendMessage({ role: "user", content: "First", timestamp: Date.now() });
+	const firstDone = manager.appendMessage(reply([{ type: "text", text: "First done" }], "stop"));
+	const secondPrompt = manager.appendMessage({ role: "user", content: "Second", timestamp: Date.now() });
+	manager.appendMessage(reply([{ type: "toolCall", id: "k2", name: "bash", arguments: { command: "sleep 9" } }], "toolUse"));
+	assert.equal(await live.current(), secondPrompt);
+	const abandoned = await live.snapshot(secondPrompt);
+	assert.equal(abandoned.status, "running");
+	const reads = branchReads;
+	await live.current(); await live.snapshot(secondPrompt);
+	assert.equal(branchReads, reads, "an unchanged leaf reads no entries");
+	// /tree: back to the first answer, leaving the second turn unfinished.
+	manager.branch(firstDone);
+	assert.equal(await live.current(), firstPrompt, "Live follows the active branch");
+	const navigated = await live.snapshot(firstPrompt);
+	assert.equal(navigated.status, "completed");
+	assert.notEqual(navigated.generation, abandoned.generation, "navigation is a new generation");
+	assert.equal(await live.snapshot(secondPrompt), undefined, "the abandoned turn is gone");
+	// Continuing on the older branch is an append: the same generation, a new turn.
+	const third = manager.appendMessage({ role: "user", content: "Third", timestamp: Date.now() });
+	assert.equal(await live.current(), third);
+	assert.equal((await live.snapshot(third)).generation, navigated.generation);
+	assert.equal((await live.snapshot(third)).status, "running");
+	// Stopping the watcher releases the projection: the next request starts afresh.
+	live.close();
+	assert.notEqual((await live.snapshot(third)).generation, navigated.generation);
+	live.close();
+}
 assert.match(parsePreviewArgs("-b --working").error ?? "", /--working is only available for the assistant-response/);
 assert.match(parsePreviewArgs("-b -w --working report.md").error ?? "", /assistant-response/);
 assert.equal(parsePreviewArgs("-b -w").history, undefined, "Without --history the watcher uses its default.");

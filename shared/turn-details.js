@@ -252,6 +252,9 @@ const LIVE_HELD_EVENTS = 20;
 const LIVE_HELD_BYTES = 256 * 1024;
 const LIVE_HELD_LINKS = 100;
 const LIVE_INTERRUPTION = /^\[Request interrupted by user(?: for tool use)?\]$/;
+// Endings a recorded reply can continue from: Pi retries after an API error or
+// after compacting at the output limit, without another prompt.
+const LIVE_RECOVERABLE = new Set(["error", "incomplete"]);
 const LIVE_CONTEXT_WRAPPER = /^<(?:command-(?:name|message|args)|bash-input|bash-stdout|local-command-stdout|local-command-stderr)>/;
 
 // FNV-1a over the projected fields: a version changes only when a card's content does.
@@ -318,6 +321,7 @@ const LIVE_FORMATS = {
 			const content = block === undefined ? m.content : [blocks(m.content)[block]];
 			claudeContent(details, content, m.role, false, block === undefined && blocks(content).filter(b => b?.type === "tool_result").length === 1 ? e.toolUseResult : undefined);
 		},
+		reply: e => e.type === "assistant",
 		ending: e => e.isApiErrorMessage === true ? "error" : isClaudeFinal(e) ? "completed" : undefined,
 		finalKey: e => `claude:${e.message?.id ?? e.uuid}`,
 	},
@@ -334,6 +338,7 @@ const LIVE_FORMATS = {
 			else if (m.role === "bashExecution") { details.add("tool", "User shell command", m.command); details.add("result", "Shell output", m.output); }
 			else if (["user", "assistant"].includes(m.role)) details.content(m.content, m.role);
 		},
+		reply: e => e.message?.role === "assistant",
 		ending: e => e.message?.role !== "assistant" ? undefined : ({ stop: "completed", error: "error", aborted: "interrupted", length: "incomplete" })[e.message.stopReason],
 		finalKey: e => `pi:${e.id}`,
 	},
@@ -499,6 +504,11 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 			}
 		}
 		if (!turn || role === "skip") return false;
+		// A recorded reply after a recoverable ending continues the latest turn (a
+		// retry); the failed attempt stays shown. A late result alone never reopens it.
+		if (role === "activity" && format.reply(e) && LIVE_RECOVERABLE.has(turn.status) && turn === turns.at(-1)) {
+			turn.status = "running"; turn.finalKey = undefined; touch(turn, at);
+		}
 		const active = turn.status === "running";
 		if (role === "meta") { if (active) turn.details.note("Known harness-injected context is omitted; it is not labelled as a user prompt."); return false; }
 		if (role === "compaction") { if (!active) return false; turn.details.note("Context was compacted during this turn."); touch(turn, at); return true; }

@@ -356,6 +356,63 @@ test("Live projection (Pi): steering, ! commands, extension messages, compaction
  assert.equal(createLiveTurnProjector("pi").push(piCall("x1", "earlier", "k9"), 1), false);
 });
 
+test("Live projection (Pi): a recorded retry after an API error or the output limit continues the turn to its completion", () => {
+ // Pi retries without another prompt; the failed attempt stays recorded and shown.
+ const live = createLiveTurnProjector("pi");
+ live.push(piUser("u1", null, "Run it"), 1);
+ live.push(piReply("a1", "u1", [txt("Overloaded")], "error"), 2);
+ assert.equal(live.snapshot("u1").status, "error");
+ live.push({ type: "context_edit", id: "ce", parentId: "a1" }, 3);
+ assert.equal(live.snapshot("u1").status, "error", "a non-reply record does not reopen the turn");
+ live.push(piCall("a2", "ce", "k2"), 4);
+ assert.equal(live.snapshot("u1").status, "running", "the recorded retry continues the turn");
+ live.push(piResult("r2", "a2", "k2", "ok"), 5);
+ live.push(piReply("f1", "r2", [txt("Done after retry")], "stop"), 6);
+ let snapshot = live.snapshot("u1");
+ assert.equal(snapshot.status, "completed");
+ assert.equal(snapshot.finalKey, "pi:f1");
+ assert.ok(snapshot.events.some(e => e.id === "a1:0" && e.text === "Overloaded"), "the failed attempt stays shown");
+ // Output limit, compaction, then a successful retry.
+ live.push(piUser("u2", "f1", "Write it all"), 7);
+ live.push(piReply("long", "u2", [txt("Partial")], "length"), 8);
+ assert.equal(live.snapshot("u2").status, "incomplete");
+ live.push({ type: "compaction", id: "cp", parentId: "long", summary: "Earlier" }, 9);
+ live.push(piReply("f2", "cp", [txt("Complete answer")], "stop"), 10);
+ snapshot = live.snapshot("u2");
+ assert.deepEqual([snapshot.status, snapshot.finalKey], ["completed", "pi:f2"]);
+ // A late result never reopens an ended turn, and an older turn is never resumed.
+ live.push(piUser("u3", "f2", "Once more"), 11);
+ live.push(piCall("c3", "u3", "k3"), 12);
+ live.push(piReply("e3", "c3", [txt("Failed")], "error"), 13);
+ live.push(piResult("late3", "c3", "k3", "late"), 14);
+ assert.equal(live.snapshot("u3").status, "error");
+ live.push(piReply("old", "f1", [txt("Linked to the first turn")], "stop"), 15);
+ assert.equal(live.snapshot("u1"), undefined, "only the latest two turns are kept");
+ assert.equal(live.snapshot("u3").status, "error");
+});
+
+test("Live updates (Pi): a retried turn reaches its exact completion link; closing the server releases the live source", async t => {
+ const dir = await temp(t);
+ const live = createLiveTurnProjector("pi");
+ let closed = 0;
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a), close: () => { closed++; } } });
+ const session = await auth(server);
+ const query = liveEntry(session.text).split("?")[1];
+ const updates = async cursor => (await fetch(new URL(`/__pi_markdown_preview_live__/u1/updates?${query}&cursor=${encodeURIComponent(cursor)}`, session.origin), { headers: { cookie: session.cookie } })).json();
+ live.push(piUser("u1", null, "Run it"), 1);
+ live.push(piReply("a1", "u1", [txt("Overloaded")], "error"), 2);
+ let state = await updates("");
+ assert.match(state.statusHtml, /API error/);
+ live.push(piReply("f1", "a1", [txt("Done after retry")], "stop"), 3);
+ server.updateDocument(html.replace("Answer", "Done after retry"), { appendToHistory: true, responseKey: "pi:f1" });
+ state = await updates(state.cursor);
+ assert.equal(state.status, "completed");
+ assert.match(state.statusHtml, /Turn completed\. <a href="\/\?revision=2&amp;identity=/);
+ assert.ok(state.completedHref);
+ await server.close();
+ assert.equal(closed, 1, "stopping the preview releases its live projection immediately");
+});
+
 test("Live projection: Codex and OpenCode are not supported yet", () => {
  assert.throws(() => createLiveTurnProjector("codex"), /Claude Code and Pi sessions only/);
  assert.throws(() => createLiveTurnProjector("opencode"), /Claude Code and Pi sessions only/);

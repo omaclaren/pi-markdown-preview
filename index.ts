@@ -1085,28 +1085,40 @@ const piResponseKey = (response: AssistantResponseSnapshot | undefined) => respo
 const PI_LIVE_LEASE_MS = 30_000;
 const PI_LIVE_ENTRY_LIMIT = 10_000;
 /**
- * Live recorded activity for this Pi session, read from Pi's own append-only
- * session entries on each live request (no file tailing). Nothing is kept
- * until a live page asks; 30 s without a request drops the projection. Another
- * session (new, resumed or forked) starts a new generation.
+ * Live recorded activity for this Pi session's active branch, read from Pi's
+ * own session entries on each live request (no file tailing). The active leaf
+ * is checked first: unchanged, nothing is read; moved by appends, only the new
+ * entries are pushed; moved anywhere else (/tree, another session), the branch
+ * is read again as a new generation. Nothing is kept until a live page asks;
+ * 30 s without a request, or close() when the watcher stops, drops it.
  */
 function piLiveSource(ctx: ExtensionContext) {
 	const manager = ctx.sessionManager;
-	let state: { sessionId: string; projector: ReturnType<typeof createLiveTurnProjector>; read: number; timer?: ReturnType<typeof setTimeout> } | undefined;
+	type Projector = ReturnType<typeof createLiveTurnProjector>;
+	let state: { sessionId: string; leafId: string | null; projector: Projector; timer?: ReturnType<typeof setTimeout> } | undefined;
 	const release = () => { if (state) clearTimeout(state.timer); state = undefined; };
 	const sync = () => {
 		const sessionId = manager.getSessionId();
-		const entries = manager.getEntries();
-		let loaded = false;
-		if (!state || state.sessionId !== sessionId || entries.length < state.read) {
-			release();
-			const start = Math.max(0, entries.length - PI_LIVE_ENTRY_LIMIT);
-			state = { sessionId, projector: createLiveTurnProjector("pi", { partialStart: start > 0 }), read: start };
-			loaded = true;
+		const leafId = manager.getLeafId();
+		if (state && state.sessionId === sessionId && state.leafId !== leafId) {
+			const branch = manager.getBranch();
+			let known = -1;
+			for (let index = branch.length - 1; index >= 0; index--) if (branch[index]!.id === state.leafId) { known = index; break; }
+			const now = Date.now();
+			if (known >= 0 || state.leafId === null) {
+				for (const entry of branch.slice(known + 1)) state.projector.push(entry, now);
+				state.leafId = leafId;
+			} else release();
+		} else if (state && state.sessionId !== sessionId) release();
+		if (!state) {
+			const branch = manager.getBranch();
+			const start = Math.max(0, branch.length - PI_LIVE_ENTRY_LIMIT);
+			const projector = createLiveTurnProjector("pi", { partialStart: start > 0 });
+			const now = Date.now();
+			for (const entry of branch.slice(start)) projector.push(entry, now, true);
+			state = { sessionId, leafId, projector };
 		}
 		const current = state;
-		const now = Date.now();
-		for (; current.read < entries.length; current.read++) current.projector.push(entries[current.read], now, loaded);
 		clearTimeout(current.timer);
 		current.timer = setTimeout(() => { if (state === current) release(); }, PI_LIVE_LEASE_MS);
 		current.timer.unref?.();
@@ -1115,6 +1127,7 @@ function piLiveSource(ctx: ExtensionContext) {
 	return {
 		current: async (signal?: AbortSignal) => { signal?.throwIfAborted(); return sync().current(); },
 		snapshot: async (anchor: string, signal?: AbortSignal) => { signal?.throwIfAborted(); return sync().snapshot(anchor); },
+		close: release,
 	};
 }
 
