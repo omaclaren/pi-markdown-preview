@@ -525,6 +525,49 @@ test("Working browser view: one Expand all/Collapse all button acts on event car
  } finally { await browser.close(); await server.close(); }
 });
 
+test("Working browser view: Expand all is remembered for new responses until Collapse all; adjusted pages keep their own state", async t => {
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ const dir = await temp(t);
+ const events = [{ kind: "prompt", label: "Prompt", text: "Start" },
+  { kind: "tool", label: "Tool: Bash", text: JSON.stringify({ command: "ls" }), callId: "a" },
+  { kind: "result", label: "Tool result", text: "file.txt", callId: "a" }];
+ const turnDetails = async () => ({ events });
+ const server = await createBrowserWatchServer(html, dir, { initialTurnDetails: turnDetails });
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ try {
+  const page = await browser.newPage();
+  const cards = () => page.$$eval("details.event", all => all.map(e => e.open));
+  const latestWorking = async () => {
+   await page.goto(server.url);
+   await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="turn-details"]')]);
+  };
+  const respond = text => server.updateDocument(html.replace("Answer", text), { appendToHistory: true, turnDetails });
+  await latestWorking();
+  assert.deepEqual(await cards(), [true, false, false], "the default: only the prompt starts open");
+  await page.click(".working-bulk");
+  assert.match(await page.$eval(".working-bulk", e => e.title), /new responses start with only the prompt open/);
+  // A new response's Working starts expanded.
+  respond("Second");
+  await latestWorking();
+  assert.equal(new URL(page.url()).pathname, "/__pi_markdown_preview_turn__/2");
+  assert.deepEqual(await cards(), [true, true, true]);
+  assert.equal(await page.$eval(".working-bulk", e => e.textContent), "Collapse all");
+  // Collapse all returns new responses to the default.
+  await page.click(".working-bulk");
+  respond("Third");
+  await latestWorking();
+  assert.deepEqual(await cards(), [true, false, false]);
+  // Expanding again does not override a page already adjusted (revision 2 was collapsed).
+  await page.click(".working-bulk");
+  await page.keyboard.down("Alt");
+  await Promise.all([page.waitForNavigation(), page.keyboard.press("ArrowLeft")]);
+  await page.keyboard.up("Alt");
+  assert.equal(new URL(page.url()).pathname, "/__pi_markdown_preview_turn__/2");
+  assert.deepEqual(await cards(), [false, false, false], "its own saved state wins");
+ } finally { await browser.close(); await server.close(); }
+});
+
 test("Turn details browser view preserves normal links/Back, keyboard controls and mobile layout", async t => {
  if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
  const { default: puppeteer } = await import("puppeteer-core");
