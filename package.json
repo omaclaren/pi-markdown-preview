@@ -9,6 +9,17 @@
       "import": "./index.ts"
     }
   },
+  "files": [
+    "index.ts",
+    "shared/",
+    "client/",
+    "screenshots/custom-terminal.png",
+    "screenshots/dark-terminal.png",
+    "screenshots/light-terminal.png",
+    "screenshots/dark-browser.png",
+    "screenshots/light-browser.png",
+    "screenshots/recorded-images-working-dark.png"
+  ],
   "scripts": {
     "check:readme-commands": "node ./scripts/check-readme-commands.mjs",
     "check:regressions": "node ./test/regressions.mjs",
