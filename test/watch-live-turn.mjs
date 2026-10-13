@@ -734,3 +734,29 @@ test("Follow activity: Working that becomes older stays fixed; a scrolled-up rea
   });
  } finally { await browser.close(); }
 });
+
+test("Live browser view: a remembered Expand all opens the live cards, including ones that arrive later", { timeout: 60_000 }, async t => {
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ const dir = await temp(t);
+ const live = createLiveTurnProjector();
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
+ t.after(() => server.close());
+ live.push(user("p", "Go"), Date.now());
+ live.push(call("c1", "m1", "k1", "Bash", { command: "ls" }), Date.now());
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ try {
+  const page = await browser.newPage();
+  await page.goto(server.url);
+  const entry = new URL(liveEntry(await page.content()), server.url).href;
+  await page.goto(entry);
+  assert.deepEqual(await page.$$eval(".live-events > details.event", cards => cards.map(c => c.open)), [true, false], "the default without a remembered choice");
+  await page.click(".working-bulk");
+  await page.goto(entry);
+  assert.deepEqual(await page.$$eval(".live-events > details.event", cards => cards.map(c => c.open)), [true, true]);
+  live.push(result("r1", "k1", "file.txt"), Date.now());
+  await page.waitForSelector('[data-event-id="r1:0"]', { timeout: 10_000 });
+  assert.equal(await page.$eval('[data-event-id="r1:0"]', card => card.open), true, "an arriving card starts open");
+  assert.equal(await page.$eval(".working-bulk", e => e.textContent), "Collapse all");
+ } finally { await browser.close(); }
+});
