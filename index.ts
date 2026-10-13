@@ -1043,6 +1043,14 @@ function getLastAssistantResponse(ctx: ExtensionContext): AssistantResponseSnaps
 	return { entryId: latest.entryId, markdown: latest.markdown, responseKey: latest.responseKey };
 }
 
+/** Match a compatible-host event to one recorded response, never just the latest answer. */
+function resolveAssistantResponse(ctx: ExtensionContext, response: AssistantResponseSnapshot): AssistantResponseSnapshot {
+	if (response.entryId) return response;
+	const matches = getAssistantMessages(ctx).filter(message => message.responseKey === response.responseKey && message.markdown === response.markdown);
+	// Provider ids/timestamps can repeat. An ambiguous event must stay unlinked.
+	return matches.length === 1 ? { ...response, entryId: matches[0]!.entryId } : response;
+}
+
 const DEFAULT_RESPONSE_HISTORY = 10;
 const MAX_RESPONSE_HISTORY = 20;
 
@@ -5279,10 +5287,11 @@ export default function (pi: ExtensionAPI) {
 		responseOverride?: AssistantResponseSnapshot,
 	): Promise<boolean> => {
 		if (!isBrowserWatchActive(activeWatch) || activeWatch.source.kind !== "responses") return false;
-		const response = responseOverride ?? getLastAssistantResponse(ctx);
+		const response = responseOverride ? resolveAssistantResponse(ctx, responseOverride) : getLastAssistantResponse(ctx);
 		if (!response) return false;
 		const style = getPreviewStyle(ctx.ui.theme);
-		const renderKey = getBrowserWatchRenderKey(response.responseKey, response.markdown, style, activeWatch.resourcePath, activeWatch.fontSizePx);
+		// A later persisted entry must repair the Live link even if the text is unchanged.
+		const renderKey = getBrowserWatchRenderKey(piResponseKey(response) ?? response.responseKey, response.markdown, style, activeWatch.resourcePath, activeWatch.fontSizePx);
 		if (!force && renderKey === activeWatch.lastRenderKey) return false;
 
 		activeWatch.pendingRenderKey = renderKey;
@@ -5554,7 +5563,7 @@ export default function (pi: ExtensionAPI) {
 				} finally {
 					finishBrowserWatchRender(provisional, renderController);
 				}
-				renderKey = getBrowserWatchRenderKey(response.responseKey, response.markdown, style, resourcePath, previewFontSizePx);
+				renderKey = getBrowserWatchRenderKey(piResponseKey(response) ?? response.responseKey, response.markdown, style, resourcePath, previewFontSizePx);
 			} else {
 				html = buildBrowserHtmlFromPandocFragment(
 					"<p>Waiting for the next completed assistant response…</p>",

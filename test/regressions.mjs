@@ -1603,6 +1603,7 @@ for (const suite of ["watch-image-links.mjs", "watch-copy-local-path.mjs", "watc
 }
 await import("./document-navigation.mjs");
 await import("./watch-lifecycle.mjs");
+await import("./watch-response-completion.mjs");
 
 async function assertSinglePagePdfFigureRendering() {
 	const { executablePath, args } = getPreviewBrowserLaunchOptions();
