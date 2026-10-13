@@ -4918,6 +4918,11 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
+	// --working and --live only exist for the response watcher, so on their own they start it.
+	if (turnDetails && !watch && file === undefined && !stop && !list && !pick) {
+		watch = true;
+		if (!explicitTarget) target = "browser";
+	}
 	if (turnDetails && (!watch || file !== undefined)) return { error: `${live ? "--live" : "--working"} is only available for the assistant-response browser watcher (--watch without a file).` };
 	if (history !== undefined && (!watch || file !== undefined)) return { error: "--history is only available for the assistant-response browser watcher (--watch without a file)." };
 	if (file && pick) return { error: "Cannot use --pick and --file together." };
@@ -5838,7 +5843,7 @@ export default function (pi: ExtensionAPI) {
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only); --live also follows the current turn as it is recorded.\nA new response watcher starts with up to 10 earlier finished responses; --history <n> sets 0-20.", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only); --live also follows the current turn as it is recorded. Either starts the response watcher on its own, e.g. /preview-browser --live.\nA new response watcher starts with up to 10 earlier finished responses; --history <n> sets 0-20.", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
@@ -6065,7 +6070,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --working opts into recorded inputs/tools and --history <n> sets earlier responses for response watchers)",
+		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --working opts into recorded inputs/tools, --live also follows the current turn (either starts the response watcher on its own), and --history <n> sets earlier responses for response watchers)",
 		handler: async (args, ctx) => {
 			await run(`--browser ${args}`.trim(), ctx);
 		},

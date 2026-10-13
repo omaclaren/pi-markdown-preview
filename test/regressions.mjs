@@ -680,7 +680,6 @@ assert.equal(parsedBrowserWatch.fontSizePx, 14);
 assert.equal(parsePreviewArgs("-b -w --working").turnDetails, true);
 assert.equal(parsePreviewArgs("-b -w --turn-details").turnDetails, true, "--turn-details stays a hidden alias of --working.");
 assert.deepEqual([parsePreviewArgs("-b -w --live").live, parsePreviewArgs("-b -w --live").turnDetails], [true, true], "--live implies --working.");
-assert.match(parsePreviewArgs("-b --live").error ?? "", /--live is only available for the assistant-response/);
 assert.match(parsePreviewArgs("-b -w --live report.md").error ?? "", /--live is only available/);
 
 // The extension's live source follows Pi's active branch (review R2), reads
@@ -719,7 +718,16 @@ assert.match(parsePreviewArgs("-b -w --live report.md").error ?? "", /--live is 
 	assert.notEqual((await live.snapshot(third)).generation, navigated.generation);
 	live.close();
 }
-assert.match(parsePreviewArgs("-b --working").error ?? "", /--working is only available for the assistant-response/);
+// --working and --live start the response watcher on their own; files, --stop, --list and --pick still refuse them.
+for (const args of ["-b --working", "--working", "-b --live", "--live"]) {
+	const parsed = parsePreviewArgs(args);
+	assert.equal(parsed.error, undefined, args);
+	assert.deepEqual([parsed.target, parsed.watch, parsed.turnDetails], ["browser", true, true], args);
+}
+assert.equal(parsePreviewArgs("--live").live, true);
+for (const args of ["-b --stop --live", "-b --list --working", "-b --pick --live", "--terminal --live", "--pdf --working"]) {
+	assert.ok(parsePreviewArgs(args).error, `${args} is refused`);
+}
 assert.match(parsePreviewArgs("-b -w --working report.md").error ?? "", /assistant-response/);
 assert.equal(parsePreviewArgs("-b -w").history, undefined, "Without --history the watcher uses its default.");
 assert.equal(parsePreviewArgs("-b -w --history 5").history, 5);

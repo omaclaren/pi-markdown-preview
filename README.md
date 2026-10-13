@@ -98,8 +98,8 @@ pi -e https://github.com/omaclaren/pi-markdown-preview
 | `/preview-browser` | Shortcut for a one-shot browser preview |
 | `/preview-browser <path/to/file>` | Open a file preview in browser |
 | `/preview-browser --watch` (`-w`) | Keep a browser preview updated after each completed assistant response |
-| `/preview-browser --watch --working` | Opt in to recorded prompt/working/tool details for response previews |
-| `/preview-browser --watch --live` | Working, plus the current turn live: with **Follow activity** on, the page switches to the running turn and back to its response when it finishes |
+| `/preview-browser --working` | Opt in to recorded prompt/working/tool details for response previews (starts the response watcher; same as `--watch --working`) |
+| `/preview-browser --live` | Working, plus the current turn live (same as `--watch --live`): with **Follow activity** on, the page switches to the running turn and back to its response when it finishes |
 | `/preview-browser --watch --history 5` | Start a response watcher with up to 5 earlier finished responses (default 10, 0–20; 0 shows only the latest) |
 | `/preview-browser --watch <path>` | Start or reopen a browser watcher for a file |
 | `/preview-browser --list` | List active and starting browser preview watchers |
@@ -167,7 +167,7 @@ Use **Ctrl+Alt+P/W** (Control+Option on macOS) to switch between Preview and Wor
 
 **Privacy:** prompts, tool text and recorded images can contain secrets and are not automatically redacted. Share these links only with trusted viewers. If an ordinary response watcher is running, stop it with `/preview-browser --stop --responses` before enabling Working; this gives you a fresh private link. Working stays enabled until that watcher is stopped. Reopening without the flag does not revoke access; stop it and start an ordinary watcher to disable it.
 
-**Live:** `/preview-browser --watch --live` (implies `--working`) also follows the current turn as Pi records it. Turn on **Follow activity** in the toolbar (Ctrl+Alt+A): while a turn runs, Working shows it live and the page switches to it; when the turn finishes, the page returns to that response's Preview. If you have scrolled up or left the live page yourself, it does not move you. Updates arrive as Pi records each message, not token by token, and a tool call says "No result recorded yet" until its result is recorded. Pi Studio offers a fuller live view; this is the lightweight alternative inside the preview.
+**Live:** `/preview-browser --live` (implies `--working` and starts the response watcher) also follows the current turn as Pi records it. Turn on **Follow activity** in the toolbar (Ctrl+Alt+A): while a turn runs, Working shows it live and the page switches to it; when the turn finishes, the page returns to that response's Preview. If you have scrolled up or left the live page yourself, it does not move you. Updates arrive as Pi records each message, not token by token, and a tool call says "No result recorded yet" until its result is recorded. Pi Studio offers a fuller live view; this is the lightweight alternative inside the preview.
 
 ![Working with a recorded image — synthetic example](screenshots/recorded-images-working-dark.png)
 

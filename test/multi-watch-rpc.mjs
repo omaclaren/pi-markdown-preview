@@ -284,7 +284,7 @@ try {
 	// --live: the current turn from Pi's own session entries, linked to its exact retained response.
 	const opensBeforeLive = (await openedUrls()).length;
 	const notesBeforeLive = notifications.length;
-	await command("/preview-browser -w --live");
+	await command("/preview-browser --live"); // --live starts the response watcher on its own
 	const liveSession = await bootstrap((await waitOpenCount(opensBeforeLive + 1)).at(-1));
 	assert.ok(notifications.slice(notesBeforeLive).some(e => e.message?.includes("Live is on: turn on Follow activity")), "The start message explains Follow activity.");
 	assert.match(liveSession.html, /<a data-watch-control="turn-details" href=/, "--live implies Working");
