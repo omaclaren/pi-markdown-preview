@@ -1222,10 +1222,13 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			// Status: only what the record says; completion links to the exact retained response.
 			const linksFor = snapshot => {
 				const document = snapshot.finalKey ? documents.find(d => d.responseKey === snapshot.finalKey) : undefined;
+				const latest = documents.at(-1);
 				return {
 					status: snapshot.status,
 					completedHref: document ? `/?revision=${document.revision}&${query}` : undefined,
 					workingHref: document?.turnDetails ? `${TURN_PREFIX}${document.revision}?${query}` : undefined,
+					// Completed without a final answer: no response will follow, so return to the latest one.
+					previewHref: snapshot.status === "completed" && !snapshot.finalKey && latest ? `/?revision=${latest.revision}&${query}` : undefined,
 					newerHref: snapshot.newerAnchor ? `${LIVE_PREFIX}${encodeURIComponent(snapshot.newerAnchor)}?${query}` : undefined,
 					newerAnchor: snapshot.newerAnchor,
 				};
@@ -1256,7 +1259,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const since = Number(sequenceText);
 					const resync = generation !== snapshot.generation || !Number.isInteger(since) || since > snapshot.sequence;
 					const links = linksFor(snapshot);
-					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, loaded: snapshot.loaded === true, omitted: snapshot.omitted };
+					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, previewHref: links.previewHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, loaded: snapshot.loaded === true, omitted: snapshot.omitted };
 					if (!resync && since === snapshot.sequence) { respondJson(res, 200, { ...base, unchanged: true }); return; }
 					const upserts = snapshot.events.flatMap((event, i) => resync || event.changed > since
 						? [{ id: event.id, version: event.version, html: renderLiveCard(event, snapshot.omitted + i + 1, true, snapshot.events[i + 1]) }] : []);

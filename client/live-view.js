@@ -158,7 +158,7 @@
       }
      }
      document.dispatchEvent(new CustomEvent('pi-markdown-preview-live-update', { detail: {
-      status: data.status, completedHref: data.completedHref, newerHref: data.newerHref, newerAnchor: data.newerAnchor, paused: Boolean(queued),
+      status: data.status, completedHref: data.completedHref, previewHref: data.previewHref, newerHref: data.newerHref, newerAnchor: data.newerAnchor, paused: Boolean(queued),
      } }));
     } catch {} finally {
      clearTimeout(deadline);

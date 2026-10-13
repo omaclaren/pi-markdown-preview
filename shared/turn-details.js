@@ -210,14 +210,8 @@ function codexDetails(rows, target, t) {
 	for (const e of slice) {
 		const p = e?.payload;
 		if (!p) continue;
-		if (e.type === "response_item") {
-			if (p.type === "message" && ["user", "assistant"].includes(p.role)) t.content(p.content, p.role, p.role === "assistant" && (p.phase === "final_answer" || textOf(p.content).trim() === target.markdown.trim()));
-			else if (p.type === "reasoning") {
-				for (const b of Array.isArray(p.summary) ? p.summary : []) t.add("reasoning", "Recorded reasoning summary", b.text);
-				if (p.encrypted_content) t.note("Opaque/encrypted reasoning is not available; only recorded summaries are shown.");
-			} else if (["function_call", "custom_tool_call"].includes(p.type)) t.add("tool", `Tool: ${text(p.name)}`, json(p.arguments ?? p.input), p.call_id);
-			else if (["function_call_output", "custom_tool_call_output"].includes(p.type)) t.toolResult("Tool result", p.output, p.call_id);
-		} else if (e.type === "event_msg") {
+		if (e.type === "response_item") codexItem(t, p, p.type === "message" && p.role === "assistant" && (p.phase === "final_answer" || textOf(p.content).trim() === target.markdown.trim()));
+		else if (e.type === "event_msg") {
 			if (p.type === "user_message" && !userTexts.has(text(p.message).trim())) t.content(p.message, "user");
 			if (p.type === "agent_message" && !assistantTexts.has(text(p.message).trim()) && text(p.message).trim() !== target.markdown.trim()) t.add("progress", "Assistant progress", p.message);
 			if (p.type === "agent_reasoning" && !summaries.has(text(p.text).trim())) t.add("reasoning", "Recorded reasoning summary", p.text);
@@ -228,12 +222,23 @@ function codexDetails(rows, target, t) {
 	return t.result;
 }
 
-// ---- Live: recorded activity of one in-progress turn (Claude Code and Pi) ----
-// Records are pushed in file order as they become readable. Both agents append
+/** One Codex response item; `final` marks the retained answer, which Preview shows. */
+function codexItem(t, p, final = false) {
+	if (p.type === "message" && ["user", "assistant"].includes(p.role)) t.content(p.content, p.role, final);
+	else if (p.type === "reasoning") {
+		for (const b of Array.isArray(p.summary) ? p.summary : []) t.add("reasoning", "Recorded reasoning summary", b?.text);
+		if (p.encrypted_content) t.note("Opaque/encrypted reasoning is not available; only recorded summaries are shown.");
+	} else if (["function_call", "custom_tool_call"].includes(p.type)) t.add("tool", `Tool: ${text(p.name)}`, json(p.arguments ?? p.input), p.call_id);
+	else if (["function_call_output", "custom_tool_call_output"].includes(p.type)) t.toolResult("Tool result", p.output, p.call_id);
+}
+
+// ---- Live: recorded activity of one in-progress turn (Claude Code, Pi and Codex) ----
+// Records are pushed in file order as they become readable. These agents append
 // records and never rewrite one: an id names one record's content for good, so a
 // repeated id (backfill and subscription overlap) is ignored. A Claude message's
 // blocks and its recorded end arrive as separate records with their own uuids; a
-// Pi message arrives whole, with its stop reason.
+// Pi message arrives whole, with its stop reason; a Codex task records its start
+// and end as events around its items.
 // Membership follows each record's own links, not its position: a record joins
 // the turn of the call it answers or of its recorded parent, so a late result of
 // a finished turn never becomes another turn's activity. A prompt or task
@@ -305,6 +310,44 @@ function piLiveRole(e) {
 	return injected(textOf(e.message.content)) ? "meta" : "start";
 }
 
+// Codex: rollout lines without record ids or parent links. A task, from
+// task_started to task_complete or turn_aborted, is the turn; only the task's own
+// events name it (turn_id). Its items join the running task in file order, and a
+// tool result joins its call's turn. Items are read from response_item records
+// only: item_completed and the older user/agent event messages repeat them.
+// Maintenance tasks (compaction) have no prompt and no final answer.
+const CODEX_TURN_ID = /^[A-Za-z0-9_-]{1,100}$/;
+const CODEX_ITEMS = new Set(["reasoning", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"]);
+const codexTask = e => e?.type === "event_msg" && e.payload?.type === "task_started";
+const codexTurn = e => typeof e?.payload?.turn_id === "string" && CODEX_TURN_ID.test(e.payload.turn_id) ? `turn-${e.payload.turn_id}` : undefined;
+function codexLiveId(e) {
+	if (!e || typeof e !== "object") return undefined;
+	if (codexTask(e) && codexTurn(e)) return codexTurn(e);
+	if (Number.isSafeInteger(e.ordinal) && e.ordinal >= 0) return `o${e.ordinal}`;
+	// Older rollouts number no records: the record's content names it.
+	const source = JSON.stringify(e);
+	let a = 0x811c9dc5, b = 0x050c5d1f;
+	for (let i = 0; i < source.length; i++) {
+		const c = source.charCodeAt(i);
+		a = Math.imul(a ^ c, 0x01000193) >>> 0; b = Math.imul(b ^ c, 0x01000193) >>> 0;
+	}
+	return `c${a.toString(36)}-${b.toString(36)}-${source.length.toString(36)}`;
+}
+function codexLiveRole(e) {
+	if (!e || typeof e !== "object") return "skip";
+	const p = e.payload;
+	if (e.type === "compacted") return "compaction";
+	if (e.type === "event_msg") {
+		if (p?.type === "task_started") return "start";
+		if (p?.type === "context_compacted") return "compaction";
+		return ["task_complete", "turn_aborted", "task_aborted"].includes(p?.type) ? "activity" : "skip";
+	}
+	if (e.type !== "response_item") return "skip";
+	// Developer messages are never shown.
+	if (p?.type === "message") return ["user", "assistant"].includes(p.role) ? "activity" : "skip";
+	return CODEX_ITEMS.has(p?.type) ? "activity" : "skip";
+}
+
 // How each format names, links, projects and ends its records. The turn logic is shared.
 const LIVE_FORMATS = {
 	claude: {
@@ -342,17 +385,39 @@ const LIVE_FORMATS = {
 		ending: e => e.message?.role !== "assistant" ? undefined : ({ stop: "completed", error: "error", aborted: "interrupted", length: "incomplete" })[e.message.stopReason],
 		finalKey: e => `pi:${e.id}`,
 	},
+	codex: {
+		id: codexLiveId,
+		// A task's events link to its start; a new task never joins a running one.
+		parent: e => codexTask(e) ? undefined : codexTurn(e),
+		linked: e => codexTask(e) || codexTurn(e) !== undefined,
+		role: codexLiveRole,
+		results: e => e.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(e.payload?.type) && typeof e.payload.call_id === "string" ? [[undefined, e.payload.call_id.slice(0, 160)]] : [],
+		project(details, e) { if (e.type === "response_item" && e.payload) codexItem(details, e.payload); },
+		// No continuation after a recorded end was observed; an error stays an error.
+		reply: () => false,
+		ending(e) {
+			const p = e.payload;
+			if (e.type !== "event_msg") return undefined;
+			if (p?.type === "task_complete") return p.error != null ? "error" : "completed";
+			if (["turn_aborted", "task_aborted"].includes(p?.type)) return "interrupted";
+		},
+		// The session reader's key, only when the task recorded an answer to preview.
+		finalKey(e) {
+			const p = e.payload, turn = typeof p?.turn_id === "string" ? p.turn_id : e.timestamp;
+			return typeof p?.last_agent_message === "string" && p.last_agent_message.trim() && turn !== undefined ? `codex:${turn}` : undefined;
+		},
+	},
 };
 
 /**
- * Incremental, bounded projection of the latest turns of one Claude Code or Pi session.
+ * Incremental, bounded projection of the latest turns of one Claude Code, Pi or Codex session.
  * `partialStart`: the records begin partway through the session (a bounded
  * backfill), so activity before the first retained prompt forms a turn whose
  * prompt is not retained. Otherwise unlinked activity never starts a turn.
  */
 export function createLiveTurnProjector(agent = "claude", { partialStart = false } = {}) {
 	const format = LIVE_FORMATS[agent];
-	if (!format) throw new Error("Live recorded activity currently supports Claude Code and Pi sessions only.");
+	if (!format) throw new Error("Live recorded activity currently supports Claude Code, Pi and Codex sessions only.");
 	const generation = Math.random().toString(36).slice(2, 10);
 	const turns = [];
 	// Owner links: a turn's `owner` object (resolved among retained turns, so a

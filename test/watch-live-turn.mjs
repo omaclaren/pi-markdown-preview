@@ -413,9 +413,183 @@ test("Live updates (Pi): a retried turn reaches its exact completion link; closi
  assert.equal(closed, 1, "stopping the preview releases its live projection immediately");
 });
 
-test("Live projection: Codex and OpenCode are not supported yet", () => {
- assert.throws(() => createLiveTurnProjector("codex"), /Claude Code and Pi sessions only/);
- assert.throws(() => createLiveTurnProjector("opencode"), /Claude Code and Pi sessions only/);
+// Codex rollout lines, shaped as recorded by codex-cli 0.160 (paginated history): a
+// per-file ordinal, task events naming the turn, items without turn ids.
+let ordinal = 0;
+const cx = (type, payload, extra = {}) => ({ timestamp: "2026-10-14T00:00:00.000Z", ordinal: ordinal++, type, payload, ...extra });
+const cxEvent = payload => cx("event_msg", payload);
+const cxItem = payload => cx("response_item", payload);
+const cxStart = turn => cxEvent({ type: "task_started", turn_id: turn, root_turn_id: turn });
+const cxMessage = (role, text, extra = {}) => cxItem({ type: "message", role, content: [{ type: role === "assistant" ? "output_text" : "input_text", text }], ...extra });
+const cxCall = callId => cxItem({ type: "custom_tool_call", name: "exec", call_id: callId, status: "completed", input: "await tools.exec_command({ cmd: 'npm test' })" });
+const cxOutput = (callId, text) => cxItem({ type: "custom_tool_call_output", call_id: callId, output: [{ type: "input_text", text }] });
+const cxCompleted = (turn, item) => cxEvent({ type: "item_completed", thread_id: "thread", turn_id: turn, item });
+const cxDone = (turn, answer, error = null) => cxEvent({ type: "task_complete", turn_id: turn, last_agent_message: answer, ...(error ? { error } : {}) });
+
+test("Live projection (Codex): a task from its start to its recorded completion, with pending calls, one copy of each item and the exact response key", () => {
+ ordinal = 0;
+ const live = createLiveTurnProjector("codex");
+ assert.equal(live.push(cx("session_meta", { id: "thread", cwd: "/x" }), 1), false, "the session header is not activity");
+ assert.equal(live.push(cxStart("T1"), 1), true);
+ assert.equal(live.current(), "turn-T1", "the task's turn id names the turn");
+ live.push(cxMessage("developer", "SECRET DEVELOPER"), 2);
+ live.push(cxMessage("user", "# AGENTS.md instructions for /x\n<INSTRUCTIONS>PRIVATE</INSTRUCTIONS>"), 2);
+ live.push(cx("world_state", { full: true }), 2);
+ live.push(cx("turn_context", { turn_id: "T1", cwd: "/x" }), 2);
+ const prompt = cxMessage("user", "Run the checks");
+ live.push(prompt, 2);
+ live.push(cxCompleted("T1", { type: "UserMessage", content: [{ type: "text", text: "Run the checks" }] }), 2);
+ live.push(cxCompleted("T1", { type: "AgentMessage", content: [{ type: "Text", text: "Running them." }] }), 3);
+ live.push(cxMessage("assistant", "Running them.", { phase: "commentary" }), 3);
+ live.push(cxEvent({ type: "agent_message", message: "Running them." }), 3);
+ const call = cxCall("k1");
+ live.push(call, 4);
+ live.push(cx("token_usage_record", { turn_id: "T1", usage: {} }), 4);
+ let snapshot = live.snapshot("turn-T1");
+ assert.deepEqual(labels(snapshot), [[`o${prompt.ordinal}:0`, "prompt", "Prompt / input"], [`o${prompt.ordinal + 3}:0`, "progress", "Assistant progress"], [`o${call.ordinal}:0`, "tool", "Tool: exec"]]);
+ assert.equal(snapshot.events[2].pending, true, "a call record's own status is not its result");
+ assert.equal(snapshot.status, "running");
+ assert.doesNotMatch(JSON.stringify(snapshot), /SECRET|PRIVATE/);
+ assert.match(snapshot.notices.join(" "), /harness-injected context is omitted/);
+ // A nested command's completion is not the outer call's result; the recorded output is.
+ live.push(cxCompleted("T1", { type: "CommandExecution", status: "failed", exit_code: 7 }), 5);
+ assert.equal(live.snapshot("turn-T1").events[2].pending, true);
+ live.push(cxOutput("k1", "Script running; partial output"), 6);
+ snapshot = live.snapshot("turn-T1");
+ assert.deepEqual(labels(snapshot).at(-1).slice(1), ["result", "Tool result: exec"]);
+ assert.equal(snapshot.events.at(-1).text, "Script running; partial output");
+ assert.equal(snapshot.events[2].pending, undefined);
+ live.push(cxItem({ type: "reasoning", summary: [{ type: "summary_text", text: "Check the logs" }], encrypted_content: "SECRET CIPHER" }), 7);
+ live.push(cxMessage("assistant", "All green.", { phase: "final_answer" }), 8);
+ assert.equal(live.snapshot("turn-T1").status, "running", "the final answer alone ends nothing");
+ const end = cxDone("T1", "All green.");
+ live.push(end, 9);
+ snapshot = live.snapshot("turn-T1");
+ assert.equal(snapshot.status, "completed");
+ assert.equal(snapshot.finalKey, "codex:T1", "the same key the session reader gives the response");
+ assert.deepEqual(snapshot.events.slice(-2).map(e => [e.kind, e.text]), [["reasoning", "Check the logs"], ["progress", "All green."]]);
+ assert.match(snapshot.notices.join(" "), /encrypted reasoning is not available/);
+ assert.doesNotMatch(JSON.stringify(snapshot), /SECRET/);
+ // A repeated line (backfill and subscription overlap) is ignored.
+ assert.equal(live.push(structuredClone(call), 10), false);
+ assert.equal(live.push(structuredClone(end), 10), false);
+ assert.equal(live.snapshot("turn-T1").events.length, 6);
+});
+
+test("Live projection (Codex): interruption, errors, maintenance tasks, late records and tasks without a recorded end", () => {
+ ordinal = 0;
+ const live = createLiveTurnProjector("codex");
+ live.push(cxStart("T1"), 1);
+ live.push(cxMessage("user", "Wait for it"), 1);
+ live.push(cxCall("k1"), 2);
+ live.push(cxEvent({ type: "turn_aborted", turn_id: "T1", reason: "interrupted" }), 3);
+ assert.equal(live.snapshot("turn-T1").status, "interrupted");
+ // Late records of the interrupted task stay with it: a nested completion is not shown, an output joins its call.
+ live.push(cxStart("T2"), 4);
+ live.push(cxCompleted("T1", { type: "CommandExecution", status: "completed" }), 4);
+ live.push(cxMessage("user", "Try a model that fails"), 4);
+ live.push(cxOutput("k1", "late output"), 5);
+ assert.deepEqual(live.snapshot("turn-T2").events.map(e => e.kind), ["prompt"]);
+ assert.equal(live.snapshot("turn-T1").events.at(-1).text, "late output");
+ assert.equal(live.snapshot("turn-T1").status, "interrupted", "a late result never reopens a turn");
+ // A recorded error ends the task as an error, never as a completion, and nothing after it resumes it.
+ live.push(cxDone("T2", null, { message: "unsupported model", codex_error_info: "other" }), 6);
+ let snapshot = live.snapshot("turn-T2");
+ assert.deepEqual([snapshot.status, snapshot.finalKey], ["error", undefined]);
+ live.push(cxMessage("assistant", "Unplaced reply"), 7);
+ assert.equal(live.snapshot("turn-T2").status, "error");
+ assert.equal(live.snapshot("turn-T2").events.length, 1, "items outside any running task are not shown");
+ // A maintenance task (compaction) records no prompt and no final answer: completed, with no response to link.
+ live.push(cxStart("T3"), 8);
+ live.push(cx("compacted", { message: "", replacement_history: [] }), 9);
+ live.push(cxCompleted("T3", { type: "ContextCompaction" }), 9);
+ live.push(cxDone("T3", null), 10);
+ snapshot = live.snapshot("turn-T3");
+ assert.deepEqual([snapshot.status, snapshot.finalKey, snapshot.events.length], ["completed", undefined, 0]);
+ assert.match(snapshot.notices.join(" "), /compacted during this turn/);
+ assert.match(liveStatusHtml({ status: "completed", previewHref: "/?revision=1" }), /^Turn completed without a final answer\. <a href="\/\?revision=1">Back to Preview<\/a>$/);
+ assert.match(liveStatusHtml({ status: "completed" }), /will appear in Preview shortly/);
+ // A new task always starts a new turn, even when the previous one recorded no end;
+ // an end naming another task does not end this one.
+ live.push(cxStart("T4"), 11);
+ live.push(cxMessage("user", "Start"), 11);
+ live.push(cxStart("T5"), 12);
+ assert.equal(live.current(), "turn-T5");
+ assert.equal(live.snapshot("turn-T4").status, "running", "nothing is inferred about a task without a recorded end");
+ live.push(cxMessage("user", "Next"), 12);
+ live.push(cxDone("T4", "Late answer"), 13);
+ assert.equal(live.snapshot("turn-T5").status, "running");
+ assert.equal(live.snapshot("turn-T4").status, "completed");
+ assert.deepEqual(live.snapshot("turn-T5").events.map(e => e.text), ["Next"]);
+ // A turn id that cannot name a page falls back to the line's ordinal.
+ const odd = cxEvent({ type: "task_started", turn_id: "a/b" });
+ live.push(odd, 14);
+ assert.equal(live.current(), `o${odd.ordinal}`);
+});
+
+test("Live projection (Codex): older rollouts without ordinals, and a backfill that starts inside a task", () => {
+ const legacy = createLiveTurnProjector("codex");
+ const at = (type, payload) => ({ timestamp: "2026-01-01T00:00:00.000Z", type, payload });
+ assert.equal(legacy.push(at("event_msg", { type: "task_started", turn_id: "L1" }), 1), true);
+ const same = at("response_item", { type: "function_call", name: "shell", arguments: '{"command":["ls"]}', call_id: "c1" });
+ legacy.push(same, 2);
+ assert.equal(legacy.push(structuredClone(same), 2), false, "a line read twice is named by its content");
+ legacy.push(at("response_item", { type: "function_call", name: "shell", arguments: '{"command":["pwd"]}', call_id: "c2" }), 2);
+ legacy.push(at("event_msg", { type: "user_message", message: "event copy" }), 2);
+ legacy.push(at("event_msg", { type: "context_compacted" }), 3);
+ legacy.push(at("response_item", { type: "function_call_output", call_id: "c1", output: "file.txt" }), 3);
+ let snapshot = legacy.snapshot("turn-L1");
+ assert.deepEqual(snapshot.events.map(e => e.label), ["Tool: shell", "Tool: shell", "Tool result: shell"]);
+ assert.ok(snapshot.events.every(e => /^c[0-9a-z]+-[0-9a-z]+-[0-9a-z]+:0$/.test(e.id)));
+ assert.deepEqual(snapshot.events.map(e => e.pending), [undefined, true, undefined]);
+ assert.match(snapshot.notices.join(" "), /compacted during this turn/);
+ // Records before the first retained task start form a turn without its prompt; its end still applies.
+ ordinal = 50;
+ const partial = createLiveTurnProjector("codex", { partialStart: true });
+ const first = cxCall("k9");
+ partial.push(first, 1);
+ assert.equal(partial.current(), `o${first.ordinal}`);
+ partial.push(cxDone("T0", "Answer"), 2);
+ snapshot = partial.snapshot(`o${first.ordinal}`);
+ assert.deepEqual([snapshot.status, snapshot.finalKey], ["completed", "codex:T0"]);
+ assert.match(snapshot.notices.join(" "), /prompt is not in the retained recorded activity/);
+ assert.equal(createLiveTurnProjector("codex").push(cxCall("k8"), 1), false, "without a partial start, items outside a task start nothing");
+});
+
+test("Live updates (Codex): completion links to the exact response; a task without a final answer returns to Preview", async t => {
+ ordinal = 0;
+ const dir = await temp(t);
+ const live = createLiveTurnProjector("codex");
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
+ t.after(() => server.close());
+ const session = await auth(server);
+ const query = liveEntry(session.text).split("?")[1];
+ const updates = async (anchor, cursor) => (await fetch(new URL(`/__pi_markdown_preview_live__/${anchor}/updates?${query}&cursor=${encodeURIComponent(cursor)}`, session.origin), { headers: { cookie: session.cookie } })).json();
+ live.push(cxStart("T1"), 1);
+ live.push(cxMessage("user", "Go"), 1);
+ live.push(cxDone("T1", "Done"), 2);
+ let state = await updates("turn-T1", "");
+ assert.match(state.statusHtml, /will appear in Preview shortly/);
+ assert.equal(state.previewHref, undefined);
+ const revision = server.updateDocument(html.replace("Answer", "Done"), { appendToHistory: true, responseKey: "codex:T1" });
+ state = await updates("turn-T1", state.cursor);
+ assert.match(state.completedHref, new RegExp(`^/\\?revision=${revision}&identity=`));
+ live.push(cxStart("T2"), 3);
+ live.push(cx("compacted", { message: "" }), 4);
+ live.push(cxDone("T2", null), 5);
+ state = await updates("turn-T2", "");
+ assert.deepEqual([state.status, state.completedHref], ["completed", undefined]);
+ assert.match(state.previewHref, new RegExp(`^/\\?revision=${revision}&identity=`), "back to the latest response");
+ assert.match(state.statusHtml, new RegExp(`Turn completed without a final answer\\. <a href="/\\?revision=${revision}&amp;identity=`));
+ // An error has no Preview link: the reader stays to see what happened.
+ live.push(cxStart("T3"), 6);
+ live.push(cxDone("T3", null, { message: "failed" }), 7);
+ state = await updates("turn-T3", "");
+ assert.deepEqual([state.status, state.previewHref], ["error", undefined]);
+});
+
+test("Live projection: OpenCode is not supported yet", () => {
+ assert.throws(() => createLiveTurnProjector("opencode"), /Claude Code, Pi and Codex sessions only/);
 });
 
 const html = "<!doctype html><html><head><title>Response</title></head><body><main id='preview-root'><p>Answer</p></main></body></html>";
@@ -710,6 +884,32 @@ test("Follow activity browser view: Live when a turn starts, back to its Preview
   await page.waitForFunction(() => document.querySelector("[data-live-status] a")?.textContent === "Open its response", { timeout: 10_000 });
   await new Promise(resolve => setTimeout(resolve, 2500));
   assert.match(page.url(), /\/__pi_markdown_preview_live__\/p3\?/, "with following turned off, the live page stays put");
+ } finally { await browser.close(); }
+});
+
+test("Follow activity browser view (Codex): a task without a final answer returns to the latest Preview", { timeout: 90_000 }, async t => {
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ ordinal = 0;
+ const dir = await temp(t);
+ const live = createLiveTurnProjector("codex");
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
+ t.after(() => server.close());
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ try {
+  const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
+  await page.goto(server.url);
+  await page.$eval('[data-watch-control="follow-activity"]', e => e.click());
+  // A compaction task: no prompt, no final answer.
+  live.push(cxStart("T1"), Date.now());
+  await page.waitForFunction(() => document.querySelector("h1")?.textContent === "Working · live", { timeout: 15_000 });
+  assert.match(page.url(), /\/__pi_markdown_preview_live__\/turn-T1\?/);
+  live.push(cx("compacted", { message: "" }), Date.now());
+  live.push(cxDone("T1", null), Date.now());
+  await page.waitForFunction(() => location.pathname === "/" && document.body.textContent.includes("Answer"), { timeout: 15_000 });
+  assert.equal(new URL(page.url()).searchParams.get("revision"), "1", "the latest response, unchanged");
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(new URL(page.url()).pathname, "/", "a finished task does not pull the reader back");
  } finally { await browser.close(); }
 });
 

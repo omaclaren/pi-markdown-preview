@@ -293,10 +293,12 @@ export function renderLiveCard(event, number, fromClaude = true, next) {
 }
 
 /** Status line: only what the record says. Links are server-built, same-origin. */
-export function liveStatusHtml({ status, completedHref, workingHref, newerHref } = {}) {
+export function liveStatusHtml({ status, completedHref, workingHref, previewHref, newerHref } = {}) {
 	const parts = [];
 	if (status === "completed") parts.push(completedHref
 		? `Turn completed. <a href="${escape(completedHref)}">Open its response</a>${workingHref ? ` · <a href="${escape(workingHref)}">Working</a>` : ""}`
+		// A turn that recorded no final answer (a Codex compaction task) has no response to wait for.
+		: previewHref ? `Turn completed without a final answer. <a href="${escape(previewHref)}">Back to Preview</a>`
 		: "Turn completed; its response will appear in Preview shortly.");
 	else if (status === "interrupted") parts.push("Turn interrupted.");
 	else if (status === "error") parts.push("Turn ended with an API error.");

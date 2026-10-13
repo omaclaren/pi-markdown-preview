@@ -1,8 +1,9 @@
 // Follow activity (off by default, like Pi Studio). On: while a turn runs, the
 // latest response's Working tab shows that turn live, and the page switches to
 // it; when the turn finishes and its response is retained, it returns to that
-// response's Preview (only from a live page it opened itself, and only while
-// the reader is at the bottom). Off: Working is the finished response's fixed
+// response's Preview, or to the latest Preview when the turn recorded no final
+// answer (only from a live page it opened itself, and only while the reader is
+// at the bottom). Off: Working is the finished response's fixed
 // activity and nothing switches. Older responses' Working is always fixed,
 // including a page that becomes older while open.
 // Remembered per preview address; Ctrl+Alt+A toggles it. Nothing is polled while off.
@@ -99,7 +100,8 @@
     const update = event.detail || {};
     if (update.paused || !atBottom()) return;
     if (update.newerHref && update.newerAnchor) { go(update.newerHref, update.newerAnchor); return; }
-    if (update.status === 'completed' && update.completedHref) go(update.completedHref, null);
+    // A turn that recorded no final answer returns to the latest response's Preview.
+    if (update.status === 'completed' && (update.completedHref || update.previewHref)) go(update.completedHref || update.previewHref, null);
    });
 
    const toggle = () => {
