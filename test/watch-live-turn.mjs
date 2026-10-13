@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLiveTurnProjector, LIVE_EVENT_WINDOW, LIVE_TURN_BYTES } from "../shared/turn-details.js";
-import { buildLivePage, renderLiveCard } from "../shared/turn-details-page.js";
+import { buildLivePage, liveStatusHtml, renderLiveCard } from "../shared/turn-details-page.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const txt = text => ({ type: "text", text });
@@ -290,8 +290,75 @@ test("Live projection: Loaded for activity read at start, Updated for activity s
  assert.deepEqual([live.snapshot("p").loaded, live.snapshot("p").updatedAt], [false, 200]);
 });
 
-test("Live projection: only Claude is supported in milestone 1", () => {
- assert.throws(() => createLiveTurnProjector("pi"), /Claude Code sessions only/);
+// Pi session entries, as Pi writes them: whole messages with id/parentId links.
+const piUser = (id, parentId, text) => ({ type: "message", id, parentId, message: { role: "user", content: [txt(text)] } });
+const piReply = (id, parentId, content, stopReason) => ({ type: "message", id, parentId, message: { role: "assistant", content, stopReason } });
+const piCall = (id, parentId, callId, name = "bash", args = { command: "ls" }) => piReply(id, parentId, [{ type: "toolCall", id: callId, name, arguments: args }], "toolUse");
+const piResult = (id, parentId, callId, output, name = "bash") => ({ type: "message", id, parentId, message: { role: "toolResult", toolCallId: callId, toolName: name, content: [txt(output)], isError: false } });
+
+test("Live projection (Pi): a turn from prompt to its recorded stop, with pending calls and the exact response key", () => {
+ const live = createLiveTurnProjector("pi");
+ assert.equal(live.push({ type: "session", id: "s", cwd: "/x" }, 1), false, "the session header is not activity");
+ assert.equal(live.push(piUser("u1", null, "Run the checks"), 1), true);
+ assert.equal(live.current(), "u1");
+ live.push(piReply("a1", "u1", [{ type: "thinking", thinking: "Plan" }, { type: "toolCall", id: "k1", name: "bash", arguments: { command: "npm test" } }], "toolUse"), 2);
+ let snapshot = live.snapshot("u1");
+ assert.deepEqual(labels(snapshot), [["u1:0", "prompt", "Prompt / input"], ["a1:0", "reasoning", "Recorded thinking / reasoning"], ["a1:1", "tool", "Tool: bash"]]);
+ assert.equal(snapshot.events[2].pending, true);
+ live.push(piResult("r1", "a1", "k1", "ok"), 3);
+ snapshot = live.snapshot("u1");
+ assert.deepEqual(labels(snapshot).at(-1), ["r1:0", "result", "Tool result: bash"]);
+ assert.equal(snapshot.events[2].pending, undefined);
+ assert.equal(snapshot.status, "running");
+ live.push(piReply("f1", "r1", [txt("All green.")], "stop"), 4);
+ snapshot = live.snapshot("u1");
+ assert.equal(snapshot.status, "completed");
+ assert.equal(snapshot.finalKey, "pi:f1", "the same key the session reader gives the response");
+ // A repeated entry (backfill and subscription overlap) is ignored.
+ assert.equal(live.push(piReply("f1", "r1", [txt("Changed")], "stop"), 5), false);
+});
+
+test("Live projection (Pi): steering, ! commands, extension messages, compaction, every recorded ending and links", () => {
+ const live = createLiveTurnProjector("pi");
+ // A ! command between turns is context for the next prompt, not a running turn.
+ live.push({ type: "message", id: "b1", parentId: null, message: { role: "bashExecution", command: "ls", output: "file.txt" } }, 1);
+ assert.equal(live.current(), undefined);
+ live.push(piUser("u1", "b1", "Fix it"), 2);
+ assert.deepEqual(labels(live.snapshot("u1")).map(l => l[2]), ["User shell command", "Shell output", "Prompt / input"]);
+ // Steering during the turn joins it; extension messages are not shown; compaction is noted.
+ live.push(piCall("a1", "u1", "k1"), 3);
+ live.push(piUser("steer", "a1", "Use the other file"), 4);
+ live.push({ type: "message", id: "ext", parentId: "steer", message: { role: "custom", customType: "note", content: "From an extension" } }, 4);
+ live.push({ type: "compaction", id: "c1", parentId: "ext", summary: "Earlier work" }, 5);
+ assert.equal(live.current(), "u1");
+ assert.ok(live.snapshot("u1").events.some(e => e.id === "steer:0"));
+ assert.ok(!live.snapshot("u1").events.some(e => e.id.startsWith("ext:")));
+ assert.match(live.snapshot("u1").notices.join(" "), /compacted during this turn/);
+ // Escape: the partial reply is shown and the turn is interrupted.
+ live.push(piReply("ab", "c1", [txt("Partial")], "aborted"), 6);
+ assert.equal(live.snapshot("u1").status, "interrupted");
+ assert.equal(live.snapshot("u1").events.at(-1).text, "Partial");
+ // A late result for the interrupted turn's call stays there after the next prompt.
+ live.push(piUser("u2", "ab", "Try again"), 7);
+ live.push(piResult("late", "a1", "k1", "late output"), 8);
+ assert.deepEqual(live.snapshot("u2").events.map(e => e.id), ["u2:0"]);
+ assert.equal(live.snapshot("u1").events.at(-1).id, "late:0");
+ live.push(piReply("err", "u2", [txt("")], "error"), 9);
+ assert.equal(live.snapshot("u2").status, "error");
+ live.push(piUser("u3", "err", "Once more"), 10);
+ live.push(piReply("long", "u3", [txt("Truncated")], "length"), 11);
+ assert.equal(live.snapshot("u3").status, "incomplete");
+ assert.match(liveStatusHtml({ status: "incomplete" }), /output limit/);
+ // A backfill that starts partway shows activity before its first retained prompt.
+ const partial = createLiveTurnProjector("pi", { partialStart: true });
+ partial.push(piCall("x1", "earlier", "k9"), 1);
+ assert.equal(partial.current(), "x1");
+ assert.equal(createLiveTurnProjector("pi").push(piCall("x1", "earlier", "k9"), 1), false);
+});
+
+test("Live projection: Codex and OpenCode are not supported yet", () => {
+ assert.throws(() => createLiveTurnProjector("codex"), /Claude Code and Pi sessions only/);
+ assert.throws(() => createLiveTurnProjector("opencode"), /Claude Code and Pi sessions only/);
 });
 
 const html = "<!doctype html><html><head><title>Response</title></head><body><main id='preview-root'><p>Answer</p></main></body></html>";

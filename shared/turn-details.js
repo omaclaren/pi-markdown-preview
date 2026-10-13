@@ -228,11 +228,12 @@ function codexDetails(rows, target, t) {
 	return t.result;
 }
 
-// ---- Live: recorded activity of one in-progress turn (milestone 1: Claude) ----
-// Records are pushed in file order as they become readable. Claude Code appends
-// records and never rewrites one: a uuid names one record's content for good, so
-// a repeated uuid (backfill and subscription overlap) is ignored, and a message's
-// blocks and its recorded end arrive as separate records with their own uuids.
+// ---- Live: recorded activity of one in-progress turn (Claude Code and Pi) ----
+// Records are pushed in file order as they become readable. Both agents append
+// records and never rewrite one: an id names one record's content for good, so a
+// repeated id (backfill and subscription overlap) is ignored. A Claude message's
+// blocks and its recorded end arrive as separate records with their own uuids; a
+// Pi message arrives whole, with its stop reason.
 // Membership follows each record's own links, not its position: a record joins
 // the turn of the call it answers or of its recorded parent, so a late result of
 // a finished turn never becomes another turn's activity. A prompt or task
@@ -275,7 +276,7 @@ const liveEventBytes = event => 64 + utf8Bytes(text(event.text)) + utf8Bytes(tex
 
 function claudeLiveRole(e) {
 	if (!e || typeof e !== "object" || e.isSidechain === true) return "skip";
-	if (e.type === "assistant") return e.isApiErrorMessage === true ? "error" : "activity";
+	if (e.type === "assistant") return "activity";
 	if (e.type === "system" && e.subtype === "compact_boundary") return "compaction";
 	if (e.type !== "user") return "skip";
 	if (e.isMeta === true || e.isCompactSummary === true) return "meta";
@@ -288,14 +289,65 @@ function claudeLiveRole(e) {
 	return "start";
 }
 
+// Pi: whole messages with id/parentId links. A user message starts a turn; a !
+// command (bashExecution) is context; extension messages are not shown.
+function piLiveRole(e) {
+	if (!e || typeof e !== "object") return "skip";
+	if (e.type === "compaction") return "compaction";
+	if (e.type !== "message") return "skip";
+	const role = e.message?.role;
+	if (role === "assistant" || role === "toolResult") return "activity";
+	if (role === "bashExecution") return "context";
+	if (role !== "user") return "skip";
+	return injected(textOf(e.message.content)) ? "meta" : "start";
+}
+
+// How each format names, links, projects and ends its records. The turn logic is shared.
+const LIVE_FORMATS = {
+	claude: {
+		id: e => e?.uuid,
+		parent: e => e.parentUuid ?? e.logicalParentUuid,
+		linked: e => "parentUuid" in e || "logicalParentUuid" in e,
+		role: claudeLiveRole,
+		/** [block index, call id] for each tool result in the record. */
+		results: e => e.type !== "user" ? [] : blocks(e.message?.content).flatMap((b, i) => b?.type === "tool_result" && typeof b.tool_use_id === "string" ? [[i, b.tool_use_id.slice(0, 160)]] : []),
+		project(details, e, block) {
+			const m = e.message;
+			if (!m || !["user", "assistant"].includes(m.role)) return;
+			// One block of a record split between turns gets no record-level sidecar.
+			const content = block === undefined ? m.content : [blocks(m.content)[block]];
+			claudeContent(details, content, m.role, false, block === undefined && blocks(content).filter(b => b?.type === "tool_result").length === 1 ? e.toolUseResult : undefined);
+		},
+		ending: e => e.isApiErrorMessage === true ? "error" : isClaudeFinal(e) ? "completed" : undefined,
+		finalKey: e => `claude:${e.message?.id ?? e.uuid}`,
+	},
+	pi: {
+		id: e => e?.id,
+		parent: e => e.parentId,
+		linked: e => "parentId" in e,
+		role: piLiveRole,
+		results: e => e.message?.role === "toolResult" && typeof e.message.toolCallId === "string" ? [[undefined, e.message.toolCallId.slice(0, 160)]] : [],
+		project(details, e) {
+			const m = e.message;
+			if (e.type !== "message" || !m) return;
+			if (m.role === "toolResult") details.toolResult(`Tool result: ${text(m.toolName)}${m.isError ? " (error)" : ""}`, m.content, m.toolCallId);
+			else if (m.role === "bashExecution") { details.add("tool", "User shell command", m.command); details.add("result", "Shell output", m.output); }
+			else if (["user", "assistant"].includes(m.role)) details.content(m.content, m.role);
+		},
+		ending: e => e.message?.role !== "assistant" ? undefined : ({ stop: "completed", error: "error", aborted: "interrupted", length: "incomplete" })[e.message.stopReason],
+		finalKey: e => `pi:${e.id}`,
+	},
+};
+
 /**
- * Incremental, bounded projection of the latest turns of one Claude session.
+ * Incremental, bounded projection of the latest turns of one Claude Code or Pi session.
  * `partialStart`: the records begin partway through the session (a bounded
  * backfill), so activity before the first retained prompt forms a turn whose
  * prompt is not retained. Otherwise unlinked activity never starts a turn.
  */
 export function createLiveTurnProjector(agent = "claude", { partialStart = false } = {}) {
-	if (agent !== "claude") throw new Error("Live recorded activity currently supports Claude Code sessions only.");
+	const format = LIVE_FORMATS[agent];
+	if (!format) throw new Error("Live recorded activity currently supports Claude Code and Pi sessions only.");
 	const generation = Math.random().toString(36).slice(2, 10);
 	const turns = [];
 	// Owner links: a turn's `owner` object (resolved among retained turns, so a
@@ -314,16 +366,14 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		const turn = turns.find(t => t.owner === (owner.adopted ?? owner));
 		return turn ? { turn } : { gone: true };
 	};
-	const linked = e => "parentUuid" in e || "logicalParentUuid" in e;
+	const linked = format.linked;
 	// The record's own turn (which its children join) follows its recorded parent;
 	// without a known parent, the turn of a call it answers. Result blocks are
 	// then placed by their own calls (see push).
 	const ownerOf = e => {
-		const parent = e.parentUuid ?? e.logicalParentUuid;
+		const parent = format.parent(e);
 		if (typeof parent === "string" && owners.has(parent)) return owners.get(parent);
-		if (e.type === "user") for (const b of blocks(e.message?.content)) {
-			if (b?.type === "tool_result" && typeof b.tool_use_id === "string" && calls.has(b.tool_use_id.slice(0, 160))) return calls.get(b.tool_use_id.slice(0, 160));
-		}
+		for (const [, call] of format.results(e)) if (calls.has(call)) return calls.get(call);
 	};
 	const touch = (turn, at) => { turn.sequence++; turn.updatedAt = at.time; turn.loaded = at.loaded; };
 	const newTurn = anchor => {
@@ -340,16 +390,12 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		}
 	};
 	const recordEvents = (details, e, block) => {
-		const m = e.message;
-		if (!m || !["user", "assistant"].includes(m.role)) return [];
-		// One block of a record split between turns: no record-level sidecar, a block-index id.
-		const content = block === undefined ? m.content : [blocks(m.content)[block]];
 		const before = details.result.events.length;
-		claudeContent(details, content, m.role, false, block === undefined && blocks(content).filter(b => b?.type === "tool_result").length === 1 ? e.toolUseResult : undefined);
-		// The projection's own list stays empty; turns keep the bounded window.
-		return details.result.events.splice(before).map((event, k) => ({ ...event, id: `${e.uuid}:${block ?? k}` }));
+		format.project(details, e, block);
+		// The projection's own list stays empty; turns keep the bounded window. A
+		// block of a split record keeps its block index as its id.
+		return details.result.events.splice(before).map((event, k) => ({ ...event, id: `${format.id(e)}:${block ?? k}` }));
 	};
-	const answeredCall = b => b?.type === "tool_result" && typeof b.tool_use_id === "string" ? b.tool_use_id.slice(0, 160) : undefined;
 	const pendingCall = (turn, callId) => {
 		for (let i = turn.events.length - 1; i >= 0; i--) {
 			const call = turn.events[i];
@@ -359,8 +405,8 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 	const project = (turn, e, at, block) => {
 		const produced = recordEvents(turn.details, e, block);
 		// A result record answers its call even when it has nothing to show (empty output).
-		const answered = e.type !== "user" ? [] : (block === undefined ? blocks(e.message?.content) : [blocks(e.message?.content)[block]])
-			.flatMap(b => { const call = pendingCall(turn, answeredCall(b)); return call ? [call] : []; });
+		const answered = format.results(e).filter(([index]) => block === undefined || index === block)
+			.flatMap(([, id]) => { const call = pendingCall(turn, id); return call ? [call] : []; });
 		if (!produced.length && !answered.length) return false;
 		touch(turn, at);
 		for (const call of answered) { delete call.pending; call.changed = turn.sequence; call.version = liveEventVersion(call); }
@@ -396,10 +442,10 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 	};
 	/** @returns true when the record changed what a live view shows. */
 	const push = (e, observedAt = Date.now(), loaded = false) => {
-		const id = typeof e?.uuid === "string" ? e.uuid : undefined;
+		const id = typeof format.id(e) === "string" ? format.id(e) : undefined;
 		if (!id || owners.has(id)) return false;
 		const at = { time: observedAt, loaded };
-		const role = claudeLiveRole(e);
+		const role = format.role(e);
 		const latest = turns.at(-1);
 		const running = latest?.status === "running" ? latest : undefined;
 		const owner = ownerOf(e);
@@ -438,19 +484,17 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 				target = { turn: fallback };
 			}
 		}
-		if (target?.held && (role === "activity" || role === "error")) target = { turn: open(target.held.anchor, at) };
+		if (target?.held && role === "activity") target = { turn: open(target.held.anchor, at) };
 		const turn = target?.turn;
 		remember(owners, id, target?.held ?? turn?.owner ?? (target?.gone ? owner : UNPLACED), LIVE_RECORD_LIMIT);
 		// Results in one record are placed by their own calls, so a late result
 		// never takes a current turn's result with it (or the reverse).
-		if (role === "activity" && e.type === "user") {
-			const placed = blocks(e.message?.content).map(b => {
-				const call = answeredCall(b);
-				return call && calls.has(call) ? lookup(calls.get(call))?.turn ?? null : turn;
-			});
-			if (placed.some(t => t !== turn)) {
+		const results = role === "activity" ? format.results(e) : [];
+		if (results.length) {
+			const placed = results.map(([block, call]) => [block, calls.has(call) ? lookup(calls.get(call))?.turn ?? null : turn]);
+			if (placed.some(([, t]) => t !== turn)) {
 				let changed = false;
-				placed.forEach((t, block) => { if (t) changed = project(t, e, at, block) || changed; });
+				for (const [block, t] of placed) if (t) changed = project(t, e, at, block) || changed;
 				return changed;
 			}
 		}
@@ -460,9 +504,13 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		if (role === "compaction") { if (!active) return false; turn.details.note("Context was compacted during this turn."); touch(turn, at); return true; }
 		if (role === "interrupted") { if (!active) return false; turn.status = "interrupted"; touch(turn, at); return true; }
 		const changed = project(turn, e, at);
-		if (active && role === "error") { turn.status = "error"; touch(turn, at); return true; }
-		if (active && isClaudeFinal(e)) { turn.status = "completed"; turn.finalKey = `claude:${e.message?.id ?? e.uuid}`; touch(turn, at); return true; }
-		return changed;
+		// Only an explicit recorded end changes the status: completed, error, interrupted or incomplete.
+		const ending = active ? format.ending(e) : undefined;
+		if (!ending) return changed;
+		turn.status = ending;
+		if (ending === "completed") turn.finalKey = format.finalKey(e);
+		touch(turn, at);
+		return true;
 	};
 	return {
 		generation,
