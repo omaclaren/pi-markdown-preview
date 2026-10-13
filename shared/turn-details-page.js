@@ -261,6 +261,14 @@ ${LIVE_STYLE}
 </style></head>`;
 }
 
+// Inputs open by default. Only recognised local-command history (a slash
+// command answered by local command output) starts collapsed. Shared by Working and Live.
+const localOutput = e => e?.kind === "result" && !e.callId && ["Command output", "Command error output"].includes(e.label);
+function startsOpen(event, next, fromClaude) {
+	if (event.kind !== "prompt" && event.label !== "User shell command") return false;
+	return !(slashCommand(event, fromClaude) !== null && localOutput(next));
+}
+
 /** Recorded text stays inert; only validated raster bytes become image elements. */
 export function buildTurnDetailsPage(details, responseUrl, label = "", appearanceStyle = "") {
 	const bounded = createTurnDetails();
@@ -269,20 +277,15 @@ export function buildTurnDetailsPage(details, responseUrl, label = "", appearanc
 	}
 	const { events } = bounded.result;
 	const fromClaude = details?.sourceAgent === "claude";
-	// Inputs open by default. Only recognised local-command history (a slash
-	// command answered by local command output) starts collapsed.
-	const input = e => e.kind === "prompt" || e.label === "User shell command";
-	const localOutput = e => e?.kind === "result" && !e.callId && ["Command output", "Command error output"].includes(e.label);
-	const localCommand = i => slashCommand(events[i], fromClaude) !== null && localOutput(events[i + 1]);
-	const rows = events.map((e, i) => `<details class="event ${e.kind}"${input(e) && !localCommand(i) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(claudeEnvelope(e, fromClaude)?.label ?? (e.label || e.kind))}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
+	const rows = events.map((e, i) => `<details class="event ${e.kind}"${startsOpen(e, events[i + 1], fromClaude) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(claudeEnvelope(e, fromClaude)?.label ?? (e.label || e.kind))}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
 	return `${pageHead("Working", appearanceStyle)}<body class="pi-preview-working"><main id="preview-root">${responseUrl ? `<nav><a href="${escape(responseUrl)}">← Preview</a></nav>` : ""}<h1>Working</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Prompt and activity for this response.</p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p>${rows ? '<button type="button" class="working-bulk" hidden>Expand all</button>' : ""}</div>${rows || "<p>No matching prompt or working details are available.</p>"}</main></body></html>`;
 }
 
 
 // ---- Live: recorded activity of one in-progress turn ----
-/** One live card, from the same escaping renderer as Working. Inputs start open. */
-export function renderLiveCard(event, number, fromClaude = true) {
-	const open = event.kind === "prompt" || event.label === "User shell command";
+/** One live card, from the same escaping renderer as Working; `next` is the card after it, as in Working. */
+export function renderLiveCard(event, number, fromClaude = true, next) {
+	const open = startsOpen(event, next, fromClaude);
 	const label = claudeEnvelope(event, fromClaude)?.label ?? (event.label || event.kind);
 	// Only the record's absence is stated; nothing is inferred about the call.
 	const pending = event.kind === "tool" && event.pending === true ? ' <span class="live-pending">· No result recorded yet</span>' : "";
@@ -305,7 +308,7 @@ export function liveStatusHtml({ status, completedHref, workingHref, newerHref }
 export const liveTimeLabel = loaded => loaded ? "Loaded" : "Updated";
 
 export function buildLivePage(snapshot, { label = "", appearanceStyle = "", statusHtml = "" } = {}) {
-	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, true)).join("\n");
+	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, true, snapshot.events[i + 1])).join("\n");
 	const omitted = snapshot.omitted;
 	return `${pageHead("Working · live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Working · live</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}<span data-live-time-label>${liveTimeLabel(snapshot.loaded)}</span> <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="notices live-state" data-live-status role="status">${statusHtml}</p><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;
 }

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLiveTurnProjector, LIVE_EVENT_WINDOW, LIVE_TURN_BYTES } from "../shared/turn-details.js";
-import { renderLiveCard } from "../shared/turn-details-page.js";
+import { buildLivePage, renderLiveCard } from "../shared/turn-details-page.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const txt = text => ({ type: "text", text });
@@ -226,6 +226,9 @@ test("Live projection: a lone slash command or ! command is context, never a run
  live.push(linkedUser("real", "bang-out", "Actual prompt"), 5);
  assert.equal(live.current(), "real", "the real prompt keeps its own anchor");
  assert.deepEqual(live.snapshot("real").events.map(e => e.id), ["theme:0", "theme-out:0", "bang:0", "bang-out:0", "real:0"]);
+ // As in Working, a slash command answered by local output starts collapsed; the prompt starts open.
+ const opened = id => new RegExp(`data-event-id="${id}" data-event-version="[^"]+" open>`).test(buildLivePage(live.snapshot("real")));
+ assert.deepEqual(["theme:0", "theme-out:0", "real:0"].map(opened), [false, false, true]);
  // A command that expands into a prompt starts its turn when the model answers it.
  live.push(linkedFinal("rf", "real", "Answered"), 6);
  live.push(linkedUser("review", "rf", "<command-message>review</command-message>\n<command-name>/review</command-name>"), 7);
