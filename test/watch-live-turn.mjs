@@ -544,12 +544,14 @@ test("Live projection (Codex): older rollouts without ordinals, and a backfill t
  assert.ok(snapshot.events.every(e => /^c[0-9a-z]+-[0-9a-z]+-[0-9a-z]+:0$/.test(e.id)));
  assert.deepEqual(snapshot.events.map(e => e.pending), [undefined, true, undefined]);
  assert.match(snapshot.notices.join(" "), /compacted during this turn/);
- // Records before the first retained task start form a turn without its prompt; its end still applies.
+ // Records before the first retained task start form a turn without its prompt. It ends
+ // with the task its own records name (Codex records a task's last usage before its end).
  ordinal = 50;
  const partial = createLiveTurnProjector("codex", { partialStart: true });
  const first = cxCall("k9");
  partial.push(first, 1);
  assert.equal(partial.current(), `o${first.ordinal}`);
+ partial.push(cx("token_usage_record", { turn_id: "T0", usage: {} }), 2);
  partial.push(cxDone("T0", "Answer"), 2);
  snapshot = partial.snapshot(`o${first.ordinal}`);
  assert.deepEqual([snapshot.status, snapshot.finalKey], ["completed", "codex:T0"]);
@@ -596,6 +598,41 @@ test("Live projection (Codex): an end is placed only by the task it names, never
  partial.push(cxStart("Z"), 6);
  partial.push(cxDone("W", "Unknown"), 7);
  assert.equal(partial.snapshot("turn-Z").status, "running");
+});
+
+test("Live projection (Codex): a partial backfill keeps the task its own records name; an end never names it", () => {
+ // The task's own records may come before the first shown record.
+ for (const hint of [turn => cx("turn_context", { turn_id: turn, cwd: "/x" }), turn => cx("token_usage_record", { turn_id: turn, usage: {} })]) {
+  ordinal = 0;
+  const live = createLiveTurnProjector("codex", { partialStart: true });
+  live.push(hint("X"), 1);
+  assert.equal(live.current(), undefined, "metadata alone shows nothing");
+  const prompt = cxMessage("user", "X's prompt");
+  live.push(prompt, 2);
+  live.push(cxDone("Y", "Y's answer"), 3);
+  let snapshot = live.snapshot(`o${prompt.ordinal}`);
+  assert.deepEqual([snapshot.status, snapshot.finalKey], ["running", undefined], "another task's end changes nothing");
+  live.push(hint("Y"), 4);
+  live.push(cxDone("X", "X's answer"), 5);
+  snapshot = live.snapshot(`o${prompt.ordinal}`);
+  assert.deepEqual([snapshot.status, snapshot.finalKey], ["completed", "codex:X"], "the first name holds");
+ }
+ // Without a name of its own, a partial turn takes none from an end, which may be an earlier task's.
+ ordinal = 0;
+ const anonymous = createLiveTurnProjector("codex", { partialStart: true });
+ const prompt = cxMessage("user", "Unnamed");
+ anonymous.push(prompt, 1);
+ anonymous.push(cxDone("Y", "Y's answer"), 2);
+ anonymous.push(cxEvent({ type: "turn_aborted", turn_id: "Y", reason: "interrupted" }), 2);
+ assert.deepEqual([anonymous.snapshot(`o${prompt.ordinal}`).status, anonymous.snapshot(`o${prompt.ordinal}`).finalKey], ["running", undefined]);
+ // A name seen before the first shown record is used only while no task start is retained.
+ ordinal = 0;
+ const started = createLiveTurnProjector("codex", { partialStart: true });
+ started.push(cx("turn_context", { turn_id: "W" }), 1);
+ started.push(cxStart("Z"), 2);
+ started.push(cxMessage("user", "Z's prompt"), 2);
+ started.push(cxDone("W", "W's answer"), 3);
+ assert.equal(started.snapshot("turn-Z").status, "running");
 });
 
 test("Live rendering: Claude-only presentation applies to Claude snapshots only, on the page and in updates", async t => {

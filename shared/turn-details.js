@@ -432,7 +432,8 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 	// turn that context joins. UNPLACED records stay unknown to their children.
 	const owners = new Map(), calls = new Map();
 	const UNPLACED = Object.freeze({});
-	let held, fallback, started = false;
+	// partialTask: the task named before a partial backfill's first shown record.
+	let held, fallback, partialTask, started = false;
 	const remember = (map, key, owner, limit) => {
 		map.delete(key); map.set(key, owner);
 		if (map.size > limit) map.delete(map.keys().next().value);
@@ -519,11 +520,15 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 	};
 	// A record naming a task joins that task's retained turn, or none: never the
 	// running turn by file order. A turn without its recorded start (a partial
-	// backfill) takes the first task named in it.
-	const named = task => {
+	// backfill) takes the first task its own records name, including one named
+	// before its first shown record. An end never names it: an end is the last
+	// record of its task, so it could belong to an earlier one.
+	const named = (task, e) => {
 		const turn = turns.find(t => t.task === task);
 		if (turn) return { turn };
-		if (fallback && fallback === turns.at(-1) && fallback.task === undefined) { fallback.task = task; return { turn: fallback }; }
+		if (!partialStart || started || format.ending(e)) return undefined;
+		if (!fallback || !turns.includes(fallback)) { partialTask ??= task; return undefined; }
+		if (fallback.task === undefined) { fallback.task = task; return { turn: fallback }; }
 	};
 	/** @returns true when the record changed what a live view shows. */
 	const push = (e, observedAt = Date.now(), loaded = false) => {
@@ -536,7 +541,7 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		const latest = turns.at(-1);
 		const running = latest?.status === "running" ? latest : undefined;
 		const owner = task === undefined ? ownerOf(e) : undefined;
-		let target = task === undefined ? lookup(owner) : role === "start" ? undefined : named(task);
+		let target = task === undefined ? lookup(owner) : role === "start" ? undefined : named(task, e);
 		// Records without recorded links (other formats, fixtures) fall back to file order.
 		const sameTurn = running && (target?.turn === running || (!target && !linked(e)));
 		if (role === "start") {
@@ -565,7 +570,7 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 			} else if (held && !linked(e)) target = { held: held.links[0] };
 			else if (partialStart && !started && role !== "skip" && role !== "meta") {
 				if (!fallback || !turns.includes(fallback)) {
-					fallback = newTurn(id);
+					fallback = newTurn(id, partialTask);
 					fallback.details.note("This turn's prompt is not in the retained recorded activity.");
 				}
 				target = { turn: fallback };

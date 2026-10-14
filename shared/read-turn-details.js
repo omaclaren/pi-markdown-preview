@@ -12,7 +12,10 @@ export async function readTurnDetails(path, agent, target, signal) {
 	return turnDetailsFromRecords(agent, records, target, incomplete);
 }
 
-/** Complete JSONL records from a bounded snapshot of a file's tail, oldest first. Also used to start a live view. */
+/**
+ * Complete JSONL records from a bounded snapshot of a file's tail, oldest first. Also used to start a live view.
+ * `end`: the byte offset just past the last complete line read; a line starting before it is not newer than the snapshot.
+ */
 export async function readRecordTail(path, signal) {
 	signal?.throwIfAborted();
 	const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -31,11 +34,13 @@ export async function readRecordTail(path, signal) {
 		signal?.throwIfAborted();
 		// `startsMidway`: earlier records exist that were not read (bounded read).
 		let buffer = data.subarray(0, offset), incomplete = start > 0, startsMidway = start > 0;
-		if (start) buffer = buffer.subarray(buffer.indexOf(10) + 1 || buffer.length);
+		const skipped = start ? buffer.indexOf(10) + 1 || buffer.length : 0;
+		buffer = buffer.subarray(skipped);
 		const records = [];
 		// Work backwards so both storage and parse attempts are bounded, even
 		// for a damaged file containing millions of tiny invalid lines.
 		let end = buffer.lastIndexOf(10), count = 0;
+		const complete = start + skipped + end + 1;
 		if (end < buffer.length - 1) incomplete = true; // Ignore a still-in-flight last line.
 		for (let i = end - 1; i >= -1; i--) {
 			if (i >= 0 && buffer[i] !== 10) continue;
@@ -46,6 +51,6 @@ export async function readRecordTail(path, signal) {
 			try { records.push(JSON.parse(line.toString("utf8"))); } catch { incomplete = true; }
 		}
 		signal?.throwIfAborted();
-		return { records: records.reverse(), incomplete, startsMidway };
+		return { records: records.reverse(), incomplete, startsMidway, end: complete };
 	} finally { await file.close(); }
 }
