@@ -1211,3 +1211,23 @@ test("Live browser view: a remembered Expand all opens the live cards, including
   assert.equal(await page.$eval(".working-bulk", e => e.textContent), "Collapse all");
  } finally { await browser.close(); }
 });
+
+test("Live status: source notices, an answer too large for Preview, and an output-limit stop with its partial response", async t => {
+ assert.equal(liveStatusHtml({ status: "completed", unavailable: true, previewHref: "/?revision=2" }), 'Turn completed, but its answer is too large to show in Preview. <a href="/?revision=2">Back to Preview</a>');
+ assert.equal(liveStatusHtml({ status: "incomplete", completedHref: "/?revision=3" }), "The response stopped at the model's output limit. <a href=\"/?revision=3\">Open the partial response</a>");
+ assert.equal(liveStatusHtml({ status: "running", notices: ["Over <limit>", "", 7] }), '<span class="live-notice">Over &lt;limit&gt;</span>', "notices are escaped text; empty and non-text entries are skipped");
+ const dir = await temp(t);
+ let snapshot = { generation: "g", anchor: "a1", sourceAgent: "opencode", status: "running", sequence: 1, updatedAt: 1000, loaded: true, omitted: 0,
+  notices: ["Display limits reached; some recorded events are omitted."], events: [{ id: "a1.0", kind: "prompt", label: "Prompt / input", text: "Go", changed: 1, version: "v1" }] };
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => "a1", snapshot: async anchor => anchor === "a1" ? snapshot : undefined }, initialTurnDetails: async () => ({ events: [] }) });
+ t.after(() => server.close());
+ const session = await auth(server);
+ const get = path => fetch(new URL(path, session.origin), { redirect: "manual", headers: { cookie: session.cookie } });
+ const pageUrl = (await get(liveEntry(session.text))).headers.get("location");
+ const page = await (await get(pageUrl)).text();
+ assert.match(page, /<span class="live-notice">Display limits reached; some recorded events are omitted\.<\/span>/, "the source's notices reach the page");
+ snapshot = { ...snapshot, status: "completed", answerUnavailable: true, sequence: 2, notices: [] };
+ const updates = await (await get(`${pageUrl.replace("?", "/updates?")}&cursor=g:1`)).json();
+ assert.match(updates.statusHtml, /^Turn completed, but its answer is too large to show in Preview\. <a href="\/\?revision=1&amp;identity=/);
+ assert.ok(updates.previewHref, "Follow activity can return to the latest Preview");
+});

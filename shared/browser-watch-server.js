@@ -1225,6 +1225,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				const latest = documents.at(-1);
 				return {
 					status: snapshot.status,
+					unavailable: snapshot.answerUnavailable === true,
+					notices: Array.isArray(snapshot.notices) ? snapshot.notices : [],
 					completedHref: document ? `/?revision=${document.revision}&${query}` : undefined,
 					workingHref: document?.turnDetails ? `${TURN_PREFIX}${document.revision}?${query}` : undefined,
 					// Completed without a final answer: no response will follow, so return to the latest one.

@@ -84,7 +84,7 @@ Working shows recorded prompts and tool output to anyone with the tab's link. Fo
 
 Working shows a response's recorded prompts, progress, any exposed reasoning, and its tool calls and results. Prompts start expanded and activity starts folded. Commands, file reads and edits have readable views, with the recorded JSON available, and recorded images can be enlarged. **Ctrl+Alt+P** and **Ctrl+Alt+W** (Control+Option on macOS) switch between Preview and Working.
 
-With `--live` and **Follow activity** on, the page moves to Working when a turn starts and back to Preview when it ends. If you have scrolled up or moved to another page, it leaves you there. Updates arrive as Pi records each message, not token by token, so a tool call shows "No result recorded yet" until its result is recorded. Pi Studio has a fuller live view.
+With `--live` and **Follow activity** on, the page moves to Working when a turn starts and back to Preview when it ends. If you have scrolled up or moved to another page, it leaves you there. Updates arrive as Pi records each message, not token by token, so a tool call shows "No result recorded yet" until its result is recorded. Anything Live leaves out, such as cards beyond its display limits, is listed in its status line. Pi Studio has a fuller live view.
 
 **Privacy:** prompts, tool output and recorded images can contain secrets, and nothing is redacted. Share these links only with people you trust. Working stays on until you stop the watcher. To start it with a fresh link, first stop any response watcher already running (`/preview-browser --stop --responses`).
 

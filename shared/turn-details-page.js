@@ -222,7 +222,7 @@ function eventContent(event, fromClaude = false) {
 }
 
 const LIVE_STYLE = `.live-omitted { color:var(--muted); font-size:12px; margin:0 0 12px } .live-status a,[data-live-status] a { color:inherit; text-underline-offset:3px }
-.live-state { margin:0 0 18px } .live-state:empty { display:none } .live-pending { color:var(--muted); font-size:12px; font-weight:400 }
+.live-state { margin:0 0 18px } .live-state:empty { display:none } .live-pending { color:var(--muted); font-size:12px; font-weight:400 } .live-notice { color:var(--muted); display:block; margin-top:4px }
 .live-newer { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50; min-height:32px; padding:6px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; box-shadow:0 2px 8px #0002; cursor:pointer } .live-newer[hidden] { display:none } .live-newer:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 @media(pointer:coarse) { .live-newer { min-height:44px } } @media print { .live-newer { display:none } }`;
 
@@ -294,17 +294,22 @@ export function renderLiveCard(event, number, fromClaude = false, next) {
 }
 
 /** Status line: only what the record says. Links are server-built, same-origin. */
-export function liveStatusHtml({ status, completedHref, workingHref, previewHref, newerHref } = {}) {
+export function liveStatusHtml({ status, completedHref, workingHref, previewHref, newerHref, unavailable = false, notices = [] } = {}) {
 	const parts = [];
+	const back = previewHref ? ` <a href="${escape(previewHref)}">Back to Preview</a>` : "";
 	if (status === "completed") parts.push(completedHref
 		? `Turn completed. <a href="${escape(completedHref)}">Open its response</a>${workingHref ? ` · <a href="${escape(workingHref)}">Working</a>` : ""}`
+		// The answer was recorded but exceeds what Preview keeps: say so rather than wait for it.
+		: unavailable ? `Turn completed, but its answer is too large to show in Preview.${back}`
 		// A turn that recorded no final answer (a Codex compaction task) has no response to wait for.
-		: previewHref ? `Turn completed without a final answer. <a href="${escape(previewHref)}">Back to Preview</a>`
+		: previewHref ? `Turn completed without a final answer.${back}`
 		: "Turn completed; its response will appear in Preview shortly.");
 	else if (status === "interrupted") parts.push("Turn interrupted.");
 	else if (status === "error") parts.push("Turn ended with an error.");
-	else if (status === "incomplete") parts.push("The response stopped at the model's output limit.");
+	else if (status === "incomplete") parts.push(`The response stopped at the model's output limit.${completedHref ? ` <a href="${escape(completedHref)}">Open the partial response</a>` : ""}`);
 	if (newerHref) parts.push(`A newer turn has started. <a href="${escape(newerHref)}">Follow it</a>`);
+	// What the source knows it left out or could not interpret (limits, a staged revert).
+	for (const notice of Array.isArray(notices) ? notices.slice(0, 8) : []) if (typeof notice === "string" && notice) parts.push(`<span class="live-notice">${escape(notice.slice(0, 300))}</span>`);
 	return parts.join(" ");
 }
 
