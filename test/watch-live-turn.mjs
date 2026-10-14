@@ -1231,3 +1231,47 @@ test("Live status: source notices, an answer too large for Preview, and an outpu
  assert.match(updates.statusHtml, /^Turn completed, but its answer is too large to show in Preview\. <a href="\/\?revision=1&amp;identity=/);
  assert.ok(updates.previewHref, "Follow activity can return to the latest Preview");
 });
+
+test("Live status: an earlier turn whose response this preview no longer keeps says so instead of waiting", async t => {
+ assert.equal(liveStatusHtml({ status: "completed", expired: true, previewHref: "/?revision=4" }), 'Turn completed; this preview no longer keeps its response. <a href="/?revision=4">Back to Preview</a>');
+ const dir = await temp(t);
+ const turn = (anchor, extra = {}) => ({ generation: "g", anchor, sourceAgent: "opencode", status: "completed", finalKey: `opencode:${anchor}-answer`, sequence: 1, updatedAt: 1000, loaded: true, omitted: 0, notices: [], events: [], ...extra });
+ const snapshots = { old: turn("old", { newerAnchor: "new" }), new: turn("new") };
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => "new", snapshot: async anchor => snapshots[anchor] }, initialTurnDetails: async () => ({ events: [] }), initialResponseKey: "opencode:other" });
+ t.after(() => server.close());
+ const session = await auth(server);
+ const get = path => fetch(new URL(path, session.origin), { redirect: "manual", headers: { cookie: session.cookie } });
+ const entry = liveEntry(session.text);
+ const page = anchor => get(entry.replace("/?", `/${anchor}?`)).then(r => r.text());
+ assert.match(await page("old"), /Turn completed; this preview no longer keeps its response\. <a href="\/\?revision=1&amp;identity=/, "a newer turn followed: the answer will not arrive now");
+ assert.match(await page("new"), /Turn completed; its response will appear in Preview shortly\./, "the latest turn's answer can still be rendering");
+});
+
+test("Live browser: card numbers follow the moving window", { timeout: 60_000 }, async t => {
+ if (!process.env.PUPPETEER_EXECUTABLE_PATH) { t.skip("Set PUPPETEER_EXECUTABLE_PATH to a dedicated headless browser"); return; }
+ const { default: puppeteer } = await import("puppeteer-core");
+ const dir = await temp(t);
+ const event = (n, changed = 1) => ({ id: `e${n}`, kind: "progress", label: "Assistant progress", text: `step ${n}`, changed, version: `v${n}` });
+ let snapshot = { generation: "g", anchor: "a1", sourceAgent: "opencode", status: "running", sequence: 1, updatedAt: 1000, loaded: true, omitted: 0, notices: [], events: [1, 2, 3].map(n => event(n)) };
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => "a1", snapshot: async anchor => anchor === "a1" ? snapshot : undefined }, initialTurnDetails: async () => ({ events: [] }) });
+ t.after(() => server.close());
+ const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+ try {
+  const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
+  await page.goto(server.url);
+  await page.goto(new URL(liveEntry(await page.content()), server.url).href);
+  const numbers = () => page.$$eval(".live-events > details > summary > .number", spans => spans.map(span => span.textContent).join(","));
+  assert.equal(await numbers(), "1,2,3");
+  // The window moves on by one while the count of earlier cards stays 0 (a source that
+  // stops reading old rows cannot count their cards): e1 leaves, e4 arrives, e2 and e3
+  // are unchanged. Numbers must match a fresh rendering of this window, with no repeats.
+  snapshot = { ...snapshot, sequence: 2, events: [event(2), event(3), event(4, 2)] };
+  await page.waitForFunction(() => document.querySelector('[data-event-id="e4"]') && !document.querySelector('[data-event-id="e1"]'), { timeout: 15_000 });
+  assert.equal(await numbers(), "1,2,3", "retained cards are renumbered, not only the new one");
+  // And with a counted omission: the numbers start after it.
+  snapshot = { ...snapshot, sequence: 3, omitted: 2, events: [event(3), event(4, 2), event(5, 3)] };
+  await page.waitForFunction(() => document.querySelector('[data-event-id="e5"]'), { timeout: 15_000 });
+  assert.equal(await numbers(), "3,4,5");
+  assert.equal(await page.$eval(".live-omitted", element => element.textContent), "2 earlier events not shown.");
+ } finally { await browser.close(); }
+});

@@ -1223,14 +1223,19 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const linksFor = snapshot => {
 				const document = snapshot.finalKey ? documents.find(d => d.responseKey === snapshot.finalKey) : undefined;
 				const latest = documents.at(-1);
+				// A turn's answer is rendered when it completes, before any later turn starts.
+				// With a newer turn recorded and no document for it, it is no longer kept and
+				// will not appear; only the latest turn's answer can still be on its way.
+				const expired = Boolean(snapshot.finalKey && !document && snapshot.newerAnchor);
 				return {
 					status: snapshot.status,
 					unavailable: snapshot.answerUnavailable === true,
+					expired,
 					notices: Array.isArray(snapshot.notices) ? snapshot.notices : [],
 					completedHref: document ? `/?revision=${document.revision}&${query}` : undefined,
 					workingHref: document?.turnDetails ? `${TURN_PREFIX}${document.revision}?${query}` : undefined,
 					// Completed without a final answer: no response will follow, so return to the latest one.
-					previewHref: snapshot.status === "completed" && !snapshot.finalKey && latest ? `/?revision=${latest.revision}&${query}` : undefined,
+					previewHref: snapshot.status === "completed" && (!snapshot.finalKey || expired) && latest ? `/?revision=${latest.revision}&${query}` : undefined,
 					newerHref: snapshot.newerAnchor ? `${LIVE_PREFIX}${encodeURIComponent(snapshot.newerAnchor)}?${query}` : undefined,
 					newerAnchor: snapshot.newerAnchor,
 				};

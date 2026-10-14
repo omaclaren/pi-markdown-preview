@@ -52,6 +52,17 @@
     globalObject.PiMarkdownPreviewWorkingImages?.install(card);
    };
    const changed = () => root.dispatchEvent(new CustomEvent('pi-markdown-preview-cards-changed'));
+   // A card's number is its position in the turn. As the window moves (or content
+   // waiting for a held card is applied), renumber the cards the window shows.
+   let windowStart = Number(omittedLine?.getAttribute('data-live-omitted')) || 0, windowIds = ids();
+   const renumber = () => {
+    const position = new Map(windowIds.map((id, i) => [id, String(windowStart + i + 1)]));
+    for (const card of list.children) {
+     const number = position.get(card.getAttribute('data-event-id'));
+     const span = card.querySelector(':scope > summary > .number');
+     if (number !== undefined && span && span.textContent !== number) span.textContent = number;
+    }
+   };
    // The reader let go: drop cards that left the window, apply waiting content.
    const settle = () => {
     if (!lingering.size && !deferred.size) return;
@@ -61,7 +72,7 @@
      if (!card.isConnected) { deferred.delete(card); continue; }
      if (!held(card)) { replaceContent(card, next.fresh, next.version); deferred.delete(card); any = true; }
     }
-    if (any) changed();
+    if (any) { renumber(); changed(); }
    };
    document.addEventListener('selectionchange', settle);
    document.addEventListener('focusout', () => setTimeout(settle, 0));
@@ -94,6 +105,9 @@
      if (card !== expected) { if (previous) previous.after(card); else if (expected) expected.before(card); else list.append(card); }
      previous = card;
     }
+    windowStart = Number(data.omitted) || 0;
+    windowIds = data.ids;
+    renumber();
     for (const card of added) globalObject.PiMarkdownPreviewWorkingImages?.install(card);
     if (omittedLine) {
      const omitted = Number(data.omitted) || 0;
