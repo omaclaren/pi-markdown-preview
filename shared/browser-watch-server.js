@@ -986,12 +986,21 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	const pendingDocuments = new Map();
 	const retainedDocuments = () => [...documents, ...linkedDocuments.values()];
 	let historyBytes = documents[0].byteSize;
+	// Response keys whose rendered documents history has dropped (bounded): Live can say
+	// those answers are no longer kept, rather than infer it.
+	const retiredKeys = new Set();
+	const retire = document => {
+		if (!document?.responseKey) return;
+		retiredKeys.delete(document.responseKey);
+		retiredKeys.add(document.responseKey);
+		while (retiredKeys.size > 256) retiredKeys.delete(retiredKeys.values().next().value);
+	};
 	const pruneHistory = () => {
-		while (documents.length > historyLimit) documents.shift();
+		while (documents.length > historyLimit) retire(documents.shift());
 		historyBytes = documents.reduce((total, document) => total + document.byteSize, 0);
 		while (documents.length > 1 && historyBytes > historyByteLimit) {
 			historyBytes -= documents[0].byteSize;
-			documents.shift();
+			retire(documents.shift());
 		}
 		for (const [document, pending] of pendingTurns) if (!documents.includes(document)) pending.controller.abort();
 	};
@@ -1223,19 +1232,22 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const linksFor = snapshot => {
 				const document = snapshot.finalKey ? documents.find(d => d.responseKey === snapshot.finalKey) : undefined;
 				const latest = documents.at(-1);
-				// A turn's answer is rendered when it completes, before any later turn starts.
-				// With a newer turn recorded and no document for it, it is no longer kept and
-				// will not appear; only the latest turn's answer can still be on its way.
-				const expired = Boolean(snapshot.finalKey && !document && snapshot.newerAnchor);
+				// Expired only if this preview rendered the answer and history has since dropped
+				// it. A newer turn alone proves nothing: the render can still be running, or the
+				// answer can predate this preview. Then say only that it is not here now.
+				const missing = Boolean(snapshot.finalKey && !document);
+				const expired = missing && retiredKeys.has(snapshot.finalKey);
+				const absent = missing && !expired && Boolean(snapshot.newerAnchor);
 				return {
 					status: snapshot.status,
 					unavailable: snapshot.answerUnavailable === true,
 					expired,
+					absent,
 					notices: Array.isArray(snapshot.notices) ? snapshot.notices : [],
 					completedHref: document ? `/?revision=${document.revision}&${query}` : undefined,
 					workingHref: document?.turnDetails ? `${TURN_PREFIX}${document.revision}?${query}` : undefined,
 					// Completed without a final answer: no response will follow, so return to the latest one.
-					previewHref: snapshot.status === "completed" && (!snapshot.finalKey || expired) && latest ? `/?revision=${latest.revision}&${query}` : undefined,
+					previewHref: snapshot.status === "completed" && (!snapshot.finalKey || expired || absent) && latest ? `/?revision=${latest.revision}&${query}` : undefined,
 					newerHref: snapshot.newerAnchor ? `${LIVE_PREFIX}${encodeURIComponent(snapshot.newerAnchor)}?${query}` : undefined,
 					newerAnchor: snapshot.newerAnchor,
 				};

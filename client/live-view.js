@@ -54,25 +54,30 @@
    const changed = () => root.dispatchEvent(new CustomEvent('pi-markdown-preview-cards-changed'));
    // A card's number is its position in the turn. As the window moves (or content
    // waiting for a held card is applied), renumber the cards the window shows.
+   // A card the reader is holding keeps its number until they let go (see settle).
    let windowStart = Number(omittedLine?.getAttribute('data-live-omitted')) || 0, windowIds = ids();
+   const heldNumbers = new Set();
    const renumber = () => {
     const position = new Map(windowIds.map((id, i) => [id, String(windowStart + i + 1)]));
+    heldNumbers.clear();
     for (const card of list.children) {
      const number = position.get(card.getAttribute('data-event-id'));
      const span = card.querySelector(':scope > summary > .number');
-     if (number !== undefined && span && span.textContent !== number) span.textContent = number;
+     if (number === undefined || !span || span.textContent === number) continue;
+     if (held(card)) heldNumbers.add(card); else span.textContent = number;
     }
    };
    // The reader let go: drop cards that left the window, apply waiting content.
    const settle = () => {
-    if (!lingering.size && !deferred.size) return;
+    if (!lingering.size && !deferred.size && !heldNumbers.size) return;
     let any = false;
     for (const card of lingering) if (!card.isConnected || !held(card)) { card.remove(); lingering.delete(card); any = true; }
     for (const [card, next] of deferred) {
      if (!card.isConnected) { deferred.delete(card); continue; }
      if (!held(card)) { replaceContent(card, next.fresh, next.version); deferred.delete(card); any = true; }
     }
-    if (any) { renumber(); changed(); }
+    if (any || heldNumbers.size) renumber();
+    if (any) changed();
    };
    document.addEventListener('selectionchange', settle);
    document.addEventListener('focusout', () => setTimeout(settle, 0));

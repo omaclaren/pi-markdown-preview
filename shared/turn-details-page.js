@@ -294,15 +294,18 @@ export function renderLiveCard(event, number, fromClaude = false, next) {
 }
 
 /** Status line: only what the record says. Links are server-built, same-origin. */
-export function liveStatusHtml({ status, completedHref, workingHref, previewHref, newerHref, unavailable = false, expired = false, notices = [] } = {}) {
+export function liveStatusHtml({ status, completedHref, workingHref, previewHref, newerHref, unavailable = false, expired = false, absent = false, notices = [] } = {}) {
 	const parts = [];
 	const back = previewHref ? ` <a href="${escape(previewHref)}">Back to Preview</a>` : "";
 	if (status === "completed") parts.push(completedHref
 		? `Turn completed. <a href="${escape(completedHref)}">Open its response</a>${workingHref ? ` · <a href="${escape(workingHref)}">Working</a>` : ""}`
 		// The answer was recorded but exceeds what Preview keeps: say so rather than wait for it.
 		: unavailable ? `Turn completed, but its answer is too large to show in Preview.${back}`
-		// A later turn followed, so this answer was rendered (or skipped) already: it will not arrive now.
+		// This preview rendered the answer and its history has since dropped it.
 		: expired ? `Turn completed; this preview no longer keeps its response.${back}`
+		// A later turn has started and the answer is not here: it may still be rendering, or
+		// predate this preview. Its link appears if it arrives.
+		: absent ? `Turn completed; its response isn't in this preview at the moment.${back}`
 		// A turn that recorded no final answer (a Codex compaction task) has no response to wait for.
 		: previewHref ? `Turn completed without a final answer.${back}`
 		: "Turn completed; its response will appear in Preview shortly.");
