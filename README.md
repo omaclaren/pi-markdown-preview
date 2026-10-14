@@ -1,10 +1,10 @@
 # pi-markdown-preview
 
-Preview assistant responses and local Markdown, LaTeX, code, diff, and other text-based files from [pi](https://pi.dev) in the terminal, browser, or as PDF, with math rendering, syntax highlighting, Mermaid, and theme-aware styling.
+Preview assistant responses and local Markdown, LaTeX, code and diff files from [pi](https://pi.dev) in the terminal, in the browser or as PDF, with math, syntax highlighting, Mermaid diagrams and colours from your Pi theme. A browser preview can also follow each turn live, showing prompts, tool calls and results as Pi records them.
 
 ## Screenshots
 
-Preview adapts to your pi theme. Examples with a custom theme and the built-in defaults:
+Previews follow your Pi theme. Examples with a custom theme and the built-in defaults:
 
 **Terminal preview (custom theme):**
 
@@ -24,35 +24,95 @@ Preview adapts to your pi theme. Examples with a custom theme and the built-in d
 |:--:|:--:|
 | ![Dark browser preview](screenshots/dark-browser.png) | ![Light browser preview](screenshots/light-browser.png) |
 
-## Features
+## Install
 
-- **Terminal preview (default)** — renders markdown as PNG images displayed inline (Kitty, iTerm2, Ghostty, WezTerm). Long responses are split across navigable pages at block boundaries when possible, with a fixed-height fallback for oversized content.
-- **Browser preview** — opens rendered HTML in your default browser as a single continuous scrollable document, with optional completion-level auto-refresh and response navigation via `--watch` (`-w`)
-- **[Working (optional)](#working-optional)** — a read-only view of recorded prompts, tool calls/results and images for a completed response. Enable with `/preview-browser --watch --working`.
-- **Local document links in watch mode** — ordinary browser navigation for rendered text snapshots, image viewing, native PDFs, and isolated HTML pages
-- **PDF export** — exports markdown to PDF via pandoc + LaTeX and opens it in your default PDF viewer
-- **LLM-callable artifact export** — lets pi render the latest response, supplied Markdown/LaTeX, or a local file to PDF, HTML, or PNG files for remote/headless workflows such as Telegram delivery
-- **Mermaid diagrams** — renders ` ```mermaid` code blocks as SVG diagrams in terminal/browser previews, and as high-quality vector diagrams in PDF export when Mermaid CLI is available
-- **LaTeX/math support** — renders `$inline$`, `$$display$$`, `\(...\)`, and `\[...\]` math via MathML with selective MathJax fallback for pandoc-unsupported browser/terminal equations, or native LaTeX (PDF)
-- **Syntax highlighting** — fenced code blocks in markdown and standalone code files are rendered with theme-aware syntax colouring via pandoc. Supports 50+ languages including TypeScript, Python, Rust, Go, C/C++, Julia, and more.
-- **Code wrapping controls** — preserve fixed-width layout by default; toggle wrapping for the whole terminal preview with `w`, or use global and per-block buttons in the browser. No special Markdown annotations are needed.
-- **Annotation marker highlighting** — inline `[an: ...]` markers are highlighted in terminal/browser/PDF previews as note-only chips (`...`, without the `[an: ]` wrapper) outside code blocks; long notes wrap correctly in PDF instead of running off the page
-- **Theme-aware** — matches your pi theme (dark/light inference, export page/card colours, Markdown colours, accent colours, syntax colours)
-- **Response picker** — select any past assistant response to preview, not just the latest
-- **File preview** — preview arbitrary Markdown files (including `.md`, `.mdx`, `.rmd`, and lightweight `.qmd` documents), LaTeX `.tex` files, diff/patch files, or code files (`.py`, `.ts`, `.js`, `.rs`, etc.) from the filesystem. Markdown HTML comments are omitted outside code, local image/PDF figures and basic Quarto/pandoc-crossref figure references are supported, and no Quarto computation is executed. LaTeX files are rendered as documents with full math and sectioning; diff files are rendered with coloured add/remove lines; code files are rendered with syntax highlighting. Use Quarto itself when full Quarto project, filter, subfigure, chapter-aware numbering, or execution semantics are required.
-- **Caching** — rendered pages are cached for instant re-display; refresh (`r`) bypasses cache
+```bash
+pi install npm:pi-markdown-preview
+```
 
-## Prerequisites
+Or install from GitHub with `pi install https://github.com/omaclaren/pi-markdown-preview`, or try it without installing with `pi -e https://github.com/omaclaren/pi-markdown-preview`.
 
-- [Pandoc](https://pandoc.org/installing.html) (`brew install pandoc` on macOS)
-- For terminal preview (`/preview` default): a Chromium-based browser executable (Chrome, Brave, Edge, Chromium). `puppeteer-core` is included as an extension dependency; no separate Puppeteer install is needed.
-- For terminal inline display: a terminal with image support (Ghostty, Kitty, iTerm2, WezTerm)
-- For PDF export (optional): a LaTeX engine, e.g. [TeX Live](https://tug.org/texlive/) (`brew install --cask mactex` on macOS, `apt install texlive` on Linux)
-- For Mermaid-in-PDF support (optional): Mermaid CLI (`npm install -g @mermaid-js/mermaid-cli`) and a Chromium browser accessible to Mermaid CLI. PDF icon nodes require Mermaid CLI 11.6+.
+You need [Pandoc](https://pandoc.org/installing.html) (`brew install pandoc` on macOS). Terminal previews also need a Chromium-based browser (Chrome, Brave, Edge or Chromium) and a terminal that can show images (Ghostty, Kitty, iTerm2 or WezTerm). PDF export needs a LaTeX engine such as [TeX Live](https://tug.org/texlive/) (`brew install --cask mactex` on macOS, `apt install texlive` on Linux), and Mermaid diagrams in PDF need Mermaid CLI (`npm install -g @mermaid-js/mermaid-cli`). PDF icon nodes require Mermaid CLI 11.6+.
+
+Previews load Mermaid, the MathJax fallback, Mermaid icon packs and PDF.js from jsDelivr or unpkg the first time a page needs them, so those features need network access.
+
+## Quick start
+
+`/preview` shows the latest response in the terminal. To keep a browser tab alongside the session, run:
+
+```text
+/preview-browser --live
+```
+
+The tab shows each response when Pi finishes it, with earlier responses a click away. **Working**, beside each response, shows the prompts, tool calls and results that led to it. Turn on **Follow activity** in the toolbar (or press Ctrl+Alt+A) to watch each turn in Working as it runs; when the turn finishes, the page returns to the response. With Follow activity off, the tab updates after each turn.
+
+![Live: a turn in progress, with a tool call still waiting for its result (synthetic session)](screenshots/live-dark.png)
+
+Working shows recorded prompts and tool output to anyone with the tab's link. For responses only, use `/preview-browser --watch` instead.
+
+## Usage
+
+| Command | Description |
+|---------|-------------|
+| `/preview` | Preview the latest response in the terminal |
+| `/preview --pick` | Choose from all assistant responses |
+| `/preview <path/to/file>` | Preview a Markdown, LaTeX, diff or code file |
+| `/preview --file <path/to/file>` | The same, for dash-prefixed or reserved filenames |
+| `/preview --browser` (`-b`) | Open in a cmux browser split when available, otherwise the system browser |
+| `/preview --font-size 14` | Font size in px (defaults: terminal 16, browser 15) |
+| `/preview --pick --browser` | Choose a response and open it in the browser |
+| `/preview-browser --live` | Browser tab that follows the session, with Working and [Live](#live-and-working) |
+| `/preview-browser --working` | The same without Live |
+| `/preview-browser --watch` (`-w`) | Browser tab that updates after each response, without Working |
+| `/preview-browser --watch <path>` | Browser tab that follows a file |
+| `/preview-browser --watch --history 5` | Start with up to 5 earlier responses (default 10, 0–20) |
+| `/preview-browser` | One-shot browser preview |
+| `/preview-browser <path/to/file>` | One-shot browser preview of a file |
+| `/preview-browser --list` | List browser watchers |
+| `/preview-browser --stop <path>` | Stop one file watcher |
+| `/preview-browser --stop --responses` | Stop the response watcher |
+| `/preview-browser --stop --all` | Stop every watcher in this Pi session |
+| `/preview-browser --stop` | Stop the only watcher; with several running, name one |
+| `/preview --pdf` | Export to PDF and open it |
+| `/preview-pdf` | Shortcut for `--pdf` |
+| `/preview --pdf <path/to/file>` | Export a file to PDF |
+| `/preview-clear-cache` | Clear the preview cache |
+
+`/preview -b -w` is the same as `/preview-browser -w`. Paths can be quoted. Other short forms and aliases are listed in [details](docs/details.md#argument-aliases).
+
+### Live and Working
+
+Working shows a response's recorded prompts, progress, any exposed reasoning, and its tool calls and results. Prompts start expanded and activity starts folded. Commands, file reads and edits have readable views, with the recorded JSON available, and recorded images can be enlarged. **Ctrl+Alt+P** and **Ctrl+Alt+W** (Control+Option on macOS) switch between Preview and Working.
+
+With `--live` and **Follow activity** on, the page moves to Working when a turn starts and back to Preview when it ends. If you have scrolled up or moved to another page, it leaves you there. Updates arrive as Pi records each message, not token by token, so a tool call shows "No result recorded yet" until its result is recorded. Pi Studio has a fuller live view.
+
+**Privacy:** prompts, tool output and recorded images can contain secrets, and nothing is redacted. Share these links only with people you trust. Working stays on until you stop the watcher. To start it with a fresh link, first stop any response watcher already running (`/preview-browser --stop --responses`).
+
+Some content may be shortened or left out; [details](docs/details.md#working) lists what Working reads and its limits.
+
+### Browser watch mode
+
+A response watcher renders each response once Pi finishes it. It starts with the last 10 finished responses on the current branch and keeps up to 20. Step through them with **Previous**, **Next** and **Latest** in the **current/total ▾** counter menu, with the browser's Back and Forward buttons, or with **Option/Alt+Left/Right** (add **Shift** for the oldest or latest). On an older response the page stays put and marks **New** when something arrives. For responses from before the watcher started, use `/preview --pick --browser`.
+
+A file watcher re-renders when the file changes, keeps your reading position, and keeps the last good preview if a render fails.
+
+Each Pi session can run up to eight watchers: one for responses and the rest for files. Running a command again for the same source reopens its watcher. Watchers stop with `--stop` or when the Pi session ends; a page whose watcher has stopped says it is disconnected.
+
+The page drops its token from the address bar after the first load, so a copied address won't open in another browser. Use **Copy link** in the toolbar instead. Inside cmux, browser previews open as a split in the caller's workspace.
+
+### Links to local files
+
+In a watched preview, links to local files open in the same tab, and Back returns you to where you were. Relative links in a response resolve against Pi's working directory, and links inside a file against the file's directory. Markdown, LaTeX, text and code open as rendered snapshots (refresh to reread them). Images, PDFs and HTML pages open in the browser, with HTML run in a sandbox. Other files and folders open a page with buttons to show them in their folder, open them in their default app, or copy the path. Each link also has **Copy local path** and **⋯ File actions** beside it.
+
+These actions run on the machine hosting the preview, and opening a file in its default app can run it. Anyone with a watcher's link can use them, so share the link only with people you trust. [Details](docs/details.md#security) describes what a watcher serves.
+
+### Figures, cross-references and Mermaid icons
+
+Local images and PDF figures resolve relative to the previewed file or, for responses, to Pi's working directory. Figure cross-references in Quarto syntax (`{#fig-elephant}` with `@fig-elephant`) or pandoc-crossref syntax (`{#fig:elephant}` with `@fig:elephant`) produce numbered captions and clickable **Figure N** references, for standalone captioned images and single references. No Quarto code is run; use Quarto itself for subfigures, filters or execution. `<sup>`/`<sub>` tags and Pandoc's `^1^` and `~2~` work, and HTML comments in Markdown are hidden.
 
 ### Mermaid icons
 
-Mermaid flowcharts support optional `lucide:*` and `logos:*` icons. Keep each icon metadata declaration on one source line:
+Mermaid flowcharts can use `lucide:*` and `logos:*` icons. Keep each icon declaration on one line:
 
 ```mermaid
 flowchart LR
@@ -65,145 +125,23 @@ flowchart LR
   class github changed
 ```
 
-The browser renderer loads icon-pack JSON lazily from unpkg only when a diagram references that prefix, so first render requires network access. It contrast-corrects icon and shape labels against their rendered backgrounds while preserving semantic hues. PDF export forwards the same packs to Mermaid CLI 11.6+ only when a supported icon is present. Browser previews likewise load a pinned PDF.js module from jsDelivr only when a PDF figure is present; if it cannot load or render a figure, the native PDF embed remains available.
+### Terminal preview and code wrapping
 
-## Install
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Previous or next page |
+| `r` | Re-render, bypassing the cache |
+| `w` | Toggle code wrapping |
+| `o` | Open in the browser |
+| `Esc` | Close |
 
-```bash
-pi install npm:pi-markdown-preview
-```
+Code blocks start unwrapped so diagrams and aligned columns keep their layout. In the browser, **Wrap all code** (or **Wrap** in the counter menu) sets every block, and each block has its own **Wrap** and **Copy** buttons. PDF and PNG exports always use the unwrapped layout.
 
-Or from GitHub:
+### File export with `preview_export`
 
-```bash
-pi install https://github.com/omaclaren/pi-markdown-preview
-```
+The extension registers a `preview_export` tool that Pi can call. It renders the latest response, supplied Markdown or LaTeX, or a local file to `pdf`, `html` or `png` (one file per page) and returns the paths, so another tool, such as a Telegram integration, can send them. Optional arguments are `outputPath`, `fontSizePx`, `resourcePath` and `open`. For example: "Make the last answer a PDF and send it to me."
 
-Or try it without installing:
-
-```bash
-pi -e https://github.com/omaclaren/pi-markdown-preview
-```
-
-## Usage
-
-| Command | Description |
-|---------|-------------|
-| `/preview` | Preview the latest assistant response in terminal |
-| `/preview --pick` | Select from all assistant responses |
-| `/preview <path/to/file>` | Preview a Markdown, LaTeX, diff, or code file |
-| `/preview --file <path/to/file>` | Preview a file (explicit flag) |
-| `/preview --browser` (`-b`) | Open preview in cmux when available, otherwise the system browser |
-| `/preview --font-size 14` | Preview with a custom terminal/browser font size in px (defaults: terminal 16, browser 15) |
-| `/preview-browser` | Shortcut for a one-shot browser preview |
-| `/preview-browser <path/to/file>` | Open a file preview in browser |
-| `/preview-browser --watch` (`-w`) | Keep a browser preview updated after each completed assistant response |
-| `/preview-browser --working` | Opt in to recorded prompt/working/tool details for response previews (starts the response watcher; same as `--watch --working`) |
-| `/preview-browser --live` | Working, plus the current turn live (same as `--watch --live`): with **Follow activity** on, the page switches to the running turn and back to its response when it finishes |
-| `/preview-browser --watch --history 5` | Start a response watcher with up to 5 earlier finished responses (default 10, 0–20; 0 shows only the latest) |
-| `/preview-browser --watch <path>` | Start or reopen a browser watcher for a file |
-| `/preview-browser --list` | List active and starting browser preview watchers |
-| `/preview-browser --stop <path>` | Stop one file watcher |
-| `/preview-browser --stop --responses` | Stop the assistant-response watcher |
-| `/preview-browser --stop --all` | Stop every browser preview watcher in this Pi session |
-| `/preview-browser --stop` | Stop the watcher when zero or one is running; otherwise request a target |
-| `/preview --pdf` | Export to PDF and open |
-| `/preview-pdf` | Shortcut for `--pdf` |
-| `/preview --pdf <path/to/file>` | Export a file to PDF |
-| `/preview-clear-cache` | Clear rendered preview cache |
-| `/preview --pick --browser` | Pick a response, open in browser |
-
-Local images and Pandoc PDF figures are supported. In browser previews, a single-page PDF used with Markdown image syntax is rendered as a responsive page preview that links to the original PDF; multi-page PDFs retain the native browser viewer, as do single-page PDFs when page rendering is unavailable. Ordinary PDF links in watch mode use the native browser viewer (or download, according to browser settings); PDF export continues to use the original vector file. File previews resolve relative paths against the previewed file’s directory; assistant-response previews resolve them against pi’s current working directory. Absolute paths, `file:`, `http(s):`, and `data:` image URLs work in one-shot previews. In watch mode, exact local media references—including parent-relative paths such as `../figures/plot.png`—are rewritten to opaque authenticated routes. The general relative-resource route remains restricted beneath the preview resource directory; watch mode never exposes an arbitrary filesystem route and serves only allowlisted image types, explicitly referenced PDFs, and supported linked documents.
-
-In **browser watch mode**, local document links follow normal browser conventions: click to stay in the same tab; Cmd/Ctrl-click, middle-click or the native context menu to open another tab. Browser Back returns to the source revision and reading position. Linked text, HTML and image pages also offer **Return to preview**. Following a link never retargets the original watcher.
-
-Markdown, LaTeX and common text/code links render as snapshots using the watcher's theme/font size, with images and further links resolved from each file's directory. Absolute paths (including outside the project), relative paths and local `file://` URLs work; spaces and anchors are preserved. Refresh a linked page to reread its file, or use a file watcher for continuous updates. Text/HTML input is limited to 2 MiB of UTF-8. PDFs stream through authenticated, byte-range-capable routes to the native browser viewer; Office and other non-previewable files open a path/action page instead.
-
-Explicit local links have a **Copy local path** icon and a **⋯ File actions** link beside them (compact and muted normally, highlighted on hover/keyboard focus, with larger touch targets). Linked text, image and HTML previews also offer **Copy local path** and **File actions** beside **Return to preview**. Copying gives the resolved absolute path on the preview host, without a URL fragment or shell quoting; authored symlink paths are preserved. If the clipboard is blocked, a selectable path is shown. Native right-click menus and **Copy link** still use the browser URL. Native PDFs remain unchanged; use the controls beside their source link for file actions. Linked File actions, image pages and the outer HTML-file viewer inherit their source response’s palette; authored HTML inside the isolated viewer is not restyled. Working inherits its response’s palette and text size; inline controls follow their document’s theme.
-
-ZIPs, notebooks (`.ipynb`), other non-previewable files and folders open a **path page**. Files offer **Show in folder**, **Open in default app** and **Copy local path**; folders offer **Open folder** and **Copy local path**. Supported files' action pages also link back to their **Preview**. Unsupported file contents are not read/downloaded, notebooks are not executed by the preview, and folders are not listed. Use an explicit Markdown link such as `[Results](results/)`; bare paths in backticks remain text.
-
-Native actions require a deliberate button click and run on the **machine hosting the preview**, which may differ from the browser's device. Opening uses the OS file association, so a runnable file may execute or an archive may extract. On macOS, **Show in folder** reveals the item in Finder; on Windows it uses Explorer; on Linux it opens the containing folder with `xdg-open` (without selecting the file). A desktop and suitable file association are required. Actions use authenticated, same-origin POSTs with a per-run action key and retained link ID, never an arbitrary path or shell command. Reload an old action page after restarting its watcher.
-
-Local image links such as `[Plot](plot.png)` open an image page with **Actual size / Fit image** controls. PNG, JPEG, GIF, SVG, WebP, AVIF, BMP and ICO use the browser's image decoder; no conversion is performed. SVGs stay image resources, never executable markup in the preview page. Images stream with their original filenames for saving. Embedded images (`![Plot](plot.png)`) are unchanged; image edits alone do not trigger a watcher update, so refresh to reread them.
-
-HTML links open as actual pages with **View source / View page** controls. `/preview-browser ./page.html` starts or reopens a managed file watcher even without `--watch`; use the normal list/stop commands to manage it. Terminal previews and exports still show HTML source. Other one-shot previews are unchanged.
-
-Document routes require the watcher's browser cookie and an exact link in retained history or a recently opened document. There is no directory browser or arbitrary file-path endpoint. Anyone with a watcher's authenticated link can also follow its local links, see resolved filesystem paths and request native open/reveal actions for those linked files or folders, including paths outside the project. Only share it with people you trust with that desktop access. Linked tabs share the source watcher's lifetime, do not add watchers, and may expire as retained history is pruned; reopen an expired tab from its source preview.
-
-Authored HTML runs in an opaque-origin sandbox on a separate loopback server, never inside the authenticated response-preview DOM. The selected page is a snapshot; relative CSS, JS/modules, images, fonts and Wasm assets are served live from its directory (including subdirectories), with canonical containment checks. Dot paths, directory escapes, sibling HTML documents, PDFs and non-asset files are blocked on this asset server. HTTPS resources and requests from authored scripts are permitted, so this is not network isolation. The viewer itself does not upload local files to an online service. Its capability URLs grant access to the selected page and these allowed assets, so keep them private. Stopping the parent watcher stops this server too. Forms, nested frames, local storage and general web-app hosting are deliberately outside this page-viewing mode's scope.
-
-Basic labelled-figure cross-references work consistently in terminal, browser, and PDF previews. Quarto syntax (`{#fig-elephant}` with `@fig-elephant`) and `pandoc-crossref` syntax (`{#fig:elephant}` with `@fig:elephant`) produce numbered captions and clickable **Figure N** references. This lightweight filter handles standalone captioned images and exact single references only; missing, duplicate, compound, or qualified references remain visibly unresolved. It does not emulate Quarto subfigures, project filters, chapter-aware numbering, or execution.
-
-Bare `<sup>…</sup>` and `<sub>…</sub>` tags containing plain inline text are supported in terminal, browser, and PDF output, including affiliation markers such as `Name<sup>1,2</sup>`. Pandoc's native `Name^1,2^` and `H~2~O` syntax also works. Code examples, escaped tags, and YAML front matter are preserved; attributed or nested HTML is not enabled by this compatibility support.
-
-The short response-watch forms are `/preview-browser -w` and `/preview -b -w`. Use `/preview-browser -w ./report.md` or `/preview -b -w --file ./report.md` to watch a file. Quoted paths are supported; `--file` also makes reserved or dash-prefixed filenames explicit.
-
-When pi is running inside cmux, browser previews automatically open as a focused cmux browser split in the caller’s workspace. If cmux is unavailable or declines the request, the normal system-browser opener is used instead.
-
-The compact watch toolbar shows **Preview / Working** when enabled, followed by a **current/total ▾** counter and an always-visible **Copy link** button. Open the counter for the source filename, history navigation and code wrapping. Copy feedback stays on the toolbar; a manual-copy dialog returns keyboard focus to Copy link when dismissed. The panel overlays the document without moving it and stays open while you use **Previous**, **Next**, **Latest**, or wrapping controls. Use `Tab` to reach controls and `Escape` to close it, or click outside. Panel state is tab-local to each watcher; preserving it across page loads requires browser session storage. Touch targets are enlarged on touch devices.
-
-The watch server removes its bootstrap token from the address bar after setting a browser-specific session cookie. Consequently, copying the cleaned address-bar URL into another browser is intentionally rejected. Use the watch toolbar’s **Copy link** control to request a fresh authenticated URL; it copies directly when browser permissions allow and otherwise selects the URL for manual copying.
-
-Active watch tabs check for new rendered revisions every 200 ms using small, authenticated requests that finish immediately. Background tabs check less often and check again when brought to the foreground. Multiple tabs therefore do not tie up the browser's HTTP connection limit with permanent live-update streams. Unchanged revisions are neither re-rendered nor reloaded; history navigation remains immediate.
-
-Response watch mode is deliberately completion-level rather than token-streaming: it performs one canonical Pandoc render after each settled agent run, and only for a new or changed latest assistant response. File watch mode debounces source-file changes, hashes the file contents, and renders only genuine changes; temporary read/render failures leave the last good preview visible. Linked asset changes alone do not trigger a render. Both modes use token-protected servers bound to `127.0.0.1` and stop through the browser-watch lifecycle commands or when the session shuts down. Non-HTML one-shot browser previews remain unchanged and do not start this server.
-
-Up to eight browser preview watchers can run per Pi session: multiple canonical file paths plus at most one assistant-response watcher. Each has an independent loopback server, authentication token, history, resource root, render state, and cleanup lifecycle. Repeating the same source reopens its existing watcher rather than duplicating it, and file and response watchers may coexist. Use `--list` to inspect them, a path or `--responses` to stop one, and `--all` to stop every watcher. Bare `--stop` retains the convenient old behaviour when zero or one watcher exists but makes no change when several are running.
-
-A new response watcher starts with up to 10 earlier finished responses from the current conversation branch, oldest first, followed by the latest one; `--history <n>` changes the count (0–20) when the watcher starts. File watchers start with the current file version. Watch history retains up to the latest 20 completed responses or successfully rendered file versions, subject to a 32 MiB aggregate HTML cap per watcher; the newest successful revision is always retained. Use the browser’s Back/Forward buttons or the **Previous**, **Next**, and **Latest** controls to move between them. **Option/Alt+Left** and **Option/Alt+Right** are shortcuts for Previous and Next, and adding **Shift** jumps to the oldest retained or the latest revision, when focus is outside an editable field. Auto-follow continues while the latest preview is open; when viewing an older one, the page stays put, shows **New** beside the revision count, and marks **Latest (new)** inside the panel as new responses or file versions arrive. Use `/preview --pick --browser` for other assistant responses from before a response watcher started. If the watcher becomes unavailable, the page shows a disconnected status beside its controls instead of silently going stale. It retries with a short backoff; hosts that reuse the same port and token can reconnect existing pages after a restart.
-
-File watchers preserve your reading position across automatic updates, reloads, and navigation between versions of the same file. Restoration follows a nearby unchanged paragraph or heading, so edits above it do not move you elsewhere; if those anchors disappear, it falls back to relative scroll position. It accounts for delayed image/math layout, but stops adjusting as soon as you interact with the page. Positions are tab-local and isolated between watchers; if browser storage is unavailable, navigation still works without restoration. New assistant responses continue to start at the top, and browsing an older response remains undisturbed.
-
-### Working (optional)
-
-```text
-/preview-browser --watch --working
-```
-
-Select **Working** beside a completed response for a read-only view of its recorded prompts, progress, exposed thinking/reasoning and tool calls/results. Some content may be missing or shortened. Prompts start expanded; activity and results start folded. Commands, file reads and requested edits have readable argument views, with the recorded JSON available. Result text can wrap, and recorded image thumbnails can be enlarged.
-
-Use **Ctrl+Alt+P/W** (Control+Option on macOS) to switch between Preview and Working for the same response. Each view remembers its reading position; expanded cards and wrapping choices survive refreshes within the tab. Working stays on the selected turn as new responses arrive. Missing data offers a link to the same response in Preview; expired links offer an explicit way to reconnect. The history controls above work in both views. One-shot previews, exports and file watchers are unchanged.
-
-**Privacy:** prompts, tool text and recorded images can contain secrets and are not automatically redacted. Share these links only with trusted viewers. If an ordinary response watcher is running, stop it with `/preview-browser --stop --responses` before enabling Working; this gives you a fresh private link. Working stays enabled until that watcher is stopped. Reopening without the flag does not revoke access; stop it and start an ordinary watcher to disable it.
-
-**Live:** `/preview-browser --live` (implies `--working` and starts the response watcher) also follows the current turn as Pi records it. Turn on **Follow activity** in the toolbar (Ctrl+Alt+A): while a turn runs, Working shows it live and the page switches to it; when the turn finishes, the page returns to that response's Preview. If you have scrolled up or left the live page yourself, it does not move you. Updates arrive as Pi records each message, not token by token, and a tool call says "No result recorded yet" until its result is recorded. Pi Studio offers a fuller live view; this is the lightweight alternative inside the preview.
-
-![Working with a recorded image — synthetic example](screenshots/recorded-images-working-dark.png)
-
-<details>
-<summary>Recorded content and limits</summary>
-
-Details are read only when requested, for the exact retained response. Reads are limited to an 8 MiB JSONL tail, 1 MiB per record and 10,000 records. Display limits are 250 events, 16K characters of recorded text per entry and 256K overall. Clipped entries are marked; missing material is not reconstructed. System/developer entries, known harness-injected context, opaque signatures and prompt/non-image attachments are omitted.
-
-Commands, paths and URLs stay literal and do not execute or become file capabilities. Known Bash, codemode, read and edit calls show commands/code, requested paths/ranges and Before/After replacement text. Other options and unknown or malformed argument shapes retain their literal view. Calls and results remain separate. Raw input preserves the prompt's original text when the reading view removes leading blank lines.
-
-Images use only recorded inline bytes, never current files, URLs or attachment IDs. Static PNG, JPEG and WebP are supported; missing, unsupported or oversized images get an unavailable message. Thumbnails decode when their result card opens. Limits are eight candidates per turn, 512 KiB and 8 Mi pixels per image, 2 MiB and 16 Mi pixels overall, and 8192 pixels per dimension. Record/read limits still apply, so an oversized source record may be absent altogether. There is no conversion or persistent image storage.
-
-</details>
-
-### LLM-callable artifact export
-
-The extension also registers a `preview_export` tool that pi can call directly. It renders Markdown/LaTeX content, a local file, or the latest assistant response to artifact files and returns their paths instead of requiring an interactive terminal/browser preview.
-
-Supported formats:
-- `pdf` — writes a PDF file using the same pandoc + LaTeX path as `/preview-pdf`
-- `html` — writes a standalone rendered HTML preview
-- `png` — writes one PNG per rendered preview page, appending `-1-of-N`, `-2-of-N`, etc. for multi-page output
-
-The tool accepts optional `outputPath`, `fontSizePx`, `resourcePath`, and `open` arguments. By default it only writes files and returns paths, so another integration (for example Telegram or an upload/send-file tool) can deliver them.
-
-Example user requests pi can satisfy with `preview_export`:
-
-```text
-Make the last answer a PDF and send it to me.
-Render ./report.md as HTML.
-Export this markdown as PNG pages.
-```
-
-### Programmatic helper exports
-
-Other pi extensions can import the preview helpers directly:
+### Using it from other extensions
 
 ```ts
 import {
@@ -213,115 +151,26 @@ import {
 } from "pi-markdown-preview";
 ```
 
-- `openPreview(ctx, markdownOverride?, resourcePath?, isLatex?, fontSizePx?)` opens the inline terminal preview.
-- `openPreviewInBrowser(ctx, markdownOverride?, resourcePath?, isLatex?, fontSizePx?)` writes and opens the browser HTML preview.
-- `closeSharedPreviewBrowser()` closes the shared headless Chromium instance used for terminal/PNG rendering. Importing extensions can call this from their own `session_shutdown` handler; the bundled extension also calls it on pi shutdown/reload/switch.
-
-Additional accepted argument aliases:
-- Pick: `-p`, `pick`
-- File: `-f`
-- Browser target: `-b`, `browser`, `--external`, `external`, `--browser-native`, `native`
-- Browser watch: `--watch`, `-w` (assistant responses or one file), `--stop`
-- PDF target: `pdf`
-- Terminal target: `terminal`, `--terminal` (usually unnecessary because terminal is the default)
-- Font size: `--font-size <px>`, `--font-size=<px>`, `--font-size-px <px>`, `--fs <px>` (10–24 px; terminal/browser previews; defaults: terminal 16, browser 15)
-- Help: `--help`, `-h`, `help`
-- Note: `--pick` and `--file` cannot be used together
-
-PDF export uses Pandoc plus a LaTeX PDF engine (`xelatex` by default). The PDF preamble uses optional styling packages when they are available (including light code-block backgrounds via `framed`) and falls back to simpler output otherwise. Long-running PDF subprocesses time out after 120 seconds by default; set `PI_MARKDOWN_PREVIEW_PDF_TIMEOUT_MS` to adjust this.
-
-To validate command docs against implementation:
-
-```bash
-npm run check:readme-commands
-```
-
-### Keyboard shortcuts (terminal preview)
-
-| Key | Action |
-|-----|--------|
-| `←` / `→` | Navigate pages |
-| `r` | Refresh (re-render with current theme, keeping the wrapping choice) |
-| `w` | Toggle code wrapping for this terminal preview (re-renders the images) |
-| `o` | Open current preview in browser |
-| `Esc` | Close preview |
-
-### Code wrapping and copying
-
-Code blocks start **unwrapped** so diagrams and column-aligned output retain their layout. In a browser, long lines scroll within the code block. Terminal previews and PNG files are static images, so content beyond a block's width cannot be scrolled there.
-
-- **Terminal viewer:** press `w` to toggle wrapping for all code blocks. The help line shows `wrap code: off/on`. The viewer keeps the previous images and setting if rendering fails; `Esc` also cancels an in-progress render. The choice lasts only until that viewer closes. This is an interactive key, not an argument: `--watch` / `-w` still means browser watch mode.
-- **Browser:** use **Wrap all code: off/on/mixed** at the top, or hover over a code block to reveal **Wrap / Unwrap** on its upper-right border. Per-block buttons also appear when reached with `Tab`, stay visible on touch devices, and do not add a row or cover the code text. The global button wraps all blocks when they are unwrapped or mixed, and unwraps all when they are wrapped; it clears individual exceptions. There is no bare-key browser shortcut.
-- **Copy code:** **Copy** sits beside the per-block wrapping button and copies plain code text, including indentation and logical line breaks, regardless of wrapping. It briefly shows **Copied** on success or **Failed** if clipboard access is unavailable; failures leave manual selection/copy available. Neither button labels nor visual line wrapping are included in the copied text.
-- **Watch mode:** the global control is **Wrap: off/on/mixed** inside the counter menu, rather than a separate button above the document. The global browser choice survives refreshes and revision navigation in the same tab using session storage. Per-block exceptions reset on each loaded revision. Independent watchers and fresh one-shot documents start unwrapped. If browser storage is disabled, the buttons still work, but the choice does not survive reloads.
-
-Wrapping changes presentation, not code text or authored line breaks. Buttons stay outside the code and are omitted from terminal/PNG rendering and browser printing. Browser and terminal choices are independent; opening a separate browser preview starts unwrapped. PDF export uses the separate Pandoc/LaTeX pipeline and is unchanged. Standalone PNG exports also retain the default unwrapped layout rather than inheriting a viewer's temporary state.
+- `openPreview(ctx, markdownOverride?, resourcePath?, isLatex?, fontSizePx?)` opens the terminal preview.
+- `openPreviewInBrowser(ctx, markdownOverride?, resourcePath?, isLatex?, fontSizePx?)` writes and opens the browser preview.
+- `closeSharedPreviewBrowser()` closes the shared headless Chromium used for terminal and PNG rendering. You can call it from your own `session_shutdown` handler; this extension already calls it when Pi shuts down, reloads or switches session.
 
 ## Configuration
 
-The LLM-callable `preview_export` tool is registered by default. To omit that tool while keeping all `/preview` commands available, set this before starting pi:
+Set these before starting Pi:
 
-```bash
-export PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL=false
-```
+| Variable | Effect |
+|----------|--------|
+| `PANDOC_PATH` | Pandoc executable, if it is not on your `PATH` |
+| `PANDOC_PDF_ENGINE` | LaTeX engine for PDF export (default `xelatex`) |
+| `PI_MARKDOWN_PREVIEW_PDF_TIMEOUT_MS` | Time limit for PDF export, in ms (default 120000) |
+| `PUPPETEER_EXECUTABLE_PATH` | Chromium executable for terminal previews, instead of detecting one |
+| `PI_MARKDOWN_PREVIEW_DEVICE_SCALE_FACTOR` | Screenshot density for terminal previews (default `2`, range 1–2.5) |
+| `MERMAID_CLI_PATH` | Mermaid CLI (`mmdc`), if it is not on your `PATH` |
+| `MERMAID_PDF_THEME` | Mermaid theme in PDF: `default`, `forest`, `dark` or `neutral` |
+| `PI_MARKDOWN_PREVIEW_REGISTER_EXPORT_TOOL` | `0`, `false`, `no` or `off` leaves out the `preview_export` tool |
 
-The values `0`, `false`, `no`, and `off` disable registration (case-insensitive). Unset or any other value keeps the tool enabled.
-
-Set `PANDOC_PATH` if pandoc is not on your `PATH`:
-
-```bash
-export PANDOC_PATH=/usr/local/bin/pandoc
-```
-
-Pandoc HTML conversion is bounded to 30 seconds, 50 MiB of standard output, and 5 MiB of diagnostics so a broken subprocess cannot stall or exhaust a preview session. Stopping a browser watcher cancels its active Pandoc process tree.
-
-Set `PANDOC_PDF_ENGINE` to override the LaTeX engine used for PDF export (default: `xelatex`):
-
-```bash
-export PANDOC_PDF_ENGINE=xelatex
-```
-
-Set `PUPPETEER_EXECUTABLE_PATH` to override Chromium detection for terminal preview rendering:
-
-```bash
-export PUPPETEER_EXECUTABLE_PATH=/path/to/chromium
-```
-
-On Windows, standard system and per-user Chrome, Edge, Brave, and Chromium installations are detected from `ProgramW6432`, `PROGRAMFILES`, `PROGRAMFILES(X86)`, and `LOCALAPPDATA`, with the common `C:` locations as fallbacks.
-
-Terminal preview uses the known-good fixed screenshot path: 1200px Chromium viewport at device scale `2`. Set `PI_MARKDOWN_PREVIEW_DEVICE_SCALE_FACTOR` only if you want to experiment with screenshot density manually (default: `2`; range: `1`–`2.5`):
-
-```bash
-export PI_MARKDOWN_PREVIEW_DEVICE_SCALE_FACTOR=2
-```
-
-Set `MERMAID_CLI_PATH` if `mmdc` is not on your `PATH`:
-
-```bash
-export MERMAID_CLI_PATH=/path/to/mmdc
-```
-
-Set `MERMAID_PDF_THEME` for PDF Mermaid rendering (`default`, `forest`, `dark`, `neutral`; default: `default`):
-
-```bash
-export MERMAID_PDF_THEME=default
-```
-
-## Cache
-
-Rendered previews are cached at `~/.pi/cache/markdown-preview/` by default.
-When `PI_CODING_AGENT_DIR` is set, the cache is stored at `$PI_CODING_AGENT_DIR/cache/markdown-preview/` instead.
-Clear it with:
-
-```bash
-/preview-clear-cache
-```
-
-Or manually:
-
-```bash
-rm -rf "${PI_CODING_AGENT_DIR:-$HOME/.pi}/cache/markdown-preview/"
-```
+Rendered previews are cached in `~/.pi/cache/markdown-preview/` (or under `$PI_CODING_AGENT_DIR` when that is set); `/preview-clear-cache` clears it.
 
 ## License
 

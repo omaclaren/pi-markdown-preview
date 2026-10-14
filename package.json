@@ -18,7 +18,7 @@
     "screenshots/light-terminal.png",
     "screenshots/dark-browser.png",
     "screenshots/light-browser.png",
-    "screenshots/recorded-images-working-dark.png"
+    "screenshots/live-dark.png"
   ],
   "scripts": {
     "check:readme-commands": "node ./scripts/check-readme-commands.mjs",
