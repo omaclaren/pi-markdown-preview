@@ -402,7 +402,7 @@ test("Live updates (Pi): a retried turn reaches its exact completion link; closi
  live.push(piUser("u1", null, "Run it"), 1);
  live.push(piReply("a1", "u1", [txt("Overloaded")], "error"), 2);
  let state = await updates("");
- assert.match(state.statusHtml, /API error/);
+ assert.match(state.statusHtml, /Turn ended with an error\./);
  live.push(piReply("f1", "a1", [txt("Done after retry")], "stop"), 3);
  server.updateDocument(html.replace("Answer", "Done after retry"), { appendToHistory: true, responseKey: "pi:f1" });
  state = await updates(state.cursor);
@@ -496,6 +496,7 @@ test("Live projection (Codex): interruption, errors, maintenance tasks, late rec
  live.push(cxDone("T2", null, { message: "unsupported model", codex_error_info: "other" }), 6);
  let snapshot = live.snapshot("turn-T2");
  assert.deepEqual([snapshot.status, snapshot.finalKey], ["error", undefined]);
+ assert.equal(liveStatusHtml({ status: "error" }), "Turn ended with an error.", "the recorded error's cause is not assumed");
  live.push(cxMessage("assistant", "Unplaced reply"), 7);
  assert.equal(live.snapshot("turn-T2").status, "error");
  assert.equal(live.snapshot("turn-T2").events.length, 1, "items outside any running task are not shown");
@@ -556,7 +557,79 @@ test("Live projection (Codex): older rollouts without ordinals, and a backfill t
  assert.equal(createLiveTurnProjector("codex").push(cxCall("k8"), 1), false, "without a partial start, items outside a task start nothing");
 });
 
-test("Live updates (Codex): completion links to the exact response; a task without a final answer returns to Preview", async t => {
+test("Live projection (Codex): an end is placed only by the task it names, never by file order or the bounded record memory", () => {
+ ordinal = 0;
+ // An end or abort naming a task that is not retained changes nothing.
+ const live = createLiveTurnProjector("codex");
+ live.push(cxStart("current"), 1);
+ live.push(cxMessage("user", "Current prompt"), 1);
+ assert.equal(live.push(cxDone("unseen-older", "Older answer"), 2), false);
+ assert.equal(live.push(cxEvent({ type: "turn_aborted", turn_id: "unseen-older", reason: "interrupted" }), 2), false);
+ assert.deepEqual([live.snapshot("turn-current").status, live.snapshot("turn-current").finalKey], ["running", undefined]);
+ // A retained task keeps its identity after its start leaves the bounded record memory.
+ const evicted = createLiveTurnProjector("codex");
+ evicted.push(cxStart("old"), 1);
+ for (let i = 0; i <= 10_000; i++) evicted.push(cxEvent({ type: "token_count", info: null }), 2);
+ evicted.push(cxStart("new"), 3);
+ evicted.push(cxMessage("user", "New prompt"), 3);
+ evicted.push(cxDone("old", "Old answer"), 4);
+ assert.deepEqual([evicted.snapshot("turn-old").status, evicted.snapshot("turn-old").finalKey], ["completed", "codex:old"]);
+ assert.deepEqual([evicted.snapshot("turn-new").status, evicted.snapshot("turn-new").finalKey], ["running", undefined]);
+ assert.ok(evicted.stats().records <= 10_000, "the record memory stays bounded");
+ // A repeated start of a retained task is ignored even when its id has been forgotten.
+ assert.equal(evicted.push(cxStart("new"), 5), false);
+ // A backfill that starts inside a task: the turn takes the task its own records name,
+ // and an end naming another task does not end it.
+ ordinal = 100;
+ const partial = createLiveTurnProjector("codex", { partialStart: true });
+ const first = cxCall("k1");
+ partial.push(first, 1);
+ partial.push(cx("token_usage_record", { turn_id: "X", usage: {} }), 2);
+ partial.push(cxDone("Y", "Another answer"), 3);
+ let snapshot = partial.snapshot(`o${first.ordinal}`);
+ assert.deepEqual([snapshot.status, snapshot.finalKey], ["running", undefined]);
+ partial.push(cxOutput("k1", "ok"), 4);
+ partial.push(cxDone("X", "Its answer"), 5);
+ snapshot = partial.snapshot(`o${first.ordinal}`);
+ assert.deepEqual([snapshot.status, snapshot.finalKey], ["completed", "codex:X"]);
+ // Once a task start is retained, a name never moves into the older partial turn.
+ partial.push(cxStart("Z"), 6);
+ partial.push(cxDone("W", "Unknown"), 7);
+ assert.equal(partial.snapshot("turn-Z").status, "running");
+});
+
+test("Live rendering: Claude-only presentation applies to Claude snapshots only, on the page and in updates", async t => {
+ const slash = "<command-name>/example</command-name>";
+ const notice = "<task-notification><summary>Background task done</summary><status>completed</status></task-notification>";
+ ordinal = 0;
+ const codex = createLiveTurnProjector("codex");
+ codex.push(cxStart("T1"), 1); codex.push(cxMessage("user", slash), 1); codex.push(cxMessage("user", notice), 1);
+ const pi = createLiveTurnProjector("pi");
+ pi.push(piUser("u1", null, slash), 1); pi.push(piUser("u2", "u1", notice), 1);
+ const claude = createLiveTurnProjector();
+ claude.push(user("s", slash), 1); claude.push(user("p", "Go"), 2); claude.push(user("n", notice), 3);
+ const literal = page => { assert.doesNotMatch(page, /Slash command|Task notification/); assert.equal((page.match(/Prompt \/ input/g) ?? []).length, 2); };
+ for (const [snapshot, agent] of [[codex.snapshot("turn-T1"), "codex"], [pi.snapshot("u1"), "pi"]]) {
+  assert.equal(snapshot.sourceAgent, agent, "the projector's own format, never the prompt text");
+  literal(buildLivePage(snapshot));
+ }
+ const compact = buildLivePage(claude.snapshot("p"));
+ assert.match(compact, /Slash command/); assert.match(compact, /Task notification/);
+ // The server renders updates with the same rule.
+ const dir = await temp(t);
+ const server = await createBrowserWatchServer(html, dir, { live: { current: async () => codex.current(), snapshot: async a => codex.snapshot(a) ?? claude.snapshot(a) } });
+ t.after(() => server.close());
+ const session = await auth(server);
+ const query = liveEntry(session.text).split("?")[1];
+ const get = path => fetch(new URL(path, session.origin), { headers: { cookie: session.cookie } });
+ literal((await (await get(`/__pi_markdown_preview_live__/turn-T1?${query}`)).text()).replace(/<script[\s\S]*?<\/script>/g, ""));
+ const updates = async anchor => (await get(`/__pi_markdown_preview_live__/${anchor}/updates?${query}&cursor=`)).json();
+ literal((await updates("turn-T1")).upserts.map(u => u.html).join("\n"));
+ const claudeCards = (await updates("p")).upserts.map(u => u.html).join("\n");
+ assert.match(claudeCards, /Slash command/); assert.match(claudeCards, /Task notification/);
+});
+
+test("Live updates (Codex): completion links to the exact response; a task without a final answer returns to Preview; another task's end links nothing", async t => {
  ordinal = 0;
  const dir = await temp(t);
  const live = createLiveTurnProjector("codex");
@@ -581,11 +654,18 @@ test("Live updates (Codex): completion links to the exact response; a task witho
  assert.deepEqual([state.status, state.completedHref], ["completed", undefined]);
  assert.match(state.previewHref, new RegExp(`^/\\?revision=${revision}&identity=`), "back to the latest response");
  assert.match(state.statusHtml, new RegExp(`Turn completed without a final answer\\. <a href="/\\?revision=${revision}&amp;identity=`));
- // An error has no Preview link: the reader stays to see what happened.
+ // An error has no Preview link: the reader stays to see what happened. Its cause is not assumed.
  live.push(cxStart("T3"), 6);
- live.push(cxDone("T3", null, { message: "failed" }), 7);
+ live.push(cxDone("T3", null, { message: "failed", codex_error_info: "other" }), 7);
  state = await updates("turn-T3", "");
  assert.deepEqual([state.status, state.previewHref], ["error", undefined]);
+ assert.equal(state.statusHtml, "Turn ended with an error.");
+ // The end of a task that is not retained, whose answer is, never completes the current task.
+ live.push(cxStart("T4"), 8);
+ live.push(cxMessage("user", "Current"), 8);
+ live.push(cxDone("T1", "Done"), 9);
+ state = await updates("turn-T4", "");
+ assert.deepEqual([state.status, state.completedHref, state.previewHref, state.statusHtml], ["running", undefined, undefined, ""]);
 });
 
 test("Live projection: OpenCode is not supported yet", () => {
@@ -895,6 +975,8 @@ test("Follow activity browser view (Codex): a task without a final answer return
  const live = createLiveTurnProjector("codex");
  const server = await createBrowserWatchServer(html, dir, { live: { current: async () => live.current(), snapshot: async a => live.snapshot(a) } });
  t.after(() => server.close());
+ // An earlier task's answer is retained; that task's start is not.
+ server.updateDocument(html.replace("Answer", "Older answer"), { appendToHistory: true, responseKey: "codex:older" });
  const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
  try {
   const page = await browser.newPage(); await page.setViewport({ width: 900, height: 700 });
@@ -904,10 +986,15 @@ test("Follow activity browser view (Codex): a task without a final answer return
   live.push(cxStart("T1"), Date.now());
   await page.waitForFunction(() => document.querySelector("h1")?.textContent === "Working · live", { timeout: 15_000 });
   assert.match(page.url(), /\/__pi_markdown_preview_live__\/turn-T1\?/);
+  // The older task's end, recorded late, does not end this one or lead to its answer.
+  live.push(cxDone("older", "Older answer"), Date.now());
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.match(page.url(), /\/__pi_markdown_preview_live__\/turn-T1\?/, "another task's end does not move the reader");
+  assert.equal(await page.$eval("[data-live-status]", e => e.textContent), "");
   live.push(cx("compacted", { message: "" }), Date.now());
   live.push(cxDone("T1", null), Date.now());
-  await page.waitForFunction(() => location.pathname === "/" && document.body.textContent.includes("Answer"), { timeout: 15_000 });
-  assert.equal(new URL(page.url()).searchParams.get("revision"), "1", "the latest response, unchanged");
+  await page.waitForFunction(() => location.pathname === "/" && document.body.textContent.includes("Older answer"), { timeout: 15_000 });
+  assert.equal(new URL(page.url()).searchParams.get("revision"), "2", "the latest response, unchanged");
   await new Promise(resolve => setTimeout(resolve, 3000));
   assert.equal(new URL(page.url()).pathname, "/", "a finished task does not pull the reader back");
  } finally { await browser.close(); }

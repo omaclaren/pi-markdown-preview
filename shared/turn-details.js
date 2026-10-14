@@ -311,15 +311,19 @@ function piLiveRole(e) {
 }
 
 // Codex: rollout lines without record ids or parent links. A task, from
-// task_started to task_complete or turn_aborted, is the turn; only the task's own
-// events name it (turn_id). Its items join the running task in file order, and a
-// tool result joins its call's turn. Items are read from response_item records
-// only: item_completed and the older user/agent event messages repeat them.
-// Maintenance tasks (compaction) have no prompt and no final answer.
+// task_started to task_complete or turn_aborted, is the turn. The records the
+// running task writes about itself name it (turn_id); a late command completion
+// (item_completed) can name an earlier task, so it names none here. Items carry
+// no turn id: they join the running task in file order, and a tool result joins
+// its call's turn. Items are read from response_item records only: item_completed
+// and the older user/agent event messages repeat them. Maintenance tasks
+// (compaction) have no prompt and no final answer.
 const CODEX_TURN_ID = /^[A-Za-z0-9_-]{1,100}$/;
 const CODEX_ITEMS = new Set(["reasoning", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"]);
+const CODEX_TASK_EVENTS = new Set(["task_started", "task_complete", "turn_aborted", "task_aborted"]);
 const codexTask = e => e?.type === "event_msg" && e.payload?.type === "task_started";
 const codexTurn = e => typeof e?.payload?.turn_id === "string" && CODEX_TURN_ID.test(e.payload.turn_id) ? `turn-${e.payload.turn_id}` : undefined;
+const codexNamedTask = e => (e?.type === "event_msg" ? CODEX_TASK_EVENTS.has(e.payload?.type) : ["turn_context", "token_usage_record"].includes(e?.type)) ? codexTurn(e) : undefined;
 function codexLiveId(e) {
 	if (!e || typeof e !== "object") return undefined;
 	if (codexTask(e) && codexTurn(e)) return codexTurn(e);
@@ -349,6 +353,8 @@ function codexLiveRole(e) {
 }
 
 // How each format names, links, projects and ends its records. The turn logic is shared.
+// `task`, where a format records one, is the task a record names: it is kept on the
+// turn, so placement by name never depends on the bounded record memory.
 const LIVE_FORMATS = {
 	claude: {
 		id: e => e?.uuid,
@@ -387,9 +393,10 @@ const LIVE_FORMATS = {
 	},
 	codex: {
 		id: codexLiveId,
-		// A task's events link to its start; a new task never joins a running one.
-		parent: e => codexTask(e) ? undefined : codexTurn(e),
+		parent: () => undefined,
+		// A task start never steers a running task.
 		linked: e => codexTask(e) || codexTurn(e) !== undefined,
+		task: codexNamedTask,
 		role: codexLiveRole,
 		results: e => e.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(e.payload?.type) && typeof e.payload.call_id === "string" ? [[undefined, e.payload.call_id.slice(0, 160)]] : [],
 		project(details, e) { if (e.type === "response_item" && e.payload) codexItem(details, e.payload); },
@@ -446,9 +453,9 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		for (const [, call] of format.results(e)) if (calls.has(call)) return calls.get(call);
 	};
 	const touch = (turn, at) => { turn.sequence++; turn.updatedAt = at.time; turn.loaded = at.loaded; };
-	const newTurn = anchor => {
+	const newTurn = (anchor, task) => {
 		const details = createTurnDetails([], { eventLimit: Infinity, totalLimit: Infinity, toolNameLimit: LIVE_EVENT_WINDOW });
-		const turn = { owner: {}, anchor, status: "running", finalKey: undefined, details, events: [], sizes: [], bytes: 0, omitted: 0, sequence: 0, updatedAt: 0, loaded: false };
+		const turn = { owner: {}, anchor, task, status: "running", finalKey: undefined, details, events: [], sizes: [], bytes: 0, omitted: 0, sequence: 0, updatedAt: 0, loaded: false };
 		turns.push(turn);
 		while (turns.length > LIVE_TURNS_KEPT) turns.shift();
 		return turn;
@@ -499,8 +506,8 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		}
 	};
 	// A turn starts with any context held for it.
-	const open = (anchor, at) => {
-		const turn = newTurn(anchor);
+	const open = (anchor, at, task) => {
+		const turn = newTurn(anchor, task);
 		touch(turn, at);
 		if (held) {
 			for (const link of held.links) link.adopted = turn.owner;
@@ -510,21 +517,31 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		started = true;
 		return turn;
 	};
+	// A record naming a task joins that task's retained turn, or none: never the
+	// running turn by file order. A turn without its recorded start (a partial
+	// backfill) takes the first task named in it.
+	const named = task => {
+		const turn = turns.find(t => t.task === task);
+		if (turn) return { turn };
+		if (fallback && fallback === turns.at(-1) && fallback.task === undefined) { fallback.task = task; return { turn: fallback }; }
+	};
 	/** @returns true when the record changed what a live view shows. */
 	const push = (e, observedAt = Date.now(), loaded = false) => {
 		const id = typeof format.id(e) === "string" ? format.id(e) : undefined;
 		if (!id || owners.has(id)) return false;
 		const at = { time: observedAt, loaded };
 		const role = format.role(e);
+		const task = format.task?.(e);
+		if (role === "start" && task !== undefined && turns.some(t => t.task === task)) return false;
 		const latest = turns.at(-1);
 		const running = latest?.status === "running" ? latest : undefined;
-		const owner = ownerOf(e);
-		let target = lookup(owner);
+		const owner = task === undefined ? ownerOf(e) : undefined;
+		let target = task === undefined ? lookup(owner) : role === "start" ? undefined : named(task);
 		// Records without recorded links (other formats, fixtures) fall back to file order.
 		const sameTurn = running && (target?.turn === running || (!target && !linked(e)));
 		if (role === "start") {
 			// Input during a running turn steers it; otherwise it starts the next turn.
-			const turn = sameTurn ? running : open(id, at);
+			const turn = sameTurn ? running : open(id, at, task);
 			remember(owners, id, turn.owner, LIVE_RECORD_LIMIT);
 			if (!project(turn, e, at)) touch(turn, at);
 			return true;
@@ -540,7 +557,7 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 			hold(e, link);
 			return false;
 		}
-		if (!target) {
+		if (!target && task === undefined) {
 			// No link to anything retained: a gap in what was read, or a format without links.
 			if (running) {
 				target = { turn: running };
@@ -598,7 +615,7 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 			if (!turn) return undefined;
 			const latest = turns.at(-1);
 			return {
-				generation, anchor, status: turn.status, finalKey: turn.finalKey, sequence: turn.sequence, updatedAt: turn.updatedAt, loaded: turn.loaded,
+				generation, anchor, sourceAgent: agent, status: turn.status, finalKey: turn.finalKey, sequence: turn.sequence, updatedAt: turn.updatedAt, loaded: turn.loaded,
 				omitted: turn.omitted, notices: [...turn.details.result.notices], events: turn.events.map(event => ({ ...event })),
 				...(latest !== turn ? { newerAnchor: latest.anchor } : {}),
 			};

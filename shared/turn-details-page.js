@@ -283,8 +283,9 @@ export function buildTurnDetailsPage(details, responseUrl, label = "", appearanc
 
 
 // ---- Live: recorded activity of one in-progress turn ----
-/** One live card, from the same escaping renderer as Working; `next` is the card after it, as in Working. */
-export function renderLiveCard(event, number, fromClaude = true, next) {
+/** One live card, from the same escaping renderer as Working; `next` is the card after it, as in Working.
+ * `fromClaude` applies Claude-only presentation, from the snapshot's source agent (never from prompt text). */
+export function renderLiveCard(event, number, fromClaude = false, next) {
 	const open = startsOpen(event, next, fromClaude);
 	const label = claudeEnvelope(event, fromClaude)?.label ?? (event.label || event.kind);
 	// Only the record's absence is stated; nothing is inferred about the call.
@@ -301,7 +302,7 @@ export function liveStatusHtml({ status, completedHref, workingHref, previewHref
 		: previewHref ? `Turn completed without a final answer. <a href="${escape(previewHref)}">Back to Preview</a>`
 		: "Turn completed; its response will appear in Preview shortly.");
 	else if (status === "interrupted") parts.push("Turn interrupted.");
-	else if (status === "error") parts.push("Turn ended with an API error.");
+	else if (status === "error") parts.push("Turn ended with an error.");
 	else if (status === "incomplete") parts.push("The response stopped at the model's output limit.");
 	if (newerHref) parts.push(`A newer turn has started. <a href="${escape(newerHref)}">Follow it</a>`);
 	return parts.join(" ");
@@ -311,7 +312,8 @@ export function liveStatusHtml({ status, completedHref, workingHref, previewHref
 export const liveTimeLabel = loaded => loaded ? "Loaded" : "Updated";
 
 export function buildLivePage(snapshot, { label = "", appearanceStyle = "", statusHtml = "" } = {}) {
-	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, true, snapshot.events[i + 1])).join("\n");
+	const fromClaude = snapshot.sourceAgent === "claude";
+	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, fromClaude, snapshot.events[i + 1])).join("\n");
 	const omitted = snapshot.omitted;
 	return `${pageHead("Working · live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Working · live</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}<span data-live-time-label>${liveTimeLabel(snapshot.loaded)}</span> <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="notices live-state" data-live-status role="status">${statusHtml}</p><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;
 }
