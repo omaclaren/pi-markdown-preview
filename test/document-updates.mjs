@@ -98,6 +98,14 @@ assert.match(pandocDetails("<details>\n<summary>Literal \\</summary>\n\nB\n</det
 assert.doesNotMatch(pandocDetails("<details><summary>Literal \\</summary>\n\nB\n</details>\n"), /<details class/);
 // Character references follow Pandoc's own (case-sensitive) table; unknown names stay literal.
 assert.match(pandocDetails("<details><summary>A &Lt; &Gt; &Larr; &alpha; &ne; &Amp; &constructor; Z</summary>\n\nB\n\n</details>\n"), /<summary>A ≪ ≫ ↞ α ≠ &amp;Amp; &amp;constructor; Z<\/summary>/);
+// Non-ASCII summaries survive intact (no locale-sensitive byte trimming), and lowercasing never shifts positions.
+for (const [summary, shown] of [["你", "你"], ["x ≠", "x ≠"], ["x&nbsp;", "x\u00a0"], ["İstanbul", "İstanbul"]]) {
+	for (const opening of [`<details><summary>${summary}</summary>`, `<details>\n<summary>${summary}</summary>`]) {
+		assert.match(pandocDetails(`${opening}\nBODY\n</details>\n`), new RegExp(`<summary>${shown}</summary>`), opening);
+	}
+}
+// A tag name runs to whitespace, "/" or ">", as browsers read it: <details.x> is not a details tag.
+assert.match(pandocDetails("<details><summary>Outer</summary>\n\n<details.panel-example>literal</details.panel-example>\n\nTAIL\n</details>\n"), /<p>TAIL<\/p>\s*<\/details>/);
 // The summary is text: references decode, backticks stay literal.
 assert.match(pandocDetails("<details><summary>Fish &amp; chips &#x1F41F; &copy; ``` x</summary>\n\nB\n\n</details>\n"), /<summary>Fish &amp; chips 🐟 © ``` x<\/summary>/);
 // Display math keeps its source; a marker that crosses a container boundary shows the literal tags; a forged marker is text.
@@ -188,6 +196,14 @@ try {
 	assert.equal(await page.$$eval('#preview-root [href]', links => links.filter(link => /^\s*javascript:/i.test(link.getAttribute('href'))).length), 0, 'no javascript: link from math');
 	await page.click('#preview-root mjx-container').catch(() => {});
 	assert.equal(await page.evaluate(() => Boolean(window.bad)), false);
+	// A scheme split by a newline or tab, which browsers drop before reading it, is caught too, from Markdown or LaTeX input.
+	const scriptLinks = () => page.$$eval('#preview-root [href]', links => links.filter(link => /^[\u0000-\u0020]*javascript:/i.test(link.getAttribute('href').replace(/[\t\n\r]/g, ''))).length);
+	for (const [source, latex] of [['$\\href{java\nscript:window.bad=true}{T}$', false], ['$\\href{java\tscript:window.bad=true}{T}$', false], ['$\\href{java\nscript:window.bad=true}{T}$', true]]) {
+		await page.setContent((await preview.renderPreviewHtmlDocument(source, style, scratch, latex)).html);
+		await ready();
+		await page.waitForSelector('#preview-root mjx-container', { timeout: 20000 });
+		assert.equal(await scriptLinks(), 0, JSON.stringify(source));
+	}
 	// Static HTML carries a script policy: the page's own scripts (Mermaid) still run; an injected inline handler does not.
 	const mermaid = '```mermaid\nflowchart LR\n  A --> B\n```';
 	const guarded = preview.withStaticScriptPolicy((await html(mermaid)).replace(/<body[^>]*>/, body => `${body}<button id="injected" onclick="window.bad = true">x</button>`));

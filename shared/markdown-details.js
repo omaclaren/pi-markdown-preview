@@ -73,9 +73,11 @@ export function normalizeDetailsBlocks(markdown, nonce = DETAILS_MARKER_NONCE) {
 	const details = tags.filter(tag => tag.name === "details" && !inMath(tag.start));
 	// A summary needs both tags read as tags: not code-quoted, escaped or in math.
 	const summaryTags = new Set(tags.filter(tag => tag.name === "summary" && !inMath(tag.start)).map(tag => `${tag.close ? "/" : ""}${tag.start}`));
+	// Positions come from the original text: lowercasing can change its length (İ).
 	const summaryTagsAt = (lineStart, text) => {
-		const lower = text.toLowerCase();
-		return summaryTags.has(`${lineStart + lower.indexOf("<summary>")}`) && summaryTags.has(`/${lineStart + lower.lastIndexOf("</summary>")}`);
+		const opening = /<summary>/i.exec(text);
+		const closings = [...text.matchAll(/<\/summary>/gi)];
+		return Boolean(opening && closings.length) && summaryTags.has(`${lineStart + opening.index}`) && summaryTags.has(`/${lineStart + closings.at(-1).index}`);
 	};
 
 	const lines = source.split(/(?<=\n)/);

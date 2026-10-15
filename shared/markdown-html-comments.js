@@ -74,7 +74,9 @@ export function readHtmlTag(source, start) {
 	if (!/[a-zA-Z]/.test(source[index] ?? "")) return undefined;
 	const nameStart = index;
 	index += 1;
-	while (/[a-zA-Z0-9:-]/.test(source[index] ?? "")) index += 1;
+	// As the HTML tokenizer reads it: up to whitespace, "/" or ">" (so `details.x` is
+	// its own name, not `details` with an attribute).
+	while (index < source.length && !isHtmlWhitespace(source[index]) && source[index] !== "/" && source[index] !== ">") index += 1;
 	const tagName = source.slice(nameStart, index).toLowerCase();
 
 	if (closing) {

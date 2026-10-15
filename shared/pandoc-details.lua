@@ -15,7 +15,8 @@ end
 local function inline_html(inlines)
   if pandoc.write then
     local html = pandoc.write(pandoc.Pandoc({ pandoc.Plain(inlines) }), "html")
-    return (html:gsub("%s+$", ""))
+    -- ASCII only: under a UTF-8 locale %s can match continuation bytes (0xA0).
+    return (html:gsub("[ \t\r\n]+$", ""))
   end
   return escape_html(pandoc.utils.stringify(inlines))
 end
@@ -23,7 +24,7 @@ end
 -- Plain text as inlines: words and spaces.
 local function text_inlines(text)
   local inlines = {}
-  for space, word in text:gmatch("(%s*)(%S+)") do
+  for space, word in text:gmatch("([ \t\r\n]*)([^ \t\r\n]+)") do
     if space ~= "" and #inlines > 0 then inlines[#inlines + 1] = pandoc.Space() end
     inlines[#inlines + 1] = pandoc.Str(word)
   end

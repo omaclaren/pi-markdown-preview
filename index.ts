@@ -4525,6 +4525,15 @@ ${codeWrapControlsScript}
       } catch (e) {
         console.error('MathJax render failed:', e);
       }
+      // ui/safe checks a link's scheme as written; browsers first drop tabs, newlines
+      // and leading control characters. Remove any link that would then use a script scheme.
+      for (const { renderTarget } of fallbackTargets) {
+        for (const element of renderTarget.querySelectorAll('[href]')) {
+          const url = (element.getAttribute('href') || '').replace(/[\\t\\n\\r]/g, '').replace(/^[\\u0000-\\u0020]+/, '');
+          const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url);
+          if (scheme && ['javascript', 'vbscript', 'livescript'].includes(scheme[1].toLowerCase())) element.removeAttribute('href');
+        }
+      }
     };
 
     let pdfJsPromise = null;
