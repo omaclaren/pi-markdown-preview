@@ -1,47 +1,46 @@
--- Collapsible blocks marked by markdown-details.js: marker paragraphs carrying a
--- per-process nonce, which arrives as the `pi-preview-details` metadata value.
--- HTML output gets <details>/<summary>; other formats (PDF via LaTeX) get the
--- summary in bold followed by the content. Raw HTML input stays disabled: only
--- these elements, generated here, are written as raw HTML. Markers are paired
--- within one list of blocks; one left unpaired (its partner landed in another
--- container) is shown as the literal tag it replaced.
+-- Collapsible blocks marked by markdown-details.js: marker code blocks (class
+-- pi-preview-details-marker) carrying a per-process nonce, which arrives as the
+-- `pi-preview-details` metadata value. HTML output gets <details>/<summary>; other
+-- formats (PDF via LaTeX) get the summary in bold followed by the content. Raw HTML
+-- input stays disabled: only these elements, generated here, are written as raw
+-- HTML. Markers are paired within one list of blocks; one left unpaired (its
+-- partner landed in another container) is shown as the literal tag it replaced.
 
 local prefix
 
-local function inline_html(inlines)
-  if pandoc.write then
-    local html = pandoc.write(pandoc.Pandoc({ pandoc.Plain(inlines) }), "html")
-    return (html:gsub("%s+$", ""))
-  end
-  local text = pandoc.utils.stringify(inlines)
-  text = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
-  return text
+local function escape_html(text)
+  return (text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"))
 end
 
--- kind ("Open", "OpenExpanded", "Summary", "Close") and id of a marker paragraph.
-local function marker(block)
-  if block.t ~= "Para" or not block.content[1] or block.content[1].t ~= "Str" then return nil end
-  local text = block.content[1].text
-  if text:sub(1, #prefix) ~= prefix then return nil end
-  return text:sub(#prefix + 1):match("^(%a+)(%d+)$")
-end
-
-local function summary_inlines(block)
+-- Plain text as inlines: words and spaces.
+local function text_inlines(text)
   local inlines = {}
-  for i = 2, #block.content do inlines[#inlines + 1] = block.content[i] end
-  while inlines[1] and (inlines[1].t == "Space" or inlines[1].t == "SoftBreak") do table.remove(inlines, 1) end
+  for space, word in text:gmatch("(%s*)(%S+)") do
+    if space ~= "" and #inlines > 0 then inlines[#inlines + 1] = pandoc.Space() end
+    inlines[#inlines + 1] = pandoc.Str(word)
+  end
   return inlines
 end
 
+-- kind ("Open", "OpenExpanded", "Summary", "Close"), id and summary text of a marker block.
+local function marker(block)
+  if block.t ~= "CodeBlock" or not block.classes:includes("pi-preview-details-marker") then return nil end
+  local text = block.text
+  if text:sub(1, #prefix) ~= prefix then return nil end
+  local kind, id, rest = text:sub(#prefix + 1):match("^(%a+)(%d+)(.*)$")
+  if not kind then return nil end
+  return kind, id, (rest:gsub("^ ", ""))
+end
+
 local function details(frame)
-  local summary = frame.summary or { pandoc.Str("Details") }
+  local summary = frame.summary or "Details"
   local out = {}
   if FORMAT:match("html") then
-    out[1] = pandoc.RawBlock("html", '<details class="pi-preview-details"' .. (frame.open and " open" or "") .. "><summary>" .. inline_html(summary) .. "</summary>")
+    out[1] = pandoc.RawBlock("html", '<details class="pi-preview-details"' .. (frame.open and " open" or "") .. "><summary>" .. escape_html(summary) .. "</summary>")
     for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
     out[#out + 1] = pandoc.RawBlock("html", "</details>")
   else
-    out[1] = pandoc.Para({ pandoc.Strong(summary) })
+    out[1] = pandoc.Para({ pandoc.Strong(text_inlines(summary)) })
     for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
   end
   return out
@@ -50,12 +49,7 @@ end
 -- What an unpaired marker stood for, as literal text.
 local function literal(frame)
   local out = { pandoc.Para({ pandoc.Str(frame.open and "<details open>" or "<details>") }) }
-  if frame.summary then
-    local inlines = { pandoc.Str("<summary>") }
-    for _, inline in ipairs(frame.summary) do inlines[#inlines + 1] = inline end
-    inlines[#inlines + 1] = pandoc.Str("</summary>")
-    out[2] = pandoc.Para(inlines)
-  end
+  if frame.summary then out[2] = pandoc.Para({ pandoc.Str("<summary>" .. frame.summary .. "</summary>") }) end
   for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
   return out
 end
@@ -76,11 +70,11 @@ process = function(blocks)
   local stack = { root }
   for _, block in ipairs(blocks) do
     local top = stack[#stack]
-    local kind, id = marker(block)
+    local kind, id, text = marker(block)
     if kind == "Open" or kind == "OpenExpanded" then
       stack[#stack + 1] = { id = id, open = kind == "OpenExpanded", blocks = {} }
     elseif kind == "Summary" and top.id == id and not top.summary and #top.blocks == 0 then
-      top.summary = summary_inlines(block)
+      top.summary = text
     elseif kind == "Close" and top.id == id then
       stack[#stack] = nil
       local parent = stack[#stack]

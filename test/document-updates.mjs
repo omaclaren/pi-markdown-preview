@@ -45,8 +45,8 @@ assert.match(pandoc(normalizeSubSupTags('<sup>1, 2</sup>'), 'html5'), /<sup>1,\s
 const collapsible = "Intro\n\n<details>\n<summary>Aliases & `more`</summary>\n\n- Pick: `-p`\n\n<details open><summary>Inner</summary>\n\nNested\n\n</details>\n\n</details>\n\nAfter";
 const nonce = "0123456789abcdef";
 const detailsMarkdown = normalizeDetailsBlocks(collapsible, nonce);
-assert.match(detailsMarkdown, /^PiPreviewDetails0123456789abcdefOpen1\n\nPiPreviewDetails0123456789abcdefSummary1 Aliases & \\`more\\`$/m);
-assert.match(detailsMarkdown, /^PiPreviewDetails0123456789abcdefOpenExpanded0\n\nPiPreviewDetails0123456789abcdefSummary0 Inner$/m);
+assert.ok(detailsMarkdown.includes("```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefOpen1\n```\n\n\n```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefSummary1 Aliases & `more`\n```"), detailsMarkdown);
+assert.ok(detailsMarkdown.includes("PiPreviewDetails0123456789abcdefOpenExpanded0\n```\n\n\n```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefSummary0 Inner\n```"));
 const detailsLiterals = [
 	"```html\n<details>\n<summary>S</summary>\n</details>\n```", "    <details>\n    </details>\n", "> <details>\n> </details>",
 	"<!-- <details>\n</details> -->", "<details onclick='alert(1)'>\nBody\n</details>", "<details class=\"x\">\nBody\n</details>",
@@ -76,6 +76,19 @@ for (const inner of ['<details class="example">', "  <details>"]) {
 	assert.match(html, /<p>TAIL<\/p>\s*<\/details>/, inner);
 	assert.doesNotMatch(html, /TAIL &lt;\/details&gt;/, inner);
 }
+// Rejected tags in every form keep their own partner: quoted >, multiline, a close inside an attribute, math in an attribute, a multiline close.
+for (const inner of ['<details title="a > b">', '<details\n class="example">', '<details title="</details>">', '<details title="$x$">']) {
+	const html = pandocDetails(`<details>\n<summary>Outer</summary>\n\n${inner}\nINNER\n</details>\n\nTAIL\n</details>\n`);
+	assert.match(html, /<p>TAIL<\/p>\s*<\/details>/, inner);
+}
+assert.match(pandocDetails('<details>\n<summary>Outer</summary>\n\n<details class="x">\nINNER\n</details\n>\n\nTAIL\n</details>\n'), /<details class="pi-preview-details"><summary>Outer<\/summary>[\s\S]*<p>TAIL<\/p>\s*<\/details>/);
+// Markers can't be reinterpreted as Markdown structure (tight definition lists), in HTML or PDF output.
+for (const tight of ["<details><summary>S</summary>\n: BODY\n</details>\n", "<details>\n: BODY\n</details>\n", "<details><summary>S</summary>\nBODY\n</details>\n: AFTER\n", "<details><summary>S</summary>\n:\tBODY\n</details>\n"]) {
+	for (const format of ["html5", "latex"]) assert.doesNotMatch(pandocDetails(tight, format), /PiPreviewDetails|0123456789abcdef/, `${format}: ${tight}`);
+	assert.match(pandocDetails(tight), /<details class="pi-preview-details"><summary>(?:S|Details)<\/summary>/, tight);
+}
+// The summary is text: references decode, backticks stay literal.
+assert.match(pandocDetails("<details><summary>Fish &amp; chips &#x1F41F; &copy; ``` x</summary>\n\nB\n\n</details>\n"), /<summary>Fish &amp; chips 🐟 © ``` x<\/summary>/);
 // Display math keeps its source; a marker that crosses a container boundary shows the literal tags; a forged marker is text.
 assert.match(pandocDetails("$$\n<details>\nx+y\n</details>\n$$\n"), /<span class="math display">/);
 assert.match(pandocDetails("::: note\n<details>\n<summary>Crossing</summary>\n\nBody\n:::\n\n</details>\n"), /<p>&lt;details&gt;<\/p>\s*<p>&lt;summary&gt;Crossing&lt;\/summary&gt;<\/p>/);
