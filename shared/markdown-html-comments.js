@@ -223,15 +223,18 @@ function collectMarkdownHtmlCommentRanges(source) {
 	return commentRanges;
 }
 
-/** Literal contexts for narrow inline-markup compatibility, not a raw-HTML allowlist. */
-export function collectMarkdownLiteralRanges(source) {
+/**
+ * Literal contexts for narrow markup compatibility, not a raw-HTML allowlist.
+ * `interpret` names the exact tags the calling compatibility pass may rewrite
+ * (bare sup/sub by default); every other tag stays literal.
+ */
+export function collectMarkdownLiteralRanges(source, interpret = /^<\/?(?:sup|sub)>$/i) {
 	const frontMatter = splitValidYamlFrontMatter(source)?.frontMatter;
 	return mergeRanges([
 		...collectProtectedMarkdownRanges(source),
 		...collectProtectedMarkdownRanges(maskHtmlTags(source)),
-		// Never rewrite markup inside another tag's attributes. Bare sup/sub
-		// delimiters are the only tags the compatibility pass may interpret.
-		...collectHtmlTags(source).filter(({ start, end }) => !/^<\/?(?:sup|sub)>$/i.test(source.slice(start, end))),
+		// Never rewrite markup inside another tag's attributes.
+		...collectHtmlTags(source).filter(({ start, end }) => !interpret.test(source.slice(start, end))),
 		...collectMarkdownHtmlCommentRanges(source),
 		...(frontMatter ? [{ start: 0, end: frontMatter.length }] : []),
 	]);

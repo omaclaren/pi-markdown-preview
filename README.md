@@ -108,7 +108,7 @@ These actions run on the machine hosting the preview, and opening a file in its 
 
 ### Figures, cross-references and Mermaid icons
 
-Local images and PDF figures resolve relative to the previewed file or, for responses, to Pi's working directory. Figure cross-references in Quarto syntax (`{#fig-elephant}` with `@fig-elephant`) or pandoc-crossref syntax (`{#fig:elephant}` with `@fig:elephant`) produce numbered captions and clickable **Figure N** references, for standalone captioned images and single references. No Quarto code is run; use Quarto itself for subfigures, filters or execution. `<sup>`/`<sub>` tags and Pandoc's `^1^` and `~2~` work, and HTML comments in Markdown are hidden.
+Local images and PDF figures resolve relative to the previewed file or, for responses, to Pi's working directory. Figure cross-references in Quarto syntax (`{#fig-elephant}` with `@fig-elephant`) or pandoc-crossref syntax (`{#fig:elephant}` with `@fig:elephant`) produce numbered captions and clickable **Figure N** references, for standalone captioned images and single references. No Quarto code is run; use Quarto itself for subfigures, filters or execution. `<sup>`/`<sub>` tags and Pandoc's `^1^` and `~2~` work, and HTML comments in Markdown are hidden. A `<details>` block with a `<summary>` collapses in the browser, as on GitHub, and is shown expanded in terminal images and PDF.
 
 ### Mermaid icons
 

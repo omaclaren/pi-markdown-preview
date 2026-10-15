@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import ts from "typescript";
 import { normalizeSubSupTags } from "../shared/markdown-sub-sup.js";
+import { normalizeDetailsBlocks } from "../shared/markdown-details.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 import { openWatchControls } from "./watch-controls.mjs";
 
@@ -39,6 +40,33 @@ assert.match(latex, /Li\\textsuperscript\{1\}/);
 assert.match(latex, /Maclaren\\textsuperscript\{1,2\}/);
 assert.match(latex, /H\\textsubscript\{2\}O/);
 assert.match(pandoc(normalizeSubSupTags('<sup>1, 2</sup>'), 'html5'), /<sup>1,\s2<\/sup>/);
+
+// Collapsible blocks: whole-line, paired, outside literal contexts; summary is text.
+const collapsible = "Intro\n\n<details>\n<summary>Aliases & `more`</summary>\n\n- Pick: `-p`\n\n<details open><summary>Inner</summary>\n\nNested\n\n</details>\n\n</details>\n\nAfter";
+const detailsMarkdown = normalizeDetailsBlocks(collapsible);
+assert.match(detailsMarkdown, /^::: \{\.pi-preview-details\}\n::: \{\.pi-preview-summary\}\nAliases & \\`more\\`\n:::$/m);
+assert.match(detailsMarkdown, /^::: \{\.pi-preview-details data-open="true"\}\n::: \{\.pi-preview-summary\}\nInner\n:::$/m);
+const detailsLiterals = [
+	"```html\n<details>\n<summary>S</summary>\n</details>\n```", "    <details>\n    </details>\n", "> <details>\n> </details>",
+	"<!-- <details>\n</details> -->", "<details onclick='alert(1)'>\nBody\n</details>", "<details class=\"x\">\nBody\n</details>",
+	"<details>\nNever closed", "Body\n</details>", "  <details>\n  </details>", "Text <details>inline</details> text",
+	'---\ntitle: "<details>"\n---\n',
+];
+for (const literal of detailsLiterals) assert.equal(normalizeDetailsBlocks(literal), literal, "Preserve literal: " + literal);
+const detailsFilter = resolve("shared/pandoc-details.lua");
+const pandocDetails = format => {
+	const result = spawnSync(process.env.PANDOC_PATH || "pandoc", ["-f", "markdown+tex_math_dollars-raw_html-raw_attribute", "-t", format, "--wrap=none", `--lua-filter=${detailsFilter}`], { input: detailsMarkdown, encoding: "utf8" });
+	assert.equal(result.status, 0, result.stderr);
+	return result.stdout;
+};
+const detailsHtml = pandocDetails("html5");
+assert.match(detailsHtml, /<details class="pi-preview-details"><summary>Aliases &amp; `more`<\/summary>/);
+assert.match(detailsHtml, /<details class="pi-preview-details" open><summary>Inner<\/summary>\s*<p>Nested<\/p>\s*<\/details>\s*<\/details>/);
+assert.doesNotMatch(detailsHtml, /&lt;\/?(?:details|summary)/);
+const detailsLatex = pandocDetails("latex");
+assert.match(detailsLatex, /\\textbf\{Aliases \\& `more`\}/);
+assert.match(detailsLatex, /\\textbf\{Inner\}\s+Nested/);
+assert.doesNotMatch(detailsLatex, /details|summary/i);
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-markdown-preview-document-updates-"));
 const modulePath = resolve(`.pi-markdown-preview-document-updates-${process.pid}.mjs`);
@@ -83,6 +111,18 @@ try {
 	await page.setContent(await html(punctuated));
 	await ready();
 	assert.equal(await page.$eval('sup', e => e.textContent.replace(/\u00a0/g, ' ')), '* _ ^ ~ $ [1] & ²');
+	// A collapsible block renders closed in the browser, opens on click, and keeps code literal.
+	await page.setContent(await html(collapsible + '\n\n`<details>`\n\n<details onclick="window.bad = true">\nUnsafe\n</details>'));
+	await ready();
+	assert.deepEqual(await page.$$eval('#preview-root details.pi-preview-details', elements => elements.map(e => [e.querySelector(':scope > summary').textContent, e.open])), [['Aliases & `more`', false], ['Inner', true]]);
+	assert.equal(await page.$eval('#preview-root details.pi-preview-details li', e => e.checkVisibility()), false, 'closed by default');
+	await page.click('#preview-root details.pi-preview-details > summary');
+	assert.equal(await page.$eval('#preview-root details.pi-preview-details li', e => e.checkVisibility()), true, 'the summary toggles it');
+	assert.match(await page.$eval('#preview-root', e => e.textContent), /<details onclick=.window\.bad = true.>/, 'attributed tags stay literal text (quotes may be curled)');
+	assert.equal(await page.evaluate(() => Boolean(window.bad)), false);
+	// A static image can't be clicked: hidden content is rendered expanded.
+	const tall = '<details>\n<summary>Long</summary>\n\n' + Array.from({ length: 120 }, (_, i) => `Line ${i} of the collapsed content.`).join('\n\n') + '\n\n</details>';
+	assert.ok((await preview.renderPreview(tall, style, undefined, scratch, true)).pages.length > 1, 'collapsed content is expanded in terminal images');
 	const png = await preview.renderPreview(affiliation, style, undefined, scratch, true);
 	assert.equal(Buffer.from(png.pages[0].base64Png, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
 

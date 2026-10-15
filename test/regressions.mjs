@@ -234,7 +234,9 @@ assert.match(
 );
 assert.match(src, /const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath\(new URL\("\.\/shared\/pandoc-figure-crossrefs\.lua", import\.meta\.url\)\);/);
 assert.equal((src.match(/--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}/g) ?? []).length, 3, "HTML and both Markdown-to-PDF paths should use the trusted lightweight figure-reference filter.");
-assert.match(src, /if \(!isLatex\) args\.push\(`--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}`\);/, "Direct LaTeX input must not pass through the Markdown figure-reference filter.");
+assert.match(src, /if \(!isLatex\) args\.push\(`--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}`, `--lua-filter=\$\{PANDOC_DETAILS_FILTER_PATH\}`\);/, "Direct LaTeX input must not pass through the Markdown figure-reference or details filters.");
+assert.match(src, /const PANDOC_DETAILS_FILTER_PATH = fileURLToPath\(new URL\("\.\/shared\/pandoc-details\.lua", import\.meta\.url\)\);/);
+assert.equal((src.match(/--lua-filter=\$\{PANDOC_DETAILS_FILTER_PATH\}/g) ?? []).length, 3, "HTML and both Markdown-to-PDF paths should use the details filter.");
 assert.match(
 	src,
 	/markdown\+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header\+tex_math_dollars\+autolink_bare_uris\+superscript\+subscript-raw_html-raw_attribute/,

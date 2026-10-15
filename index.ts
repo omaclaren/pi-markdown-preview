@@ -38,6 +38,7 @@ import { createLiveTurnProjector, turnDetailsFromRecords } from "./shared/turn-d
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 import { isHtmlPagePath } from "./shared/html-page-preview.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
+import { normalizeDetailsBlocks } from "./shared/markdown-details.js";
 import { readLinkedDocument } from "./shared/read-linked-document.js";
 
 // Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
@@ -88,6 +89,7 @@ const ANNOTATION_HELPERS_SOURCE = readFileSync(new URL("./client/annotation-help
 const PDF_FIGURE_HELPERS_SOURCE = readFileSync(new URL("./client/pdf-figure-renderer.js", import.meta.url), "utf-8");
 const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-controls.js", import.meta.url), "utf-8");
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
+const PANDOC_DETAILS_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-details.lua", import.meta.url));
 const RENDER_VERSION = "v35";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
@@ -2142,7 +2144,7 @@ function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean): {
 	annotationPlaceholders: PreviewAnnotationPlaceholder[];
 } {
 	const markdownWithoutHtmlComments = isLatex ? markdown : stripMarkdownHtmlCommentsPreservingYamlFrontMatter(markdown);
-	const normalizedMarkdown = isLatex ? markdownWithoutHtmlComments : normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments))));
+	const normalizedMarkdown = isLatex ? markdownWithoutHtmlComments : normalizeDetailsBlocks(normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments)))));
 	if (isLatex || !hasMarkdownAnnotationMarkers(normalizedMarkdown)) {
 		return { normalizedMarkdown, pandocMarkdown: normalizedMarkdown, annotationPlaceholders: [] };
 	}
@@ -2215,6 +2217,8 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 			}
 			await browserPage!.goto(pathToFileURL(tempHtmlPath).href, { waitUntil: "domcontentloaded" });
 			await waitForPageRenderReady(browserPage!);
+			// A static image can't be clicked: show collapsible blocks expanded.
+			await browserPage!.evaluate(() => { for (const details of document.querySelectorAll("details")) details.open = true; });
 			await browserPage!.waitForFunction(
 				"window.__mermaidDone === true",
 				{ timeout: 15000 },
@@ -2737,7 +2741,7 @@ async function renderMarkdownToHtmlWithPandoc(
 	const pandocInput = isLatex ? markdown : normalizeMarkdownFencedBlocks(markdown);
 	const inputFormat = isLatex ? "latex" : "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris-raw_html-raw_attribute";
 	const args = ["-f", inputFormat, "-t", "html5", "--mathml", "--wrap=none"];
-	if (!isLatex) args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
+	if (!isLatex) args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -2913,7 +2917,7 @@ async function renderMarkdownToPdf(markdown: string, outputPath: string, resourc
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
-	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -3123,7 +3127,7 @@ async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
-	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`);
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -3361,7 +3365,7 @@ async function renderPreviewPdfToFile(
 	const markdownWithoutHtmlComments = isLatex ? markdown : stripMarkdownHtmlCommentsPreservingYamlFrontMatter(markdown);
 	const normalizedMarkdown = isLatex
 		? markdownWithoutHtmlComments
-		: normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments))));
+		: normalizeDetailsBlocks(normalizeSubSupTags(normalizeMarkdownFencedBlocks(normalizeObsidianImages(normalizeMathDelimiters(markdownWithoutHtmlComments)))));
 	const mermaidPrepared = isLatex ? { markdown: normalizedMarkdown, found: 0, replaced: 0, failed: 0, missingCli: false } : await preprocessMermaidForPdf(normalizedMarkdown, signal);
 
 	if (mermaidPrepared.missingCli) {
@@ -3856,6 +3860,9 @@ body {
 #preview-root a { color: var(--md-link); text-decoration: none; }
 #preview-root a:hover { text-decoration: underline; }
 #preview-root a.uri, #preview-root .uri { color: var(--md-link-url); }
+#preview-root details.pi-preview-details { margin: 0 0 1em; }
+#preview-root details.pi-preview-details > summary { cursor: pointer; font-weight: 600; }
+#preview-root details.pi-preview-details[open] > summary { margin-bottom: 0.5em; }
 #preview-root blockquote {
   margin-left: 0;
   padding: 0.2em 1em;
