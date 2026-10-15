@@ -38,7 +38,7 @@ import { createLiveTurnProjector, turnDetailsFromRecords } from "./shared/turn-d
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 import { isHtmlPagePath } from "./shared/html-page-preview.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
-import { normalizeDetailsBlocks } from "./shared/markdown-details.js";
+import { DETAILS_MARKER_NONCE, normalizeDetailsBlocks } from "./shared/markdown-details.js";
 import { readLinkedDocument } from "./shared/read-linked-document.js";
 
 // Some compatible hosts support terminal images without Pi's explicit Kitty image-ID API.
@@ -2098,6 +2098,22 @@ async function collectPreviewPageLayout(page: Page): Promise<PreviewPageLayout> 
 			if (bottom > top && bottom - top <= pageHeight) protectedRanges.push({ top, bottom });
 		};
 		const isHeading = (element: Element | undefined) => Boolean(element && /^H[1-6]$/.test(element.tagName));
+		// A tall container may break between its blocks. A collapsible block (shown
+		// expanded in static renders) may hold tall containers of its own, so its
+		// tall blocks are split the same way.
+		const addNested = (container: Element, depth: number) => {
+			const selector = container.matches("ul, ol") ? ":scope > li"
+				: container.matches("table") ? "tr"
+				: container.matches("blockquote, dl, details") ? ":scope > *"
+				: undefined;
+			if (!selector) return;
+			for (const nestedBlock of container.querySelectorAll(selector)) {
+				const nestedRect = nestedBlock.getBoundingClientRect();
+				addTop(nestedRect.top);
+				protect(nestedRect.top, nestedRect.bottom);
+				if (container.matches("details") && depth < 4 && nestedRect.height > pageHeight) addNested(nestedBlock, depth + 1);
+			}
+		};
 		const children = Array.from(root.children);
 
 		children.forEach((child, index) => {
@@ -2115,17 +2131,7 @@ async function collectPreviewPageLayout(page: Page): Promise<PreviewPageLayout> 
 			}
 
 			if (rect.height <= pageHeight) return;
-			let nestedSelector: string | undefined;
-			if (child.matches("ul, ol")) nestedSelector = ":scope > li";
-			else if (child.matches("table")) nestedSelector = "tr";
-			else if (child.matches("blockquote, dl")) nestedSelector = ":scope > *";
-			if (!nestedSelector) return;
-
-			for (const nestedBlock of child.querySelectorAll(nestedSelector)) {
-				const nestedRect = nestedBlock.getBoundingClientRect();
-				addTop(nestedRect.top);
-				protect(nestedRect.top, nestedRect.bottom);
-			}
+			addNested(child, 0);
 		});
 
 		const deduplicatedRanges = new Map(
@@ -2741,7 +2747,7 @@ async function renderMarkdownToHtmlWithPandoc(
 	const pandocInput = isLatex ? markdown : normalizeMarkdownFencedBlocks(markdown);
 	const inputFormat = isLatex ? "latex" : "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris-raw_html-raw_attribute";
 	const args = ["-f", inputFormat, "-t", "html5", "--mathml", "--wrap=none"];
-	if (!isLatex) args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`);
+	if (!isLatex) args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -2917,7 +2923,7 @@ async function renderMarkdownToPdf(markdown: string, outputPath: string, resourc
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
-	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`);
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -3127,7 +3133,7 @@ async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
-	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`);
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {

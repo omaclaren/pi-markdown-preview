@@ -1,16 +1,8 @@
 import { collectMarkdownLiteralRanges } from "./markdown-html-comments.js";
 import { readInlineMathTokenAt } from "./annotation-scanner.js";
 
-/**
- * Translate bare, paired HTML sup/sub tags containing plain inline text into
- * Pandoc's native notation. Keep raw HTML disabled and literal/code contexts
- * byte-for-byte intact. Attributes and nested markup are not supported.
- */
-export function normalizeSubSupTags(markdown) {
-	const source = String(markdown ?? "");
-	if (!/<(?:sup|sub)>/i.test(source)) return source;
-	const literalRanges = collectMarkdownLiteralRanges(source);
-	const overlaps = (ranges, start, end) => ranges.some(range => range.start < end && range.end > start);
+/** Inline and display math source ($…$, $$…$$, \(…\), \[…\]) outside the given literal ranges. */
+export function collectMarkdownMathRanges(source, literalRanges) {
 	const mathRanges = [];
 	const mathStarts = /[$\\]/g;
 	let start;
@@ -31,7 +23,20 @@ export function normalizeSubSupTags(markdown) {
 			mathStarts.lastIndex = token.end;
 		}
 	}
-	const protectedRanges = [...literalRanges, ...mathRanges];
+	return mathRanges;
+}
+
+/**
+ * Translate bare, paired HTML sup/sub tags containing plain inline text into
+ * Pandoc's native notation. Keep raw HTML disabled and literal/code contexts
+ * byte-for-byte intact. Attributes and nested markup are not supported.
+ */
+export function normalizeSubSupTags(markdown) {
+	const source = String(markdown ?? "");
+	if (!/<(?:sup|sub)>/i.test(source)) return source;
+	const literalRanges = collectMarkdownLiteralRanges(source);
+	const overlaps = (ranges, start, end) => ranges.some(range => range.start < end && range.end > start);
+	const protectedRanges = [...literalRanges, ...collectMarkdownMathRanges(source, literalRanges)];
 	const stack = [];
 	const tags = /<(\/?)(sup|sub)>/gi;
 	let tag;

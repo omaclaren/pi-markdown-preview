@@ -43,35 +43,48 @@ assert.match(pandoc(normalizeSubSupTags('<sup>1, 2</sup>'), 'html5'), /<sup>1,\s
 
 // Collapsible blocks: whole-line, paired, outside literal contexts; summary is text.
 const collapsible = "Intro\n\n<details>\n<summary>Aliases & `more`</summary>\n\n- Pick: `-p`\n\n<details open><summary>Inner</summary>\n\nNested\n\n</details>\n\n</details>\n\nAfter";
-const detailsMarkdown = normalizeDetailsBlocks(collapsible);
-assert.match(detailsMarkdown, /^::: \{\.pi-preview-details\}\n::: \{\.pi-preview-summary\}\nAliases & \\`more\\`\n:::$/m);
-assert.match(detailsMarkdown, /^::: \{\.pi-preview-details data-open="true"\}\n::: \{\.pi-preview-summary\}\nInner\n:::$/m);
+const nonce = "0123456789abcdef";
+const detailsMarkdown = normalizeDetailsBlocks(collapsible, nonce);
+assert.match(detailsMarkdown, /^PiPreviewDetails0123456789abcdefOpen1\n\nPiPreviewDetails0123456789abcdefSummary1 Aliases & \\`more\\`$/m);
+assert.match(detailsMarkdown, /^PiPreviewDetails0123456789abcdefOpenExpanded0\n\nPiPreviewDetails0123456789abcdefSummary0 Inner$/m);
 const detailsLiterals = [
 	"```html\n<details>\n<summary>S</summary>\n</details>\n```", "    <details>\n    </details>\n", "> <details>\n> </details>",
 	"<!-- <details>\n</details> -->", "<details onclick='alert(1)'>\nBody\n</details>", "<details class=\"x\">\nBody\n</details>",
 	"<details>\nNever closed", "Body\n</details>", "  <details>\n  </details>", "Text <details>inline</details> text",
-	'---\ntitle: "<details>"\n---\n',
+	'---\ntitle: "<details>"\n---\n', "$$\n<details>\nx+y\n</details>\n$$\n", "$<details>$ and $</details>$",
 ];
-for (const literal of detailsLiterals) assert.equal(normalizeDetailsBlocks(literal), literal, "Preserve literal: " + literal);
+for (const literal of detailsLiterals) assert.equal(normalizeDetailsBlocks(literal, nonce), literal, "Preserve literal: " + literal);
 const detailsFilter = resolve("shared/pandoc-details.lua");
-const pandocDetails = format => {
-	const result = spawnSync(process.env.PANDOC_PATH || "pandoc", ["-f", "markdown+tex_math_dollars-raw_html-raw_attribute", "-t", format, "--wrap=none", `--lua-filter=${detailsFilter}`], { input: detailsMarkdown, encoding: "utf8" });
+const pandocDetails = (markdown, format = "html5") => {
+	const result = spawnSync(process.env.PANDOC_PATH || "pandoc", ["-f", "markdown+tex_math_dollars-raw_html-raw_attribute", "-t", format, "--wrap=none", `--lua-filter=${detailsFilter}`, `--metadata=pi-preview-details:${nonce}`], { input: normalizeDetailsBlocks(markdown, nonce), encoding: "utf8" });
 	assert.equal(result.status, 0, result.stderr);
 	return result.stdout;
 };
-const detailsHtml = pandocDetails("html5");
+const detailsHtml = pandocDetails(collapsible);
 assert.match(detailsHtml, /<details class="pi-preview-details"><summary>Aliases &amp; `more`<\/summary>/);
 assert.match(detailsHtml, /<details class="pi-preview-details" open><summary>Inner<\/summary>\s*<p>Nested<\/p>\s*<\/details>\s*<\/details>/);
-assert.doesNotMatch(detailsHtml, /&lt;\/?(?:details|summary)/);
-const detailsLatex = pandocDetails("latex");
+assert.doesNotMatch(detailsHtml, /&lt;\/?(?:details|summary)|PiPreviewDetails/);
+const detailsLatex = pandocDetails(collapsible, "latex");
 assert.match(detailsLatex, /\\textbf\{Aliases \\& `more`\}/);
 assert.match(detailsLatex, /\\textbf\{Inner\}\s+Nested/);
-assert.doesNotMatch(detailsLatex, /details|summary/i);
+assert.doesNotMatch(detailsLatex, /details|summary|PiPreviewDetails/i);
+// Literal fence lines in the content cannot end the block early.
+for (const fence of [":::", "::::::::"]) assert.match(pandocDetails(`<details>\n<summary>S</summary>\n\nBEFORE\n\n${fence}\n\nTAIL\n\n</details>\n`), new RegExp(`<p>BEFORE</p>\\s*<p>${fence}</p>\\s*<p>TAIL</p>\\s*</details>`));
+// A rejected inner tag keeps its own partner; the outer block ends at its own close.
+for (const inner of ['<details class="example">', "  <details>"]) {
+	const html = pandocDetails(`<details>\n<summary>Outer</summary>\n\n${inner}\nNESTED\n</details>\n\nTAIL\n</details>\n`);
+	assert.match(html, /<p>TAIL<\/p>\s*<\/details>/, inner);
+	assert.doesNotMatch(html, /TAIL &lt;\/details&gt;/, inner);
+}
+// Display math keeps its source; a marker that crosses a container boundary shows the literal tags; a forged marker is text.
+assert.match(pandocDetails("$$\n<details>\nx+y\n</details>\n$$\n"), /<span class="math display">/);
+assert.match(pandocDetails("::: note\n<details>\n<summary>Crossing</summary>\n\nBody\n:::\n\n</details>\n"), /<p>&lt;details&gt;<\/p>\s*<p>&lt;summary&gt;Crossing&lt;\/summary&gt;<\/p>/);
+assert.match(pandocDetails("PiPreviewDetailsffffffffffffffffOpen0\n"), /<p>PiPreviewDetailsffffffffffffffffOpen0<\/p>/);
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-markdown-preview-document-updates-"));
 const modulePath = resolve(`.pi-markdown-preview-document-updates-${process.pid}.mjs`);
 const source = readFileSync(resolve("index.ts"), "utf8");
-const compiled = ts.transpileModule(source + '\nexport { getPreviewStyle, prepareBrowserPreviewMarkdown, renderPreviewHtmlDocument, renderPreview };', {
+const compiled = ts.transpileModule(source + '\nexport { getPreviewStyle, prepareBrowserPreviewMarkdown, renderPreviewHtmlDocument, renderPreview, collectPreviewPageLayout, buildBlockAwarePageClips, PAGE_HEIGHT_PX };', {
 	compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -121,8 +134,18 @@ try {
 	assert.match(await page.$eval('#preview-root', e => e.textContent), /<details onclick=.window\.bad = true.>/, 'attributed tags stay literal text (quotes may be curled)');
 	assert.equal(await page.evaluate(() => Boolean(window.bad)), false);
 	// A static image can't be clicked: hidden content is rendered expanded.
-	const tall = '<details>\n<summary>Long</summary>\n\n' + Array.from({ length: 120 }, (_, i) => `Line ${i} of the collapsed content.`).join('\n\n') + '\n\n</details>';
+	const tall = '<details>\n<summary>Long</summary>\n\n' + Array.from({ length: 120 }, (_, i) => `Line ${String(i).padStart(3, '0')} of the collapsed content.`).join('\n\n') + '\n\n</details>';
 	assert.ok((await preview.renderPreview(tall, style, undefined, scratch, true)).pages.length > 1, 'collapsed content is expanded in terminal images');
+	// Page breaks fall between the expanded block's paragraphs, never through one.
+	await page.setContent(await html(tall));
+	await ready();
+	await page.evaluate(() => { for (const details of document.querySelectorAll('details')) details.open = true; });
+	const tallHeight = await page.$eval('#preview-root', e => Math.ceil(e.getBoundingClientRect().height + 40));
+	const layout = await preview.collectPreviewPageLayout(page);
+	const clips = preview.buildBlockAwarePageClips(tallHeight, layout.breakCandidates, layout.protectedRanges, preview.PAGE_HEIGHT_PX);
+	assert.ok(clips.length > 1);
+	const paragraphs = await page.$$eval('#preview-root details p', elements => elements.map(e => { const r = e.getBoundingClientRect(); return [r.top, r.bottom]; }));
+	for (const clip of clips.slice(1)) assert.equal(paragraphs.some(([top, bottom]) => top < clip.y && bottom > clip.y), false, `page break at ${clip.y} cuts a paragraph`);
 	const png = await preview.renderPreview(affiliation, style, undefined, scratch, true);
 	assert.equal(Buffer.from(png.pages[0].base64Png, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
 

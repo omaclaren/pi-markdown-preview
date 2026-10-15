@@ -234,7 +234,8 @@ assert.match(
 );
 assert.match(src, /const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath\(new URL\("\.\/shared\/pandoc-figure-crossrefs\.lua", import\.meta\.url\)\);/);
 assert.equal((src.match(/--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}/g) ?? []).length, 3, "HTML and both Markdown-to-PDF paths should use the trusted lightweight figure-reference filter.");
-assert.match(src, /if \(!isLatex\) args\.push\(`--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}`, `--lua-filter=\$\{PANDOC_DETAILS_FILTER_PATH\}`\);/, "Direct LaTeX input must not pass through the Markdown figure-reference or details filters.");
+assert.match(src, /if \(!isLatex\) args\.push\(`--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}`, `--lua-filter=\$\{PANDOC_DETAILS_FILTER_PATH\}`, `--metadata=pi-preview-details:\$\{DETAILS_MARKER_NONCE\}`\);/, "Direct LaTeX input must not pass through the Markdown figure-reference or details filters.");
+assert.equal((src.match(/--metadata=pi-preview-details:\$\{DETAILS_MARKER_NONCE\}/g) ?? []).length, 3, "Each details filter gets the marker nonce.");
 assert.match(src, /const PANDOC_DETAILS_FILTER_PATH = fileURLToPath\(new URL\("\.\/shared\/pandoc-details\.lua", import\.meta\.url\)\);/);
 assert.equal((src.match(/--lua-filter=\$\{PANDOC_DETAILS_FILTER_PATH\}/g) ?? []).length, 3, "HTML and both Markdown-to-PDF paths should use the details filter.");
 assert.match(
