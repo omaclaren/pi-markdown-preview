@@ -232,7 +232,11 @@ try {
 	assert.deepEqual(await controlOpacities(touchPage), ["1", "1", "1", "1"], "Touch controls remain visible after tapping, independently of focus-visible.");
 	await touchPage.close();
 
-	const html = await readFile(outputPath, "utf8");
+	// Watch servers render the document themselves and send their own policy; the
+	// exported file's static policy and nonces belong to the file alone.
+	const exported = await readFile(outputPath, "utf8");
+	assert.match(exported, /<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-/, "exported HTML carries the static script policy");
+	const html = exported.replace(/\n<meta http-equiv="Content-Security-Policy"[^>]*>/, "").replace(/ nonce="[^"]*"/g, "");
 	await assertWatchControls({ browser, html, resourceRoot: scratch, buildHtml: fragment => preview.buildBrowserHtmlFromPandocFragment(fragment, preview.getPreviewStyle()) });
 	const server = await createBrowserWatchServer(html, scratch, { sourceLabel: "test/code-wrapping.md — " + "long source label ".repeat(8) });
 	servers.push(server);

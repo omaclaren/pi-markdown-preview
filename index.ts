@@ -90,7 +90,8 @@ const PDF_FIGURE_HELPERS_SOURCE = readFileSync(new URL("./client/pdf-figure-rend
 const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-controls.js", import.meta.url), "utf-8");
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
 const PANDOC_DETAILS_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-details.lua", import.meta.url));
-const RENDER_VERSION = "v35";
+const PANDOC_SAFE_HTML_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-safe-html.lua", import.meta.url));
+const RENDER_VERSION = "v36";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
 const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
@@ -2219,7 +2220,7 @@ async function renderPreview(markdown: string, style: PreviewStyle, signal?: Abo
 			});
 			if (!tempHtmlPath) {
 				tempHtmlPath = join(CACHE_DIR, `_render_tmp_${Date.now()}.html`);
-				await writeFile(tempHtmlPath, html, "utf-8");
+				await writeFile(tempHtmlPath, withStaticScriptPolicy(html), "utf-8");
 			}
 			await browserPage!.goto(pathToFileURL(tempHtmlPath).href, { waitUntil: "domcontentloaded" });
 			await waitForPageRenderReady(browserPage!);
@@ -2748,6 +2749,8 @@ async function renderMarkdownToHtmlWithPandoc(
 	const inputFormat = isLatex ? "latex" : "markdown+lists_without_preceding_blankline-blank_before_blockquote-blank_before_header+tex_math_dollars+autolink_bare_uris-raw_html-raw_attribute";
 	const args = ["-f", inputFormat, "-t", "html5", "--mathml", "--wrap=none"];
 	if (!isLatex) args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`);
+	// Last, for every input (LaTeX too): no event-handler attributes or script URLs.
+	args.push(`--lua-filter=${PANDOC_SAFE_HTML_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -2923,7 +2926,7 @@ async function renderMarkdownToPdf(markdown: string, outputPath: string, resourc
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
-	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`);
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`, `--lua-filter=${PANDOC_SAFE_HTML_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -3133,7 +3136,7 @@ async function renderMarkdownToPdfViaGeneratedLatex(markdown: string, outputPath
 		"-V", "linkcolor=blue",
 		"--include-in-header", preamblePath,
 	];
-	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`);
+	args.push(`--lua-filter=${PANDOC_FIGURE_CROSSREF_FILTER_PATH}`, `--lua-filter=${PANDOC_DETAILS_FILTER_PATH}`, `--metadata=pi-preview-details:${DETAILS_MARKER_NONCE}`, `--lua-filter=${PANDOC_SAFE_HTML_FILTER_PATH}`);
 	if (resourcePath) args.push(`--resource-path=${resourcePath}`);
 
 	const result = await runPandocProcess(args, pandocInput, {
@@ -4615,6 +4618,21 @@ async function renderPreviewHtmlDocument(
 	};
 }
 
+/**
+ * Static HTML (a one-shot browser preview, an export, a terminal render) has no
+ * server to send a policy, so it carries the watch pages' script policy as a meta
+ * tag, with a nonce on the page's own scripts. Content cannot add scripts (raw HTML
+ * is disabled); an inline handler or javascript: URL that got past the filters would
+ * be refused too. Other resources (local images, PDFs, styles) are unaffected.
+ */
+function withStaticScriptPolicy(html: string): string {
+	const nonce = randomBytes(18).toString("base64url");
+	const policy = `script-src 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com`;
+	return html
+		.replace(/<script(?=[\s>])/gi, `<script nonce="${nonce}"`)
+		.replace(/<head(?=[\s>])[^>]*>/i, head => `${head}\n<meta http-equiv="Content-Security-Policy" content="${policy}">`);
+}
+
 async function renderPreviewHtmlToFile(
 	markdown: string,
 	style: PreviewStyle,
@@ -4641,7 +4659,7 @@ async function renderPreviewHtmlToFile(
 	const htmlPath = outputPath ?? join(CACHE_DIR, `${hash}.html`);
 
 	throwIfPreviewCancelled(signal);
-	await publishArtifactFiles([{ content: rendered.html, filePath: htmlPath }], signal);
+	await publishArtifactFiles([{ content: withStaticScriptPolicy(rendered.html), filePath: htmlPath }], signal);
 	return htmlPath;
 }
 

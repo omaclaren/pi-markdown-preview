@@ -236,6 +236,11 @@ assert.match(src, /const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath\(new
 assert.equal((src.match(/--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}/g) ?? []).length, 3, "HTML and both Markdown-to-PDF paths should use the trusted lightweight figure-reference filter.");
 assert.match(src, /if \(!isLatex\) args\.push\(`--lua-filter=\$\{PANDOC_FIGURE_CROSSREF_FILTER_PATH\}`, `--lua-filter=\$\{PANDOC_DETAILS_FILTER_PATH\}`, `--metadata=pi-preview-details:\$\{DETAILS_MARKER_NONCE\}`\);/, "Direct LaTeX input must not pass through the Markdown figure-reference or details filters.");
 assert.equal((src.match(/--metadata=pi-preview-details:\$\{DETAILS_MARKER_NONCE\}/g) ?? []).length, 3, "Each details filter gets the marker nonce.");
+assert.match(src, /const PANDOC_SAFE_HTML_FILTER_PATH = fileURLToPath\(new URL\("\.\/shared\/pandoc-safe-html\.lua", import\.meta\.url\)\);/);
+assert.equal((src.match(/--lua-filter=\$\{PANDOC_SAFE_HTML_FILTER_PATH\}/g) ?? []).length, 3, "Every Pandoc run ends with the safe-HTML filter.");
+assert.match(src, /\n\targs\.push\(`--lua-filter=\$\{PANDOC_SAFE_HTML_FILTER_PATH\}`\);/, "The HTML run applies the safe-HTML filter to LaTeX input too.");
+assert.match(src, /withStaticScriptPolicy\(rendered\.html\)/, "Exported and one-shot HTML carries the static script policy.");
+assert.match(src, /writeFile\(tempHtmlPath, withStaticScriptPolicy\(html\), "utf-8"\)/, "Terminal renders carry the static script policy.");
 assert.match(src, /const PANDOC_DETAILS_FILTER_PATH = fileURLToPath\(new URL\("\.\/shared\/pandoc-details\.lua", import\.meta\.url\)\);/);
 assert.equal((src.match(/--lua-filter=\$\{PANDOC_DETAILS_FILTER_PATH\}/g) ?? []).length, 3, "HTML and both Markdown-to-PDF paths should use the details filter.");
 assert.match(
@@ -297,7 +302,7 @@ assert.ok(
 	src.includes("renderPreviewPdfToFile(input.markdown, outputPath")
 		&& src.includes("}, signal);")
 		&& src.includes("renderPreviewHtmlToFile(input.markdown, style, input.resourcePath, input.isLatex, params.fontSizePx, outputPath, signal)")
-		&& src.includes("await publishArtifactFiles([{ content: rendered.html, filePath: htmlPath }], signal);")
+		&& src.includes("await publishArtifactFiles([{ content: withStaticScriptPolicy(rendered.html), filePath: htmlPath }], signal);")
 		&& src.includes("await publishArtifactFiles(paths.map((filePath, index) => ({")
 		&& src.includes("const stagingPath = getArtifactStagingPath(pdfPath);")
 		&& src.includes("throwIfPreviewCancelled(signal);\n\t\t\t\tif (params.open"),
@@ -1464,7 +1469,7 @@ async function assertBrowserWatchSymlinkResourceRoot() {
 await assertBrowserWatchServer();
 await assertBrowserWatchSymlinkResourceRoot();
 
-assert.match(src, /const RENDER_VERSION = "v35";/, "Safe sub/sup rendering should invalidate older preview caches.");
+assert.match(src, /const RENDER_VERSION = "v36";/, "Details blocks and the safe-HTML filter should invalidate older preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(src, /const PDFJS_BROWSER_VERSION = "6\.3\.289";/, "Browser PDF rendering should pin an exact PDF.js release.");
 assert.ok(

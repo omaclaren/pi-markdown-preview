@@ -84,7 +84,7 @@ assert.match(pandocDetails("PiPreviewDetailsffffffffffffffffOpen0\n"), /<p>PiPre
 const scratch = await mkdtemp(join(tmpdir(), "pi-markdown-preview-document-updates-"));
 const modulePath = resolve(`.pi-markdown-preview-document-updates-${process.pid}.mjs`);
 const source = readFileSync(resolve("index.ts"), "utf8");
-const compiled = ts.transpileModule(source + '\nexport { getPreviewStyle, prepareBrowserPreviewMarkdown, renderPreviewHtmlDocument, renderPreview, collectPreviewPageLayout, buildBlockAwarePageClips, PAGE_HEIGHT_PX };', {
+const compiled = ts.transpileModule(source + '\nexport { getPreviewStyle, prepareBrowserPreviewMarkdown, renderPreviewHtmlDocument, renderPreview, collectPreviewPageLayout, buildBlockAwarePageClips, PAGE_HEIGHT_PX, withStaticScriptPolicy };', {
 	compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -146,6 +146,39 @@ try {
 	assert.ok(clips.length > 1);
 	const paragraphs = await page.$$eval('#preview-root details p', elements => elements.map(e => { const r = e.getBoundingClientRect(); return [r.top, r.bottom]; }));
 	for (const clip of clips.slice(1)) assert.equal(paragraphs.some(([top, bottom]) => top < clip.y && bottom > clip.y), false, `page break at ${clip.y} cuts a paragraph`);
+	// Pandoc's attribute syntax cannot add event handlers or script URLs, from Markdown or LaTeX.
+	const attack = '::: {.review onclick="window.bad = true" ONMOUSEOVER="window.bad = true"}\nTRIGGER [link](#){onclick="window.bad = true"} `code`{onclick="window.bad = true"}\n:::\n\n[js](javascript:window.bad=true) ![img](javascript:window.bad=true) [ok](https://example.com)\n\n# Heading {onclick="window.bad = true"}';
+	const attackHtml = await html(attack);
+	assert.doesNotMatch(attackHtml.slice(attackHtml.indexOf('id="preview-root"')), /\son[a-z]+=|javascript:/i);
+	assert.match(attackHtml, /<a href="https:\/\/example\.com">ok<\/a>/);
+	const latexAttack = (await preview.renderPreviewHtmlDocument('\\href{javascript:window.bad=true}{latex link} \\href{https://example.com}{ok}', style, scratch, true)).html;
+	assert.doesNotMatch(latexAttack.slice(latexAttack.indexOf('id="preview-root"')), /javascript:/i);
+	await page.setContent(attackHtml);
+	await ready();
+	for (const selector of ['#preview-root .review', '#preview-root .review a', '#preview-root .review code', '#preview-root h1']) await page.click(selector).catch(() => {});
+	assert.equal(await page.evaluate(() => Boolean(window.bad)), false, 'no handler survives the filter');
+	// Static HTML carries a script policy: the page's own scripts (Mermaid) still run; an injected inline handler does not.
+	const mermaid = '```mermaid\nflowchart LR\n  A --> B\n```';
+	const guarded = preview.withStaticScriptPolicy((await html(mermaid)).replace(/<body[^>]*>/, body => `${body}<button id="injected" onclick="window.bad = true">x</button>`));
+	assert.match(guarded, /<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-[^']+' 'strict-dynamic'/);
+	assert.equal((guarded.match(/<script(?=[\s>])/g) ?? []).length, (guarded.match(/<script nonce="/g) ?? []).length, 'every script carries the nonce');
+	// Control: without the policy, the injected handler runs.
+	const unguardedFile = join(scratch, 'unguarded.html');
+	await writeFile(unguardedFile, (await html(mermaid)).replace(/<body[^>]*>/, body => `${body}<button id="injected" onclick="window.bad = true">x</button>`));
+	await page.goto(pathToFileURL(unguardedFile).href);
+	await ready();
+	await page.click('#injected');
+	assert.equal(await page.evaluate(() => Boolean(window.bad)), true, 'control: an unguarded inline handler runs');
+	// Loaded from a file, as one-shot previews, exports and terminal renders are.
+	const guardedFile = join(scratch, 'guarded.html');
+	await writeFile(guardedFile, guarded);
+	await page.goto(pathToFileURL(guardedFile).href);
+	await ready();
+	assert.deepEqual(await page.evaluate(() => window.__mermaidRenderResult), { status: 'success' }, 'Mermaid renders under the policy');
+	assert.equal(await page.$$eval('svg', svgs => svgs.length), 1);
+	await page.click('#injected');
+	assert.equal(await page.evaluate(() => Boolean(window.bad)), false, 'the policy refuses an inline handler');
+	assert.equal((await preview.renderPreview(mermaid, style, undefined, scratch, true)).pages.length, 1, 'terminal renders work under the policy');
 	const png = await preview.renderPreview(affiliation, style, undefined, scratch, true);
 	assert.equal(Buffer.from(png.pages[0].base64Png, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
 
