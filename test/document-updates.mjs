@@ -45,7 +45,7 @@ assert.match(pandoc(normalizeSubSupTags('<sup>1, 2</sup>'), 'html5'), /<sup>1,\s
 const collapsible = "Intro\n\n<details>\n<summary>Aliases & `more`</summary>\n\n- Pick: `-p`\n\n<details open><summary>Inner</summary>\n\nNested\n\n</details>\n\n</details>\n\nAfter";
 const nonce = "0123456789abcdef";
 const detailsMarkdown = normalizeDetailsBlocks(collapsible, nonce);
-assert.ok(detailsMarkdown.includes("```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefOpen1\n```\n\n\n```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefSummary1 Aliases & `more`\n```"), detailsMarkdown);
+assert.ok(detailsMarkdown.includes("```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefOpen1\n```\n\n\n```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefSummary1 Aliases & \\`more\\`\n```"), detailsMarkdown);
 assert.ok(detailsMarkdown.includes("PiPreviewDetails0123456789abcdefOpenExpanded0\n```\n\n\n```{.pi-preview-details-marker}\nPiPreviewDetails0123456789abcdefSummary0 Inner\n```"));
 const detailsLiterals = [
 	"```html\n<details>\n<summary>S</summary>\n</details>\n```", "    <details>\n    </details>\n", "> <details>\n> </details>",
@@ -87,6 +87,17 @@ for (const tight of ["<details><summary>S</summary>\n: BODY\n</details>\n", "<de
 	for (const format of ["html5", "latex"]) assert.doesNotMatch(pandocDetails(tight, format), /PiPreviewDetails|0123456789abcdef/, `${format}: ${tight}`);
 	assert.match(pandocDetails(tight), /<details class="pi-preview-details"><summary>(?:S|Details)<\/summary>/, tight);
 }
+// A tag quoted by inline math stays quoted, and its block pairs around it.
+for (const math of ["$<details>$", "$</details>$"]) assert.match(pandocDetails(`<details>\n<summary>Outer</summary>\n\n${math}\n\nTAIL\n</details>\n`), /<details class="pi-preview-details"><summary>Outer<\/summary>[\s\S]*<span class="math inline">[\s\S]*<p>TAIL<\/p>\s*<\/details>/, math);
+// Text inside any tag's attributes (namespaced names too) is never read as a tag.
+assert.match(pandocDetails('<details><summary>Outer</summary>\n\n<svg:thing title="</details>">literal</svg:thing>\n\nTAIL\n</details>\n'), /<p>TAIL<\/p>\s*<\/details>/);
+assert.doesNotMatch(pandocDetails('<svg:thing title="\n<details>\n<summary>S</summary>\nBODY\n</details>\n">\nOther\n</svg:thing>\n'), /<details class/);
+// A summary needs both of its tags outside code and escapes.
+assert.match(pandocDetails("<details>\n<summary>Literal `</summary>\nBODY`\n</details>\n"), /<summary>Details<\/summary>\s*<p>&lt;summary&gt;Literal <code>&lt;\/summary&gt; BODY<\/code><\/p>/);
+assert.match(pandocDetails("<details>\n<summary>Literal \\</summary>\n\nB\n</details>\n"), /<summary>Details<\/summary>/);
+assert.doesNotMatch(pandocDetails("<details><summary>Literal \\</summary>\n\nB\n</details>\n"), /<details class/);
+// Character references follow Pandoc's own (case-sensitive) table; unknown names stay literal.
+assert.match(pandocDetails("<details><summary>A &Lt; &Gt; &Larr; &alpha; &ne; &Amp; &constructor; Z</summary>\n\nB\n\n</details>\n"), /<summary>A ≪ ≫ ↞ α ≠ &amp;Amp; &amp;constructor; Z<\/summary>/);
 // The summary is text: references decode, backticks stay literal.
 assert.match(pandocDetails("<details><summary>Fish &amp; chips &#x1F41F; &copy; ``` x</summary>\n\nB\n\n</details>\n"), /<summary>Fish &amp; chips 🐟 © ``` x<\/summary>/);
 // Display math keeps its source; a marker that crosses a container boundary shows the literal tags; a forged marker is text.
@@ -170,6 +181,13 @@ try {
 	await ready();
 	for (const selector of ['#preview-root .review', '#preview-root .review a', '#preview-root .review code', '#preview-root h1']) await page.click(selector).catch(() => {});
 	assert.equal(await page.evaluate(() => Boolean(window.bad)), false, 'no handler survives the filter');
+	// MathJax renders \\href in math without a script URL (ui/safe), even without a page policy.
+	await page.setContent(await html('Before $\\href{javascript:window.bad=true}{TRIGGER}$ after'));
+	await ready();
+	await page.waitForSelector('#preview-root mjx-container', { timeout: 20000 });
+	assert.equal(await page.$$eval('#preview-root [href]', links => links.filter(link => /^\s*javascript:/i.test(link.getAttribute('href'))).length), 0, 'no javascript: link from math');
+	await page.click('#preview-root mjx-container').catch(() => {});
+	assert.equal(await page.evaluate(() => Boolean(window.bad)), false);
 	// Static HTML carries a script policy: the page's own scripts (Mermaid) still run; an injected inline handler does not.
 	const mermaid = '```mermaid\nflowchart LR\n  A --> B\n```';
 	const guarded = preview.withStaticScriptPolicy((await html(mermaid)).replace(/<body[^>]*>/, body => `${body}<button id="injected" onclick="window.bad = true">x</button>`));

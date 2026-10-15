@@ -62,7 +62,8 @@ function isHtmlUnquotedAttributeValueCharacter(character) {
 	return Boolean(character) && !isHtmlWhitespace(character) && !/["'`=<>]/.test(character);
 }
 
-function readHtmlTag(source, start) {
+/** One complete HTML tag at `start` (quote-aware, possibly spanning lines), or undefined. */
+export function readHtmlTag(source, start) {
 	if (source.startsWith("<!--", start) || hasEscapedOpeningAngleBracket(source, start)) return undefined;
 	let index = start + 1;
 	let closing = false;

@@ -12,6 +12,14 @@ local function escape_html(text)
   return (text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"))
 end
 
+local function inline_html(inlines)
+  if pandoc.write then
+    local html = pandoc.write(pandoc.Pandoc({ pandoc.Plain(inlines) }), "html")
+    return (html:gsub("%s+$", ""))
+  end
+  return escape_html(pandoc.utils.stringify(inlines))
+end
+
 -- Plain text as inlines: words and spaces.
 local function text_inlines(text)
   local inlines = {}
@@ -20,6 +28,15 @@ local function text_inlines(text)
     inlines[#inlines + 1] = pandoc.Str(word)
   end
   return inlines
+end
+
+-- The summary arrives as escaped Markdown text: Pandoc's own reader decodes its
+-- character references (raw HTML and TeX stay off).
+local function summary_inlines(text)
+  local ok, doc = pcall(pandoc.read, text, "markdown-raw_html-raw_attribute-raw_tex")
+  local first = ok and doc.blocks[1]
+  if first and (first.t == "Para" or first.t == "Plain") then return first.content end
+  return text_inlines(text)
 end
 
 -- kind ("Open", "OpenExpanded", "Summary", "Close"), id and summary text of a marker block.
@@ -33,14 +50,14 @@ local function marker(block)
 end
 
 local function details(frame)
-  local summary = frame.summary or "Details"
+  local summary = frame.summary and summary_inlines(frame.summary) or { pandoc.Str("Details") }
   local out = {}
   if FORMAT:match("html") then
-    out[1] = pandoc.RawBlock("html", '<details class="pi-preview-details"' .. (frame.open and " open" or "") .. "><summary>" .. escape_html(summary) .. "</summary>")
+    out[1] = pandoc.RawBlock("html", '<details class="pi-preview-details"' .. (frame.open and " open" or "") .. "><summary>" .. inline_html(summary) .. "</summary>")
     for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
     out[#out + 1] = pandoc.RawBlock("html", "</details>")
   else
-    out[1] = pandoc.Para({ pandoc.Strong(text_inlines(summary)) })
+    out[1] = pandoc.Para({ pandoc.Strong(summary) })
     for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
   end
   return out
@@ -49,7 +66,7 @@ end
 -- What an unpaired marker stood for, as literal text.
 local function literal(frame)
   local out = { pandoc.Para({ pandoc.Str(frame.open and "<details open>" or "<details>") }) }
-  if frame.summary then out[2] = pandoc.Para({ pandoc.Str("<summary>" .. frame.summary .. "</summary>") }) end
+  if frame.summary then out[2] = pandoc.Para({ pandoc.Str("<summary>" .. pandoc.utils.stringify(summary_inlines(frame.summary)) .. "</summary>") }) end
   for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
   return out
 end

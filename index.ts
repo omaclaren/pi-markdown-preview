@@ -4427,7 +4427,8 @@ ${codeWrapControlsScript}
 
       mathJaxPromise = new Promise((resolve, reject) => {
         window.MathJax = {
-          loader: { load: ['[tex]/ams', '[tex]/noerrors', '[tex]/noundefined'] },
+          // ui/safe filters link protocols in math: an \\href with a script scheme is refused.
+          loader: { load: ['ui/safe', '[tex]/ams', '[tex]/noerrors', '[tex]/noundefined'] },
           tex: {
             inlineMath: [['\\\\(', '\\\\)'], ['$', '$']],
             displayMath: [['\\\\[', '\\\\]'], ['$$', '$$']],

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { collectMarkdownLiteralRanges } from "./markdown-html-comments.js";
+import { collectMarkdownLiteralRanges, readHtmlTag } from "./markdown-html-comments.js";
 import { collectMarkdownMathRanges } from "./markdown-sub-sup.js";
 
 /**
@@ -15,39 +15,30 @@ const CLOSE_LINE = /^<\/details>[ \t]*$/i;
 const OPEN_TAG = /^<details(\s+open)?>$/i;
 const CLOSE_TAG = /^<\/details>$/i;
 
-const ENTITIES = {
-	amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0", copy: "\u00a9", reg: "\u00ae", trade: "\u2122",
-	hellip: "\u2026", mdash: "\u2014", ndash: "\u2013", lsquo: "\u2018", rsquo: "\u2019", ldquo: "\u201c", rdquo: "\u201d",
-	times: "\u00d7", middot: "\u00b7", deg: "\u00b0", larr: "\u2190", rarr: "\u2192",
+// The summary is text, as on GitHub: escape Markdown punctuation, but leave HTML
+// character references (& # ;) for Pandoc to decode, escaping only a leading heading
+// marker. pandoc-details.lua reads it with Pandoc's own Markdown reader.
+const summaryText = text => {
+	const escaped = text.trim().replace(/[!"$%'()*+,\-./:<=>?@[\\\]^_`{|}~]/g, "\\$&");
+	return escaped.startsWith("#") ? `\\${escaped}` : escaped;
 };
-/** The summary is text, as on GitHub: decode the common character references. */
-const decodeEntities = text => text.replace(/&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([a-zA-Z]+));/g, (match, dec, hex, name) => {
-	const code = dec ? Number(dec) : hex ? parseInt(hex, 16) : undefined;
-	if (code !== undefined) return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : match;
-	return ENTITIES[name.toLowerCase()] ?? match;
-});
 
 /**
- * Every complete tag outside code, comments and front matter, quote-aware and possibly
- * spanning lines, so a quoted `>` or a tag written across lines is one token.
+ * Every complete tag outside code, comments and front matter, read with the same
+ * grammar as the literal-range pass (quote-aware, possibly spanning lines, names with
+ * `:` or `-`), so text inside any tag's attributes is never read as another tag.
  */
 function scanTags(source, literalRanges) {
 	const literal = at => literalRanges.some(range => range.start <= at && range.end > at);
 	const tags = [];
-	const start = /<(\/?)([A-Za-z][A-Za-z0-9-]*)(?=[\s/>])/g;
-	let match;
-	while ((match = start.exec(source))) {
-		if (literal(match.index)) continue;
-		let i = start.lastIndex, quote = null;
-		for (; i < source.length; i++) {
-			const ch = source[i];
-			if (quote) { if (ch === quote) quote = null; }
-			else if (ch === "\"" || ch === "'") quote = ch;
-			else if (ch === ">") break;
-		}
-		if (i >= source.length) continue;
-		tags.push({ start: match.index, end: i + 1, close: match[1] === "/", name: match[2].toLowerCase() });
-		start.lastIndex = i + 1;
+	let index = 0;
+	while (index < source.length) {
+		const start = source.indexOf("<", index);
+		if (start < 0) break;
+		const tag = literal(start) ? undefined : readHtmlTag(source, start);
+		if (!tag) { index = start + 1; continue; }
+		tags.push({ start, end: tag.end, close: source[start + 1] === "/", name: tag.tagName });
+		index = tag.end;
 	}
 	return tags;
 }
@@ -58,7 +49,7 @@ function scanTags(source, literalRanges) {
  * followed by the content (other formats). Raw HTML stays disabled. A marker is a
  * fenced code block with a reserved class, which Markdown structure around it (a
  * definition list, a `:::` line) cannot reinterpret, and the content between markers
- * is ordinary Markdown.
+ * is ordinary Markdown. The summary travels inside its marker as escaped text.
  *
  * Only whole-line tags at the start of a line are converted: `<details>` or
  * `<details open>` (optionally followed by `<summary>…</summary>` on the same line), a
@@ -73,13 +64,19 @@ export function normalizeDetailsBlocks(markdown, nonce = DETAILS_MARKER_NONCE) {
 	// Code, comments and front matter; tags are tokenised here instead.
 	const literalRanges = collectMarkdownLiteralRanges(source, /^</);
 	const tags = scanTags(source, literalRanges);
-	// Math, found with tags blanked out: a `$` in an attribute is not math, but a tag inside math is.
+	// Math, found with each tag masked by `x` (not spaces, which would end inline math
+	// such as `$<details>$`): a `$` in an attribute is not math, but a tag inside math is.
 	let masked = source;
-	for (const tag of tags) masked = masked.slice(0, tag.start) + source.slice(tag.start, tag.end).replace(/[^\r\n]/g, " ") + masked.slice(tag.end);
+	for (const tag of tags) masked = masked.slice(0, tag.start) + source.slice(tag.start, tag.end).replace(/[^\r\n]/g, "x") + masked.slice(tag.end);
 	const mathRanges = collectMarkdownMathRanges(masked, literalRanges);
 	const inMath = at => mathRanges.some(range => range.start <= at && range.end > at);
 	const details = tags.filter(tag => tag.name === "details" && !inMath(tag.start));
-	const summaries = new Set(tags.filter(tag => tag.name === "summary" && !inMath(tag.start)).map(tag => tag.start));
+	// A summary needs both tags read as tags: not code-quoted, escaped or in math.
+	const summaryTags = new Set(tags.filter(tag => tag.name === "summary" && !inMath(tag.start)).map(tag => `${tag.close ? "/" : ""}${tag.start}`));
+	const summaryTagsAt = (lineStart, text) => {
+		const lower = text.toLowerCase();
+		return summaryTags.has(`${lineStart + lower.indexOf("<summary>")}`) && summaryTags.has(`/${lineStart + lower.lastIndexOf("</summary>")}`);
+	};
 
 	const lines = source.split(/(?<=\n)/);
 	const lineStarts = [];
@@ -89,7 +86,7 @@ export function normalizeDetailsBlocks(markdown, nonce = DETAILS_MARKER_NONCE) {
 	const kinds = lines.map((line, index) => {
 		const text = line.replace(/\r?\n$/, "");
 		const summary = SUMMARY_LINE.exec(text);
-		if (summary && summaries.has(lineStarts[index] + text.indexOf("<"))) return { type: "summary", text: summary[1] };
+		if (summary && summaryTagsAt(lineStarts[index], text)) return { type: "summary", text: summary[1] };
 		return text.trim() ? { type: "text" } : { type: "blank" };
 	});
 	// A details tag is convertible only as a whole line of its own, at column 0.
@@ -100,8 +97,7 @@ export function normalizeDetailsBlocks(markdown, nonce = DETAILS_MARKER_NONCE) {
 		let accepted = false, open = false, summary;
 		if (!tag.close && OPEN_TAG.test(token)) {
 			const line = OPEN_LINE.exec(text);
-			const summaryAt = text.toLowerCase().indexOf("<summary>");
-			if (line && (line[2] === undefined || summaries.has(tag.start + summaryAt))) { accepted = true; open = Boolean(line[1]); summary = line[2]; }
+			if (line && (line[2] === undefined || summaryTagsAt(tag.start, text))) { accepted = true; open = Boolean(line[1]); summary = line[2]; }
 		} else if (tag.close && CLOSE_TAG.test(token)) accepted = CLOSE_LINE.test(text);
 		return { index, close: tag.close, accepted, open, summary };
 	});
@@ -134,7 +130,7 @@ export function normalizeDetailsBlocks(markdown, nonce = DETAILS_MARKER_NONCE) {
 			while (j < opening.end && kinds[j]?.type === "blank") j++;
 			if (kinds[j]?.type === "summary") { summary = kinds[j].text; consumed.add(j); }
 		}
-		const label = summary === undefined ? "" : decodeEntities(summary.trim());
+		const label = summary === undefined ? "" : summaryText(summary);
 		return block(marker(opening.open ? "OpenExpanded" : "Open", opening.n)) + (label ? block(`${marker("Summary", opening.n)} ${label}`) : "");
 	}).join("");
 }
