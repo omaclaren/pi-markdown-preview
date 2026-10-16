@@ -1,7 +1,7 @@
 -- Collapsible blocks marked by markdown-details.js: marker code blocks (class
 -- pi-preview-details-marker) carrying a per-process nonce, which arrives as the
 -- `pi-preview-details` metadata value. HTML output gets <details>/<summary>; other
--- formats (PDF via LaTeX) get the summary in bold followed by the content. Raw HTML
+-- formats get the summary in bold followed by the content, indented in LaTeX. Raw HTML
 -- input stays disabled: only these elements, generated here, are written as raw
 -- HTML. Markers are paired within one list of blocks; one left unpaired (its
 -- partner landed in another container) is shown as the literal tag it replaced.
@@ -57,6 +57,12 @@ local function details(frame)
     out[1] = pandoc.RawBlock("html", '<details class="pi-preview-details"' .. (frame.open and " open" or "") .. "><summary>" .. inline_html(summary) .. "</summary>")
     for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
     out[#out + 1] = pandoc.RawBlock("html", "</details>")
+  elseif FORMAT:match("latex") and #frame.blocks > 0 then
+    -- The content indented under the summary, one list level deep like a block quote.
+    out[1] = pandoc.Para({ pandoc.Strong(summary) })
+    out[2] = pandoc.RawBlock("latex", "\\begin{list}{}{\\setlength{\\leftmargin}{1.5em}\\setlength{\\rightmargin}{0pt}\\setlength{\\topsep}{0pt}\\setlength{\\partopsep}{0pt}}\\item\\relax")
+    for _, block in ipairs(frame.blocks) do out[#out + 1] = block end
+    out[#out + 1] = pandoc.RawBlock("latex", "\\end{list}")
   else
     out[1] = pandoc.Para({ pandoc.Strong(summary) })
     for _, block in ipairs(frame.blocks) do out[#out + 1] = block end

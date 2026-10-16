@@ -66,7 +66,9 @@ assert.match(detailsHtml, /<details class="pi-preview-details" open><summary>Inn
 assert.doesNotMatch(detailsHtml, /&lt;\/?(?:details|summary)|PiPreviewDetails/);
 const detailsLatex = pandocDetails(collapsible, "latex");
 assert.match(detailsLatex, /\\textbf\{Aliases \\& `more`\}/);
-assert.match(detailsLatex, /\\textbf\{Inner\}\s+Nested/);
+// PDF indents the content under the summary, one list level per block.
+assert.match(detailsLatex, /\\textbf\{Inner\}\s+\\begin\{list\}\{\}\{\\setlength\{\\leftmargin\}\{1\.5em\}[^\n]*\\item\\relax\s+Nested\s+\\end\{list\}\s+\\end\{list\}/);
+assert.doesNotMatch(pandocDetails("<details>\n<summary>Empty</summary>\n</details>\n", "latex"), /\\begin\{list\}/, "an empty block adds no list");
 assert.doesNotMatch(detailsLatex, /details|summary|PiPreviewDetails/i);
 // Literal fence lines in the content cannot end the block early.
 for (const fence of [":::", "::::::::"]) assert.match(pandocDetails(`<details>\n<summary>S</summary>\n\nBEFORE\n\n${fence}\n\nTAIL\n\n</details>\n`), new RegExp(`<p>BEFORE</p>\\s*<p>${fence}</p>\\s*<p>TAIL</p>\\s*</details>`));
@@ -163,6 +165,11 @@ try {
 	assert.equal(await page.$eval('#preview-root details.pi-preview-details li', e => e.checkVisibility()), false, 'closed by default');
 	await page.click('#preview-root details.pi-preview-details > summary');
 	assert.equal(await page.$eval('#preview-root details.pi-preview-details li', e => e.checkVisibility()), true, 'the summary toggles it');
+	// An open block's content is indented past its summary, so a nested block's end is visible.
+	const left = selector => page.$eval(selector, e => e.getBoundingClientRect().left);
+	const [outerSummary, outerList, innerSummary, innerText] = await Promise.all(['#preview-root details > summary', '#preview-root details > ul', '#preview-root details details > summary', '#preview-root details details > p'].map(left));
+	assert.ok(outerList > outerSummary && innerSummary > outerSummary && innerText > innerSummary, `indented: ${[outerSummary, outerList, innerSummary, innerText]}`);
+	assert.equal(await page.$eval('#preview-root details details', e => getComputedStyle(e, '::details-content').borderLeftStyle), 'solid', 'the open content has a rule');
 	assert.match(await page.$eval('#preview-root', e => e.textContent), /<details onclick=.window\.bad = true.>/, 'attributed tags stay literal text (quotes may be curled)');
 	assert.equal(await page.evaluate(() => Boolean(window.bad)), false);
 	// A static image can't be clicked: hidden content is rendered expanded.

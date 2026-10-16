@@ -3872,6 +3872,13 @@ body {
 #preview-root details.pi-preview-details { margin: 0 0 1em; }
 #preview-root details.pi-preview-details > summary { cursor: pointer; font-weight: 600; }
 #preview-root details.pi-preview-details[open] > summary { margin-bottom: 0.5em; }
+@supports selector(::details-content) {
+  #preview-root details.pi-preview-details[open]::details-content { margin-left: 0.3em; padding-left: 0.95em; border-left: 2px solid var(--md-quote-border); }
+}
+@supports not selector(::details-content) {
+  #preview-root details.pi-preview-details[open] { padding-left: 1.25em; }
+  #preview-root details.pi-preview-details[open] > summary { margin-left: -1.25em; }
+}
 #preview-root blockquote {
   margin-left: 0;
   padding: 0.2em 1em;
