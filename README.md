@@ -82,7 +82,7 @@ Working shows recorded prompts and tool output to anyone with the tab's link. Fo
 
 ### Live and Working
 
-Working shows a response's recorded prompts, progress, any exposed reasoning, and its tool calls and results. Prompts start expanded and activity starts folded. Commands, file reads and edits have readable views, with the recorded JSON available, and recorded images can be enlarged. **Ctrl+Alt+P** and **Ctrl+Alt+W** (Control+Option on macOS) switch between Preview and Working.
+Working shows a response's recorded prompts, progress, any exposed reasoning, and its tool calls and results. Prompts start expanded and activity starts folded. Commands, file reads and edits have readable views, with the recorded JSON available, and recorded images can be enlarged. **Ctrl+Alt+P** and **Ctrl+Alt+W** (Control+Option on macOS) switch between Preview and Working. **Ctrl+Alt+L** goes to the latest response in Preview from any view, including an earlier Working page.
 
 With `--live` and **Follow activity** on, the page moves to Working when a turn starts and back to Preview when it ends. If you have scrolled up or moved to another page, it leaves you there. Updates arrive as Pi records each message, not token by token, so a tool call shows "No result recorded yet" until its result is recorded. Anything Live leaves out, such as cards beyond its display limits, is listed in its status line. Pi Studio has a fuller live view.
 
@@ -92,7 +92,7 @@ Some content may be shortened or left out; [details](docs/details.md#working) li
 
 ### Browser watch mode
 
-A response watcher renders each response once Pi finishes it. It starts with the last 10 finished responses on the current branch and keeps up to 20. Step through them with **Previous**, **Next** and **Latest** in the **current/total ▾** counter menu, with the browser's Back and Forward buttons, or with **Option/Alt+Left/Right** (add **Shift** for the oldest or latest). On an older response the page stays put and marks **New** when something arrives. For responses from before the watcher started, use `/preview --pick --browser`.
+A response watcher renders each response once Pi finishes it. It starts with the last 10 finished responses on the current branch and keeps up to 20. Step through them with **Previous**, **Next** and **Latest** in the **current/total ▾** counter menu, with the browser's Back and Forward buttons, or with **Option/Alt+Left/Right** (add **Shift** for the oldest or latest). Press **?** for a list of keyboard shortcuts, or choose **Keyboard shortcuts** in the counter menu. On an older response the page stays put and marks **New** when something arrives. For responses from before the watcher started, use `/preview --pick --browser`.
 
 A file watcher re-renders when the file changes, keeps your reading position, and keeps the last good preview if a render fails.
 

@@ -50,6 +50,27 @@ function escapeBrowserWatchHtmlAttribute(value) {
 		.replace(/'/g, "&#39;");
 }
 
+// Generic key names, as "Alt + ← / →". The page redraws them on a Mac as
+// one key cap per shortcut ("⌥← / ⌥→"), the way macOS menus show them.
+const SHORTCUT_KEY_NAMES = { Control: "Ctrl", ArrowLeft: "←", ArrowRight: "→", Escape: "Esc" };
+const shortcutKeys = (modifiers, keys) => {
+	const kbd = key => `<kbd>${escapeBrowserWatchHtmlText(SHORTCUT_KEY_NAMES[key] ?? key)}</kbd>`;
+	return `<span class="pi-preview-keys" data-modifiers="${modifiers.join(" ")}" data-keys="${escapeBrowserWatchHtmlAttribute(keys.join(" "))}">${[...modifiers.map(kbd), keys.map(kbd).join(" / ")].join(" + ")}</span>`;
+};
+/** The list behind "?": modifiers, the keys that share them, and what they do. */
+function shortcutsList({ viewSwitch, followActivity }) {
+	const rows = [
+		[["Alt"], ["ArrowLeft", "ArrowRight"], "Previous / next"],
+		[["Alt", "Shift"], ["ArrowLeft", "ArrowRight"], "Oldest / latest in this view"],
+		[["Control", "Alt"], ["L"], "Latest in Preview, from any view"],
+		...(viewSwitch ? [[["Control", "Alt"], ["P", "W"], "Preview / Working"]] : []),
+		...(followActivity ? [[["Control", "Alt"], ["A"], "Follow activity on / off"]] : []),
+		[[], ["Escape"], "Close a panel"],
+		[[], ["?"], "Show / hide this list"],
+	];
+	return `<dl>${rows.map(([modifiers, keys, action]) => `<dt>${shortcutKeys(modifiers, keys)}</dt><dd>${escapeBrowserWatchHtmlText(action)}</dd>`).join("")}</dl>`;
+}
+
 function decodeHtmlImageSource(source) {
 	return source.replace(/&(amp|quot|apos|#39|#x27);/gi, (entity, name) => {
 		switch (String(name).toLowerCase()) {
@@ -337,7 +358,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
-  ${navigation.turnDetailsUrl || navigation.liveUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a></span>` : ""}
+  ${navigation.turnDetailsUrl || navigation.liveUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P; the latest: Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a></span>` : ""}
   ${navigation.liveUrl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: switch to Live when a turn starts and back to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity: Off</button>` : ""}
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
     <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
@@ -351,6 +372,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
       <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" title="Latest revision (Option/Alt+Shift+Right)" aria-keyshortcuts="Alt+Shift+ArrowRight" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
       <button data-watch-control="wrap-code" type="button" hidden></button>
+      <button id="pi-markdown-preview-watch-shortcuts-button" data-watch-control="shortcuts" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="pi-markdown-preview-watch-shortcuts" title="Keyboard shortcuts (?)">Keyboard shortcuts</button>
     </div>
   </div>
   <button id="pi-markdown-preview-watch-copy-link" data-watch-control="copy-link" type="button" ${live ? 'disabled title="Copy link is not available for a live turn. Open its response from the status line once the turn completes."' : 'title="Copy an authenticated link for another browser"'} aria-live="polite">Copy link</button>
@@ -358,6 +380,10 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     <span>Copy this link:</span>
     <input data-watch-control="share-input" aria-label="Authenticated preview link" readonly />
     <button data-watch-control="share-close" type="button">Close</button>
+  </div>
+  <div id="pi-markdown-preview-watch-shortcuts" data-watch-control="shortcuts-panel" role="dialog" aria-labelledby="pi-markdown-preview-watch-shortcuts-title" tabindex="-1" hidden>
+    <div class="pi-preview-shortcuts-head"><span id="pi-markdown-preview-watch-shortcuts-title">Keyboard shortcuts</span><button data-watch-control="shortcuts-close" type="button">Close</button></div>
+    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl), followActivity: Boolean(navigation.liveUrl) })}
   </div>
 </nav>`;
 
@@ -412,6 +438,18 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const controlsPanel = navigation?.querySelector('[data-watch-control="controls"]');
   const newBadge = navigation?.querySelector('[data-watch-control="new"]');
   const followButton = navigation?.querySelector('[data-watch-control="follow-activity"]');
+  const shortcutsButton = navigation?.querySelector('[data-watch-control="shortcuts"]');
+  const shortcutsPanel = navigation?.querySelector('[data-watch-control="shortcuts-panel"]');
+  const shortcutsCloseButton = navigation?.querySelector('[data-watch-control="shortcuts-close"]');
+  if (/Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '')) {
+    const symbols = { Control: '⌃', Alt: '⌥', Shift: '⇧', ArrowLeft: '←', ArrowRight: '→', Escape: 'Esc' };
+    const symbol = key => symbols[key] ?? key;
+    for (const keys of shortcutsPanel?.querySelectorAll('[data-keys]') ?? []) {
+      const modifiers = (keys.getAttribute('data-modifiers') || '').split(' ').filter(Boolean).map(symbol).join('');
+      const caps = keys.getAttribute('data-keys').split(' ').map(key => Object.assign(document.createElement('kbd'), { textContent: modifiers + symbol(key) }));
+      keys.replaceChildren(...caps.flatMap((cap, i) => i ? [' / ', cap] : [cap]));
+    }
+  }
   // Follow activity acts only from the latest response; tell it when that changes.
   const announceLatest = isLatest => {
     if (!followButton || followButton.getAttribute('data-latest') === String(isLatest)) return;
@@ -465,13 +503,32 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     if (sharePanel) sharePanel.hidden = true;
     if (shareInput) shareInput.value = '';
   };
+  // Where focus goes back to when the shortcuts list closes.
+  let shortcutsOpener;
+  const closeShortcuts = () => {
+    if (shortcutsPanel) shortcutsPanel.hidden = true;
+    shortcutsButton?.setAttribute('aria-expanded', 'false');
+  };
   const dismissPanels = (returnFocus = false) => {
-    const trigger = sharePanel && !sharePanel.hidden ? copyLinkButton : controlsPanel && !controlsPanel.hidden ? controlsToggle : null;
+    const trigger = sharePanel && !sharePanel.hidden ? copyLinkButton : shortcutsPanel && !shortcutsPanel.hidden ? shortcutsOpener : controlsPanel && !controlsPanel.hidden ? controlsToggle : null;
     interactionVersion += 1;
     closeControls();
     closeShare();
+    closeShortcuts();
     if (returnFocus) trigger?.focus({ preventScroll: true });
   };
+  const openShortcuts = () => {
+    if (!shortcutsPanel) return;
+    const opener = document.activeElement;
+    // Opened from the counter menu, which closes: return to its toggle instead.
+    shortcutsOpener = controlsPanel?.contains(opener) ? controlsToggle : opener instanceof HTMLElement && opener !== document.body ? opener : undefined;
+    dismissPanels();
+    shortcutsPanel.hidden = false;
+    shortcutsButton?.setAttribute('aria-expanded', 'true');
+    shortcutsPanel.focus({ preventScroll: true });
+  };
+  shortcutsButton?.addEventListener('click', openShortcuts);
+  shortcutsCloseButton?.addEventListener('click', () => dismissPanels(true));
   controlsToggle?.addEventListener('click', () => {
     const open = controlsPanel?.hidden;
     dismissPanels();
@@ -482,7 +539,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   };
   const onPanelEscape = (event) => {
     const copyingFocused = copyLinkButton?.hasAttribute('aria-busy') && document.activeElement === copyLinkButton;
-    if (event.key !== 'Escape' || event.defaultPrevented || (controlsPanel?.hidden && sharePanel?.hidden && !copyingFocused)) return;
+    if (event.key !== 'Escape' || event.defaultPrevented || (controlsPanel?.hidden && sharePanel?.hidden && (!shortcutsPanel || shortcutsPanel.hidden) && !copyingFocused)) return;
     event.preventDefault();
     dismissPanels(true);
   };
@@ -759,13 +816,27 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     event.preventDefault();
     navigateTo(latestUrl(), false, latestLink, event.detail === 0);
   });
+  // The newest revision in Preview, from any view: one step from an earlier Working page.
+  const showLatestPreview = () => {
+    if (!working && (${JSON.stringify(isWaiting)} || revision === revisions[revisions.length - 1])) return;
+    navigateTo(working ? '/' : latestUrl(), false, undefined, true);
+  };
   window.addEventListener('keydown', (event) => {
-    if (event.defaultPrevented || event.isComposing || event.repeat || event.metaKey || !event.altKey) return;
+    if (event.defaultPrevented || event.isComposing || event.repeat || event.metaKey) return;
     const target = event.target;
     if (target instanceof Element && target.closest('input:not([type="checkbox"]), textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+    if (event.key === '?' && !event.ctrlKey && !event.altKey) {
+      // Leave other dialogs' keys alone (local path actions, an enlarged image).
+      if (target instanceof Element && target.closest('[role="dialog"]:not([data-watch-control="shortcuts-panel"]), dialog')) return;
+      event.preventDefault();
+      if (shortcutsPanel?.hidden) openShortcuts(); else dismissPanels(true);
+      return;
+    }
+    if (!event.altKey) return;
     if (event.ctrlKey) {
       if (event.shiftKey) return;
       const key = event.key.toLowerCase();
+      if (event.code === 'KeyL' || key === 'l') { event.preventDefault(); showLatestPreview(); return; }
       const link = event.code === 'KeyP' || key === 'p' ? previewLink : event.code === 'KeyW' || key === 'w' ? workingLink : null;
       if (link) { event.preventDefault(); navigateView(link, true); }
       return;

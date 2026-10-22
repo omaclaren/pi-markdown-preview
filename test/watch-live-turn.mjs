@@ -723,7 +723,7 @@ test("Live routes are opt-in, authenticated, lazy for HEAD, and serve a bounded 
  const plain = await createBrowserWatchServer(html, dir, { initialTurnDetails: async () => ({ events: [] }) });
  t.after(() => plain.close());
  const plainSession = await auth(plain);
- assert.doesNotMatch(plainSession.text, /<button data-watch-control="follow-activity"|data-live-state=/, "no Follow activity or live state without the live option");
+ assert.doesNotMatch(plainSession.text, /<button data-watch-control="follow-activity"|data-live-state=|<dd>Follow activity on \/ off<\/dd>/, "no Follow activity, its shortcut or live state without the live option");
  assert.equal((await fetch(new URL("/__pi_markdown_preview_live__/?identity=x&instance=y", plainSession.origin), { headers: { cookie: plainSession.cookie } })).status, 404);
 
  const live = createLiveTurnProjector();
@@ -895,6 +895,7 @@ test("Follow activity state: JSON current turn and machine-readable live status"
  const toggle = session.text.match(/<button data-watch-control="follow-activity"[^>]*>/)?.[0];
  assert.ok(toggle, "the toolbar has a Follow activity toggle when Live is available");
  assert.match(session.text, /<button data-watch-control="follow-activity"[^>]*>Follow activity: Off<\/button>/);
+ assert.match(session.text, /data-keys="A"[^]*?<dd>Follow activity on \/ off<\/dd>/, "the shortcuts list includes Follow activity when Live is available");
  assert.match(toggle, /aria-pressed="false" hidden/); assert.match(toggle, /data-view="preview"/); assert.match(toggle, /data-latest="true"/);
  const state = toggle.match(/data-live-state="([^"]+)"/)[1].replaceAll("&amp;", "&");
  const json = async path => (await fetch(new URL(path, session.origin), { headers: { cookie: session.cookie } })).json();

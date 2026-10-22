@@ -66,7 +66,8 @@ body.pi-preview-working main { padding-top: max(72px, calc(var(--pi-preview-watc
 #pi-markdown-preview-watch-latest.pi-markdown-preview-watch-new { color: var(--accent, LinkText); }
 #pi-markdown-preview-watch-new { font-size: 0.9em; }
 #pi-markdown-preview-watch-controls,
-#pi-markdown-preview-watch-share-panel {
+#pi-markdown-preview-watch-share-panel,
+#pi-markdown-preview-watch-shortcuts {
   background: var(--card, Canvas);
   border: 1px solid var(--panel-border, ButtonBorder);
   border-radius: 10px;
@@ -92,6 +93,30 @@ body.pi-preview-working main { padding-top: max(72px, calc(var(--pi-preview-watc
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.25rem;
+}
+#pi-markdown-preview-watch-shortcuts-button { grid-column: 1 / -1; }
+#pi-markdown-preview-watch-shortcuts { max-width: calc(100vw - 1.2rem); min-width: min(18rem, calc(100vw - 1.2rem)); width: max-content; }
+#pi-markdown-preview-watch-shortcuts:focus { outline: none; }
+.pi-preview-shortcuts-head { align-items: center; display: flex; justify-content: space-between; padding-left: 0.35rem; }
+#pi-markdown-preview-watch-shortcuts dl {
+  align-items: center;
+  display: grid;
+  font-weight: 500;
+  gap: 0.5rem 0.9rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  margin: 0.45rem 0.35rem 0.25rem;
+}
+#pi-markdown-preview-watch-shortcuts dt { white-space: nowrap; }
+#pi-markdown-preview-watch-shortcuts dd { margin: 0; }
+.pi-preview-keys { align-items: center; display: inline-flex; gap: 0.15rem; }
+.pi-preview-keys kbd {
+  background: var(--panel-2, rgba(127, 127, 127, 0.16));
+  border: 1px solid var(--panel-border, ButtonBorder);
+  border-radius: 4px;
+  font: 600 11px/1 ui-monospace, monospace;
+  min-width: 1.6em;
+  padding: 0.2rem 0.3rem;
+  text-align: center;
 }
 #pi-markdown-preview-watch-share-panel {
   align-items: center;
@@ -120,7 +145,8 @@ body.pi-preview-working main { padding-top: max(72px, calc(var(--pi-preview-watc
   body.pi-preview-working main { padding-top: 24px; }
   #pi-markdown-preview-watch-nav { bottom: 0.5rem; left: 0.5rem; right: auto; top: auto; }
   #pi-markdown-preview-watch-controls,
-  #pi-markdown-preview-watch-share-panel { bottom: calc(100% + 0.4rem); left: 0; right: auto; top: auto; }
+  #pi-markdown-preview-watch-share-panel,
+  #pi-markdown-preview-watch-shortcuts { bottom: calc(100% + 0.4rem); left: 0; right: auto; top: auto; }
 }
 @media (any-pointer: coarse) {
   #pi-markdown-preview-watch-nav a,

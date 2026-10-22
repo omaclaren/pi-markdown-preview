@@ -107,6 +107,52 @@ test('Working and Preview share themed controls, view/history shortcuts and tab-
  assert.deepEqual(errors,[]);
 });
 
+test('Ctrl+Alt+L opens the latest Preview from any view, and ? lists the page\'s shortcuts', {timeout:30000}, async t=>{
+ const {server}=await setup(t);const browser=await browserFor(t);if(!browser)return;
+ const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.setViewport({width:1100,height:750});await page.goto(server.url);await view(page,'preview',3);
+ // One step from an earlier Working page, or an earlier Preview, whatever Option types.
+ await hotkey(page,'ArrowLeft','Alt',true);await view(page,'preview',1);await hotkey(page,'KeyW');await view(page,'working',1);
+ await hotkey(page,'KeyL');await view(page,'preview',3);
+ await hotkey(page,'ArrowLeft','Alt');await view(page,'preview',2);
+ await page.evaluate(()=>document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'¬',code:'KeyL',ctrlKey:true,altKey:true,bubbles:true,cancelable:true})));await view(page,'preview',3);
+ await page.evaluate(()=>{window.stayed=true;});await hotkey(page,'KeyL');await new Promise(r=>setTimeout(r,300));
+ assert.equal(await page.evaluate(()=>window.stayed),true,'Already on the latest Preview: no reload.');
+ // ? opens the list and focuses it; it lists only this page's shortcuts.
+ const panel=select('shortcuts-panel'),shown=()=>page.$eval(panel,e=>!e.hidden),until=open=>page.waitForFunction((s,open)=>!document.querySelector(s).hidden===open,{},panel,open);
+ const focused=()=>page.evaluate(()=>document.activeElement?.getAttribute('data-watch-control'));
+ await page.keyboard.press('?');await until(true);assert.equal(await focused(),'shortcuts-panel');
+ const actions=await page.$$eval(`${panel} dd`,e=>e.map(d=>d.textContent));
+ assert.ok(actions.includes('Latest in Preview, from any view')&&actions.includes('Preview / Working'),actions.join('; '));
+ assert.ok(!actions.includes('Follow activity on / off'),'A page without Follow activity does not list it.');
+ // Escape, ? again, Close or a click elsewhere closes it.
+ await page.keyboard.press('Escape');await until(false);
+ await page.keyboard.press('?');await until(true);await page.keyboard.press('?');await until(false);
+ await page.keyboard.press('?');await until(true);await page.mouse.click(200,600);await until(false);
+ // The counter menu opens it too; closing returns focus to the menu's toggle.
+ await page.click(select('toggle'));await page.click(select('shortcuts'));await until(true);
+ assert.equal(await page.$eval(select('controls'),e=>e.hidden),true);
+ assert.equal(await page.$eval(select('shortcuts'),e=>e.getAttribute('aria-expanded')),'true');
+ await page.click(select('shortcuts-close'));await until(false);assert.equal(await focused(),'toggle');
+ assert.equal(await page.$eval(select('shortcuts'),e=>e.getAttribute('aria-expanded')),'false');
+ // ? typed into a field, or with Ctrl, Alt or Meta, is left alone.
+ assert.deepEqual(await page.evaluate(()=>{
+  const input=document.createElement('input');document.body.append(input);input.focus();
+  const results=[input.dispatchEvent(new KeyboardEvent('keydown',{key:'?',bubbles:true,cancelable:true}))];input.remove();
+  for(const extra of [{ctrlKey:true},{altKey:true},{metaKey:true}])results.push(document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'?',bubbles:true,cancelable:true,...extra})));
+  return results;
+ }),[true,true,true,true]);assert.equal(await shown(),false);
+ // macOS shows one key cap per shortcut; other systems name each key.
+ for(const [platform,expected] of [['MacIntel',['⌃⌥L']],['Linux x86_64',['Ctrl','Alt','L']]]){
+  const other=await browser.newPage();other.on('pageerror',e=>errors.push(e.message));
+  await other.evaluateOnNewDocument(p=>{Object.defineProperty(navigator,'platform',{get:()=>p});Object.defineProperty(navigator,'userAgentData',{get:()=>undefined});},platform);
+  await other.goto(server.url);await view(other,'preview',3);
+  assert.deepEqual(await other.$eval(`${panel} [data-keys="L"]`,e=>[...e.querySelectorAll('kbd')].map(k=>k.textContent)),expected,platform);
+  await other.close();
+ }
+ assert.deepEqual(errors,[]);
+});
+
 test('A restarted watcher never silently substitutes another turn in Working', {timeout:15000}, async t=>{
  const {server,dir}=await setup(t,{token:'navigation-test-'.repeat(3)});const browser=await browserFor(t);if(!browser)return;
  const page=await browser.newPage();await page.goto(server.url);await hotkey(page,'KeyW');await view(page,'working',3);
