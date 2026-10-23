@@ -125,10 +125,14 @@ test('Ctrl+Alt+L opens the latest Preview from any view, and ? lists the page\'s
  const actions=await page.$$eval(`${panel} dd`,e=>e.map(d=>d.textContent));
  assert.ok(actions.includes('Latest in Preview, from any view')&&actions.includes('Preview / Working'),actions.join('; '));
  assert.ok(!actions.includes('Follow activity on / off'),'A page without Follow activity does not list it.');
- // Escape, ? again, Close or a click elsewhere closes it.
- await page.keyboard.press('Escape');await until(false);
- await page.keyboard.press('?');await until(true);await page.keyboard.press('?');await until(false);
+ // Escape or ? again closes it, and focus returns to where it was.
+ await page.keyboard.press('Escape');await until(false);await page.focus(select('toggle'));
+ await page.keyboard.press('?');await until(true);await page.keyboard.press('Escape');await until(false);assert.equal(await focused(),'toggle');
+ await page.keyboard.press('?');await until(true);await page.keyboard.press('?');await until(false);assert.equal(await focused(),'toggle');
+ // A click elsewhere closes it and leaves focus where the click put it, like
+ // the counter menu and the browser's own popovers.
  await page.keyboard.press('?');await until(true);await page.mouse.click(200,600);await until(false);
+ assert.equal(await page.evaluate(()=>document.activeElement===document.body),true);
  // The counter menu opens it too; closing returns focus to the menu's toggle.
  await page.click(select('toggle'));await page.click(select('shortcuts'));await until(true);
  assert.equal(await page.$eval(select('controls'),e=>e.hidden),true);
