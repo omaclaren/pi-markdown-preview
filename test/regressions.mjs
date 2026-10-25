@@ -438,6 +438,29 @@ assert.ok(
 assert.match(src, /const renderAnnotationMarkerMath = async \(root\) =>/, "Missing annotation-marker math rendering helper.");
 assert.match(src, /await mathJax\.typesetPromise\(markers\);/, "Browser annotation math rendering should typeset full marker elements so emphasis/code markup survives.");
 
+// Pandoc compiles \boxed{...} to <menclose notation="box">, which Chromium/WebView
+// do not implement (MathML Core stops short of menclose), so the frame and layout degrade.
+// Re-render those equations through MathJax using the TeX pandoc embeds in
+// <annotation encoding="application/x-tex">.
+assert.match(src, /const renderMencloseMath = async \(root\) =>/, "Missing MathML menclose fallback helper.");
+assert.ok(
+	src.includes("root.querySelectorAll('math menclose')"),
+	"menclose fallback should target pandoc's MathML menclose nodes.",
+);
+assert.ok(
+	src.includes("annotation[encoding=\"application/x-tex\"]"),
+	"menclose fallback should read the original TeX from the MathML annotation.",
+);
+assert.ok(
+	src.includes("mjx-assistive-mml"),
+	"menclose fallback should skip MathJax's own assistive MathML copy, which also contains menclose.",
+);
+assert.ok(
+	src.indexOf("await renderMathFallback(root);") >= 0 &&
+		src.indexOf("await renderMencloseMath(root);") > src.indexOf("await renderMathFallback(root);"),
+	"The menclose fallback should run during preview setup, after the generic math fallback.",
+);
+
 assert.ok(
 	src.includes("https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"),
 	"Browser/terminal preview should include a MathJax fallback loader for unsupported pandoc math.",

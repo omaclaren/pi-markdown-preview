@@ -4511,6 +4511,52 @@ ${codeWrapControlsScript}
       }
     };
 
+    // Chromium/WebView do not implement MathML <menclose>, so Pandoc's \boxed{...}
+    // loses its frame and degrades. Re-render those equations with MathJax using the
+    // TeX embedded in <annotation encoding="application/x-tex">.
+    const renderMencloseMath = async (root) => {
+      if (!root) return;
+      const boxes = Array.from(root.querySelectorAll('math menclose'));
+      if (boxes.length === 0) return;
+
+      const targets = new Map();
+      boxes.forEach((box) => {
+        // Skip MathJax's own hidden assistive MathML copy: it also contains <menclose>.
+        if (box.closest('mjx-assistive-mml')) return;
+        const math = box.closest('math');
+        if (!math || targets.has(math)) return;
+        const annotation = math.querySelector('annotation[encoding="application/x-tex"]');
+        const tex = annotation && typeof annotation.textContent === 'string' ? annotation.textContent.trim() : '';
+        if (!tex) return;
+        targets.set(math, tex);
+      });
+      if (targets.size === 0) return;
+
+      let mathJax;
+      try {
+        mathJax = await ensureMathJax();
+      } catch (e) {
+        console.error('MathJax load failed:', e);
+        return;
+      }
+
+      const hosts = [];
+      targets.forEach((tex, math) => {
+        const displayMode = math.getAttribute('display') === 'block';
+        const host = document.createElement('span');
+        host.className = 'pi-menclose-math';
+        host.textContent = displayMode ? '\\\\[' + tex + '\\\\]' : '\\\\(' + tex + '\\\\)';
+        math.replaceWith(host);
+        hosts.push(host);
+      });
+
+      try {
+        await mathJax.typesetPromise(hosts);
+      } catch (e) {
+        console.error('MathJax menclose render failed:', e);
+      }
+    };
+
     const renderMathFallback = async (root) => {
       const fallbackTargets = collectMathFallbackTargets(root);
       if (fallbackTargets.length === 0) return;
@@ -4589,6 +4635,7 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
       decorateDiffCodeBlocks(root);
       await renderAnnotationMarkerMath(root);
       await renderMathFallback(root);
+      await renderMencloseMath(root);
       await renderPdfFigures(root);
       if (${codeWrapping.controls !== false}) {
         window.PiMarkdownPreviewCodeWrap?.installCodeWrapControls(root);
