@@ -114,6 +114,12 @@ assert.match(pandocDetails("<details><summary>Fish &amp; chips &#x1F41F; &copy; 
 assert.match(pandocDetails("$$\n<details>\nx+y\n</details>\n$$\n"), /<span class="math display">/);
 assert.match(pandocDetails("::: note\n<details>\n<summary>Crossing</summary>\n\nBody\n:::\n\n</details>\n"), /<p>&lt;details&gt;<\/p>\s*<p>&lt;summary&gt;Crossing&lt;\/summary&gt;<\/p>/);
 assert.match(pandocDetails("PiPreviewDetailsffffffffffffffffOpen0\n"), /<p>PiPreviewDetailsffffffffffffffffOpen0<\/p>/);
+// Pandoc's reader passes an unclosed <div> through as raw HTML; the filter shows it as text, attributes and all.
+assert.match(pandocDetails("<div ID=x onclick=\"alert(1)\">\n\nBody\n"), /<p>&lt;div ID=x onclick="alert\(1\)"&gt;<\/p>\s*<p>Body<\/p>/);
+assert.doesNotMatch(pandocDetails("<div id='x'>\n\n<details><summary>S</summary>\n\nB\n</details>\n"), /<div\b/);
+assert.match(pandocDetails("<div id='x'>\n\n<details><summary>S</summary>\n\nB\n</details>\n"), /<details class="pi-preview-details"><summary>S<\/summary>/);
+assert.match(pandocDetails("<div class=\"a\">\n\nx\n\n</div>\n"), /<div class="a">\s*<p>x<\/p>\s*<\/div>/);
+assert.match(pandocDetails("<div id=x>\n\nBody\n", "latex"), /\\textless div id=x\\textgreater\{\}\s+Body/);
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-markdown-preview-document-updates-"));
 const modulePath = resolve(`.pi-markdown-preview-document-updates-${process.pid}.mjs`);
@@ -144,6 +150,12 @@ try {
 		assert.deepEqual(ids.filter((value, i) => ids.indexOf(value) !== i), [], `${JSON.stringify(answer)}: no duplicate IDs`);
 		assert.ok(ids.includes(id) && answer.match(/s1-[\w-]+/g).every(heading => ids.includes(heading)), `${JSON.stringify(answer)}: ${id}, and the answer keeps its IDs`);
 		if (later === laterNote) assert.match(body, new RegExp(`href="#${id}" class="footnote-ref"[^]*id="${id}"[^>]*>[^]*?SECOND_NOTE`), "the reference links to its own note");
+	}
+	for (const sections of [["<div id='s1-fn1'>\n\nBody\n", laterNote], ["Answer\n", '<div id="target">\n\nx\n', '<div id="target">\n\ny\n']]) {
+		const body = (await preview.renderPreviewHtmlDocument(sections, style, scratch)).html.split('id="preview-root"')[1];
+		assert.doesNotMatch(body, /<div\b[^>]*\bid\s*=\s*["']?(?:s1-fn1|target)\b/i, "an unclosed <div> keeps no ID");
+		assert.match(body, /&lt;div id=/, "it is shown as text");
+		if (sections[1] === laterNote) assert.match(body, /href="#s1-fn1" class="footnote-ref"[^]*id="s1-fn1"[^>]*>[^]*?SECOND_NOTE/, "the later section keeps s1-");
 	}
 	const prepared = preview.prepareBrowserPreviewMarkdown(affiliation);
 	assert.equal(prepared.normalizedMarkdown, normalizeSubSupTags(affiliation));

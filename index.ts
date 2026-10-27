@@ -4655,12 +4655,14 @@ async function renderPreviewHtmlDocument(
 	const fragments = await Promise.all(sections.map((section, i) => renderMarkdownToHtmlWithPandoc(section.pandocMarkdown, resourcePath, isLatex, signal, i ? `s${i}-` : undefined)));
 	// The first section's IDs are unprefixed, so one can start with a later section's prefix (a
 	// heading "s1-fn1"); that section is parsed again with a prefix none of them starts with.
-	const firstIds = fragments.length > 1 ? [...fragments[0].matchAll(/\sid="([^"]*)"/g)].map(match => match[1]) : [];
-	const taken = (prefix: string) => firstIds.some(id => id.startsWith(prefix));
+	// Pandoc writes every ID as id="…" (raw HTML is shown as text; a tag shown as text can match
+	// too, which costs only a reparse). Each is indexed once by the prefixes it starts with:
+	// "s1-fn1" by s1-, "s1-2-x" by s1- and s1-2-.
+	const taken = new Set(fragments.length > 1 ? [...fragments[0].matchAll(/\sid="s(\d+)-(?:(\d+)-)?/g)].flatMap(([, i, n]) => n === undefined ? [`s${i}-`] : [`s${i}-`, `s${i}-${n}-`]) : []);
 	await Promise.all(sections.map(async (section, i) => {
-		if (!i || !taken(`s${i}-`)) return;
+		if (!i || !taken.has(`s${i}-`)) return;
 		let n = 1;
-		while (taken(`s${i}-${n}-`)) n++;
+		while (taken.has(`s${i}-${n}-`)) n++;
 		fragments[i] = await renderMarkdownToHtmlWithPandoc(section.pandocMarkdown, resourcePath, isLatex, signal, `s${i}-${n}-`);
 	}));
 	const fragmentHtml = markPandocPdfEmbeds(fragments.join("\n"));

@@ -118,6 +118,17 @@ process = function(blocks)
   return root.blocks
 end
 
+-- Even with raw_html off, Pandoc's reader passes an unclosed <div …> start tag through
+-- as raw HTML, with any ID or attribute it has. It is shown as text, as other tags
+-- are. Pandoc runs these element functions before Pandoc() below writes its own.
+function RawBlock(el)
+  if el.format == "html" then return pandoc.Para({ pandoc.Str((el.text:gsub("%s+$", ""))) }) end
+end
+
+function RawInline(el)
+  if el.format == "html" then return pandoc.Str(el.text) end
+end
+
 function Pandoc(doc)
   local nonce = doc.meta["pi-preview-details"]
   if not nonce then return nil end
