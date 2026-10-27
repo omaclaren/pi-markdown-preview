@@ -221,6 +221,14 @@ try {
 		await page.waitForSelector('#preview-root mjx-container', { timeout: 20000 });
 		assert.equal(await scriptLinks(), 0, JSON.stringify(source));
 	}
+	// \boxed is framed in Chromium, which has no <menclose>: each box becomes a bordered mrow, inline, nested
+	// or inside aligned, while every equation stays native MathML and MathJax isn't used.
+	await page.setContent(await html('Inline $\\boxed{a+b}$ beside $x^2$.\n\n$$\\boxed{E = mc^2}$$\n\n$$\\boxed{a + \\boxed{b}}$$\n\n$$\\begin{aligned} a &= b \\\\ \\boxed{c} &= d \\end{aligned}$$\n\n$$\\int_0^1 f(x)\\,dx$$'));
+	await ready();
+	assert.equal(await page.$$eval('#preview-root menclose', boxes => boxes.length), 0);
+	assert.deepEqual(await page.$$eval('#preview-root mrow.pi-preview-math-box', rows => rows.map(row => [row.textContent, parseFloat(getComputedStyle(row).borderTopWidth) > 0])), [['a+b', true], ['E=mc2', true], ['a+b', true], ['b', true], ['c', true]]);
+	assert.equal(await page.$$eval('#preview-root math', maths => maths.length), 6);
+	assert.equal(await page.$$eval('#preview-root mjx-container', containers => containers.length), 0, 'MathJax is not used');
 	// Static HTML carries a script policy: the page's own scripts (Mermaid) still run; an injected inline handler does not.
 	const mermaid = '```mermaid\nflowchart LR\n  A --> B\n```';
 	const guarded = preview.withStaticScriptPolicy((await html(mermaid)).replace(/<body[^>]*>/, body => `${body}<button id="injected" onclick="window.bad = true">x</button>`));

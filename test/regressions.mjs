@@ -1469,7 +1469,7 @@ async function assertBrowserWatchSymlinkResourceRoot() {
 await assertBrowserWatchServer();
 await assertBrowserWatchSymlinkResourceRoot();
 
-assert.match(src, /const RENDER_VERSION = "v36";/, "Details blocks and the safe-HTML filter should invalidate older preview caches.");
+assert.match(src, /const RENDER_VERSION = "v37";/, "Framed \\boxed math should invalidate older preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(src, /const PDFJS_BROWSER_VERSION = "6\.3\.289";/, "Browser PDF rendering should pin an exact PDF.js release.");
 assert.ok(
