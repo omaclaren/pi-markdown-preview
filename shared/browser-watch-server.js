@@ -1591,9 +1591,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				const nonce = randomBytes(18).toString("base64url");
 				const title = escapeBrowserWatchHtmlText(`${basename(canonicalPath)} — ${options.titleSuffix || "Markdown Preview"}`);
 				const returnUrl = `/?revision=${fromRevision}&identity=${identity}`;
-				// Option/Alt+Left does what the link does: in Preview it steps back through responses,
-				// and a linked document has none, so back is to the response it was opened from.
-				const back = `<nav class="pi-preview-document-nav" aria-label="Document navigation"><a href="${escapeBrowserWatchHtmlAttribute(returnUrl)}" title="Return to preview (Option/Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft">← Return to preview</a></nav><script>history.scrollRestoration='auto';addEventListener('keydown',e=>{if(e.defaultPrevented||e.isComposing||e.repeat||!e.altKey||e.ctrlKey||e.metaKey||e.shiftKey||e.key!=='ArrowLeft')return;const t=e.target;if(t instanceof Element&&t.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))return;const a=document.querySelector('.pi-preview-document-nav a[href]');if(a){e.preventDefault();a.click();}});</script>`;
+				// Option/Alt+Left goes back a page, as Back does, when the page before this one in the
+				// tab is from this preview's origin: the Navigation API lists only same-origin entries
+				// (their URLs stay hidden under no-referrer). Otherwise, as in a new tab or without
+				// that API, it follows the link to the source response.
+				const back = `<nav class="pi-preview-document-nav" aria-label="Document navigation"><a href="${escapeBrowserWatchHtmlAttribute(returnUrl)}" title="Return to the response this was opened from (Option/Alt+Left goes back a page)">← Return to preview</a></nav><script>history.scrollRestoration='auto';addEventListener('keydown',e=>{if(e.defaultPrevented||e.isComposing||e.repeat||!e.altKey||e.ctrlKey||e.metaKey||e.shiftKey||e.key!=='ArrowLeft')return;const t=e.target;if(t instanceof Element&&t.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))return;e.preventDefault();const i=window.navigation?.currentEntry?.index;if(i>0){history.back();return;}document.querySelector('.pi-preview-document-nav a[href]')?.click();});</script>`;
 				const html = document.html.replace(/<body([^>]*)>/i, match => match + back).replace(BASE_TAG_PATTERN, "")
 					.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, () => `<title>${title}</title>`)
 					.replace(/<script(?=[\s>])/gi, `<script nonce="${nonce}"`);

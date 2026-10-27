@@ -72,18 +72,32 @@ try {
 	await page.waitForFunction(y => Math.abs(scrollY - y) < 80, {}, originalY);
 	assert.equal(new URL(page.url()).searchParams.get("revision"), "1", "Back returns to the source revision, not a newer response");
 	console.log("Same-tab/back navigation passed");
-	// Option/Alt+Left on a linked document does what its Return link does; in a text field it is left alone.
+	// Option/Alt+Left on a linked document goes back a page, as Back does, through nested links; a text
+	// field keeps the key; with no earlier page from this preview in the tab, it follows Return.
+	const altLeft = async target => { await target.keyboard.down("Alt"); await target.keyboard.press("ArrowLeft"); await target.keyboard.up("Alt"); };
+	const readingY = await page.evaluate(() => scrollY);
 	await Promise.all([page.waitForNavigation(), page.click("#report")]);
-	assert.equal(await page.$eval(".pi-preview-document-nav a", link => link.getAttribute("aria-keyshortcuts")), "Alt+ArrowLeft");
-	const altLeft = async () => { await page.keyboard.down("Alt"); await page.keyboard.press("ArrowLeft"); await page.keyboard.up("Alt"); };
+	const reportUrl = page.url();
+	assert.match(await page.$eval(".pi-preview-document-nav a", link => link.title), /Option\/Alt\+Left goes back a page/);
+	await Promise.all([page.waitForNavigation(), page.click("#next")]);
+	assert.match(await page.content(), /Next document/);
 	await page.evaluate(() => { const input = document.createElement("input"); input.id = "typing"; input.value = "two words"; document.body.append(input); input.focus(); });
-	await altLeft();
+	await altLeft(page);
 	await new Promise(resolve => setTimeout(resolve, 200));
-	assert.equal(await page.$eval("#details", node => node.textContent), "Report", "Option+Left in a text field moves the caret, not the page");
+	assert.match(await page.content(), /Next document/, "Option+Left in a text field moves the caret, not the page");
 	await page.$eval("#typing", input => input.blur());
-	await Promise.all([page.waitForNavigation(), altLeft()]);
-	assert.equal(new URL(page.url()).searchParams.get("revision"), "1", "Option+Left returns to the response the document was opened from");
-	console.log("Option+Left return passed");
+	await Promise.all([page.waitForNavigation(), altLeft(page)]);
+	assert.equal(page.url(), reportUrl, "Back a page: to the document that linked here, not straight to the response");
+	assert.equal(await page.$eval("#details", node => node.textContent), "Report");
+	await Promise.all([page.waitForNavigation(), altLeft(page)]);
+	assert.equal(new URL(page.url()).searchParams.get("revision"), "1", "Then back to the response, at the reading position");
+	await page.waitForFunction(y => Math.abs(scrollY - y) < 80, {}, readingY);
+	const fresh = await browser.newPage();
+	await fresh.goto(reportUrl, { waitUntil: "load" });
+	await Promise.all([fresh.waitForNavigation(), altLeft(fresh)]);
+	assert.equal(new URL(fresh.url()).searchParams.get("revision"), "1", "In a new tab it follows Return to the source response");
+	await fresh.close();
+	console.log("Option+Left back passed");
 	// Browser-native middle click still opens a tab; no custom context menu.
 	const popupPromise = browser.waitForTarget(target => target.type() === "page" && target !== page.target() && target.url().includes("/__pi_markdown_preview_document__/"), { timeout: 10000 }).then(target => target.page());
 	await page.click("#report", { button: "middle" });
