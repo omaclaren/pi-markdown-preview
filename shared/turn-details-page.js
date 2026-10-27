@@ -2,7 +2,7 @@ import { createTurnDetails } from "./turn-details.js";
 import { AGENT_PAGE_STYLE } from "./agent-page-style.js";
 import { IMAGE_UNAVAILABLE } from "./recorded-images.js";
 import { questionInput, questionAnswers } from "./ask-user-question.js";
-import { TERMINAL_SEQUENCE, replSendCall, replSendCalls, replSendOutput } from "./repl-snapshot.js";
+import { TERMINAL_SEQUENCE, replResultBinding, replResultSplit, replSendCall, replSendCalls } from "./repl-snapshot.js";
 const escape = value => String(value ?? "").replace(/[&<>"'\r]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "\r": "&#13;" })[ch]);
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -163,7 +163,7 @@ function resultView(text) {
 // A repl_send result whose recorded text repeats its call's code exactly shows
 // only the output; anything else keeps the ordinary result view.
 function replResultView(event, call) {
-	const split = call && !/\(error\)/.test(event.label) ? replSendOutput(event.text.replace(TERMINAL_SEQUENCE, ""), call.code) : null;
+	const split = replResultSplit(event, call);
 	if (!split) return resultView(event.text);
 	const activity = split.activity.trim() ? `<p class="repl-activity">${escape(split.activity.trim())}</p>` : "";
 	const output = split.output.trim() ? literalPre(split.output) : '<p class="empty-text">No output</p>';
@@ -307,7 +307,13 @@ export function renderLiveCard(event, number, fromClaude = false, next, calls = 
 	const label = claudeEnvelope(event, fromClaude)?.label ?? (event.label || event.kind);
 	// Only the record's absence is stated; nothing is inferred about the call.
 	const pending = event.kind === "tool" && event.pending === true ? ' <span class="live-pending">· No result recorded yet</span>' : "";
-	return `<details class="event ${escape(event.kind)}" data-event-id="${escape(event.id)}" data-event-version="${escape(event.version)}"${open ? " open" : ""}><summary><span class="number"${event.callId ? ` title="Call ID: ${escape(event.callId)}"` : ""}>${number}</span> ${escape(label)}${pending}</summary><div class="event-content">${eventContent(event, fromClaude, calls)}</div></details>`;
+	return `<details class="event ${escape(event.kind)}" data-event-id="${escape(event.id)}" data-event-version="${escape(liveCardVersion(event, calls))}"${open ? " open" : ""}><summary><span class="number"${event.callId ? ` title="Call ID: ${escape(event.callId)}"` : ""}>${number}</span> ${escape(label)}${pending}</summary><div class="event-content">${eventContent(event, fromClaude, calls)}</div></details>`;
+}
+
+/** The version a live card carries: its event's, plus what a REPL result shows from its call. */
+export function liveCardVersion(event, calls = new Map()) {
+	const binding = replResultBinding(event, calls);
+	return binding ? `${event.version}.${binding}` : event.version;
 }
 
 /** Status line: only what the record says. Links are server-built, same-origin. */
