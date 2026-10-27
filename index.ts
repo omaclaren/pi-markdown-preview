@@ -91,7 +91,7 @@ const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-contr
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
 const PANDOC_DETAILS_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-details.lua", import.meta.url));
 const PANDOC_SAFE_HTML_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-safe-html.lua", import.meta.url));
-const RENDER_VERSION = "v36";
+const RENDER_VERSION = "v37";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
 const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
@@ -4155,6 +4155,10 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
 }
+#preview-root mrow.pi-preview-math-box {
+  border: 0.06em solid currentColor;
+  padding: 0.2em;
+}
 #preview-root mjx-container[display="true"] {
   display: block;
   margin: 1em 0;
@@ -4511,49 +4515,17 @@ ${codeWrapControlsScript}
       }
     };
 
-    // Chromium/WebView do not implement MathML <menclose>, so Pandoc's \boxed{...}
-    // loses its frame and degrades. Re-render those equations with MathJax using the
-    // TeX embedded in <annotation encoding="application/x-tex">.
-    const renderMencloseMath = async (root) => {
+    // Chromium implements MathML Core, which has no <menclose>, so Pandoc's \\boxed{...}
+    // shows no frame there. Each box becomes an mrow with a border, which Chromium, Safari
+    // and Firefox all draw; a border on the menclose itself would double the frame Safari
+    // and Firefox draw already. It runs before MathJax, so MathJax's own MathML is untouched.
+    const replaceMencloseBoxes = (root) => {
       if (!root) return;
-      const boxes = Array.from(root.querySelectorAll('math menclose'));
-      if (boxes.length === 0) return;
-
-      const targets = new Map();
-      boxes.forEach((box) => {
-        // Skip MathJax's own hidden assistive MathML copy: it also contains <menclose>.
-        if (box.closest('mjx-assistive-mml')) return;
-        const math = box.closest('math');
-        if (!math || targets.has(math)) return;
-        const annotation = math.querySelector('annotation[encoding="application/x-tex"]');
-        const tex = annotation && typeof annotation.textContent === 'string' ? annotation.textContent.trim() : '';
-        if (!tex) return;
-        targets.set(math, tex);
-      });
-      if (targets.size === 0) return;
-
-      let mathJax;
-      try {
-        mathJax = await ensureMathJax();
-      } catch (e) {
-        console.error('MathJax load failed:', e);
-        return;
-      }
-
-      const hosts = [];
-      targets.forEach((tex, math) => {
-        const displayMode = math.getAttribute('display') === 'block';
-        const host = document.createElement('span');
-        host.className = 'pi-menclose-math';
-        host.textContent = displayMode ? '\\\\[' + tex + '\\\\]' : '\\\\(' + tex + '\\\\)';
-        math.replaceWith(host);
-        hosts.push(host);
-      });
-
-      try {
-        await mathJax.typesetPromise(hosts);
-      } catch (e) {
-        console.error('MathJax menclose render failed:', e);
+      for (const box of root.querySelectorAll('math menclose[notation="box"]')) {
+        const row = document.createElementNS('http://www.w3.org/1998/Math/MathML', 'mrow');
+        row.classList.add('pi-preview-math-box');
+        row.append(...box.childNodes);
+        box.replaceWith(row);
       }
     };
 
@@ -4630,12 +4602,12 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
 
     const root = document.getElementById('preview-root');
     try {
+      replaceMencloseBoxes(root);
       await renderMermaid();
       applyPreviewAnnotationPlaceholders(root);
       decorateDiffCodeBlocks(root);
       await renderAnnotationMarkerMath(root);
       await renderMathFallback(root);
-      await renderMencloseMath(root);
       await renderPdfFigures(root);
       if (${codeWrapping.controls !== false}) {
         window.PiMarkdownPreviewCodeWrap?.installCodeWrapControls(root);
