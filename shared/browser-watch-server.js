@@ -12,7 +12,7 @@ import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
 import { buildTurnDetailsPage, buildLivePage, liveCardVersion, liveStatusHtml, renderLiveCard } from "./turn-details-page.js";
-import { replResultBinding, replSendCalls } from "./repl-snapshot.js";
+import { isReplResultLabel, replSendCalls } from "./repl-snapshot.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 
@@ -999,22 +999,6 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	const nativeActionKey = randomBytes(32).toString("base64url");
 	const nativePathAction = options.nativePathAction ?? performNativePathAction;
 	let nativeActionBusy = false, nextNativeActionAt = 0;
-	// A REPL result's card also shows part of its call, so it changes when the call
-	// does (a revised record, or the call leaving the live window) while the result's
-	// own record stays the same. Per live generation and result: what it took from
-	// its call, and the sequence at which that was first seen here.
-	const liveBindings = new Map();
-	const liveBindingSince = (snapshot, event, calls) => {
-		const key = `${snapshot.generation}\0${event.id}`;
-		const binding = replResultBinding(event, calls);
-		const known = liveBindings.get(key);
-		if (known?.binding === binding) return known.at;
-		// New here or changed: every view behind this sequence gets the card again.
-		liveBindings.delete(key);
-		liveBindings.set(key, { binding, at: snapshot.sequence });
-		while (liveBindings.size > 4096) liveBindings.delete(liveBindings.keys().next().value);
-		return snapshot.sequence;
-	};
 	const expiredHint = typeof options.expiredHint === "string" ? options.expiredHint.trim() : "Re-run /preview-browser --watch.";
 	const lexicalResourceRoot = resolve(resourceRoot);
 	const resolvedResourceRoot = await realpath(lexicalResourceRoot);
@@ -1369,11 +1353,17 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, previewHref: links.previewHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, loaded: snapshot.loaded === true, omitted: snapshot.omitted };
 					if (!resync && since === snapshot.sequence) { respondJson(res, 200, { ...base, unchanged: true }); return; }
 					const calls = replSendCalls(snapshot.events);
-					const upserts = snapshot.events.flatMap((event, i) => {
-						const bound = event.kind === "result" ? liveBindingSince(snapshot, event, calls) : 0;
-						return resync || event.changed > since || bound > since
-							? [{ id: event.id, version: liveCardVersion(event, calls), html: renderLiveCard(event, snapshot.omitted + i + 1, snapshot.sourceAgent === "claude", snapshot.events[i + 1], calls) }] : [];
-					});
+					// A REPL result's card also shows part of its call, so it is sent again when its
+					// call changed (revised or arrived) or is no longer in the window (evicted or
+					// reverted). Such results are few; the page skips any whose version is unchanged.
+					const toolCalls = new Map(snapshot.events.flatMap(event => event.kind === "tool" && typeof event.callId === "string" ? [[event.callId, event]] : []));
+					const dependsOnCall = event => {
+						if (event.kind !== "result" || typeof event.callId !== "string") return false;
+						const call = toolCalls.get(event.callId);
+						return call ? call.changed > since : isReplResultLabel(event.label);
+					};
+					const upserts = snapshot.events.flatMap((event, i) => resync || event.changed > since || dependsOnCall(event)
+						? [{ id: event.id, version: liveCardVersion(event, calls), html: renderLiveCard(event, snapshot.omitted + i + 1, snapshot.sourceAgent === "claude", snapshot.events[i + 1], calls) }] : []);
 					respondJson(res, 200, { ...base, resync, ids: snapshot.events.map(event => event.id), upserts });
 					return;
 				}

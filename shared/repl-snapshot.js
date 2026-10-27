@@ -26,10 +26,17 @@ const PANE_REPORT_END = "\n[end of pane text]";
 // Endings that mean the recorded text is not the whole result: pi-repl's own
 // truncation notice, and the turn details' display limit.
 const SHORTENED = /\n\n\[REPL response truncated\. Full submitted code and output saved to: [^\n]*\]$|\n\[… truncated\]$/;
-// Turn-details notices that mean recorded activity is missing or shortened.
-const PARTIAL_NOTICE = /^(?:Display limits reached|Long entries are truncated|Earlier activity)/;
+// Turn-details notices that can't hide a REPL call or its result: about prompts,
+// attachments, images, reasoning, shell output or model input. Any other notice,
+// including one added later, may mean activity is missing, so the snapshot says so.
+const COMPLETE_NOTICE = /^(?:Known harness-injected context is omitted|Non-image file attachments are omitted|Prompt (?:and non-tool-result|file) attachments are omitted|Some image\/file attachments are omitted|Further recorded images are omitted|This turn's image byte or pixel limit|Opaque\/encrypted reasoning is not available|Redacted reasoning is not available|A user shell command has no recorded text output|Context edits were recorded|OpenCode recorded only part of a shell command's output)/;
 
 export const isReplSendLabel = label => typeof label === "string" && REPL_SEND_TOOL.test(label);
+/** A result label naming repl_send: "Tool result: <name>", with " (error)" after "result" or the name. */
+export const isReplResultLabel = label => {
+	const name = typeof label === "string" ? /^Tool result(?: \(error\))?: (.+?)(?: \(error\))?$/.exec(label)?.[1] : undefined;
+	return name !== undefined && isReplSendLabel(`Tool: ${name}`);
+};
 
 /**
  * A recorded repl_send call's arguments, or null for any other shape. An omitted
@@ -126,15 +133,15 @@ const fenced = (value, language = "") => {
 
 /**
  * Markdown for a folded snapshot of a turn's REPL submissions, or "" when there
- * are none. `details` is the turn details ({ events, notices }); when its notices
- * say activity is missing or shortened, the snapshot says so too. Only fixed
+ * are none. `details` is the turn details ({ events, notices }); unless its notices
+ * are all ones that can't hide REPL activity, the snapshot says activity may be missing. Only fixed
  * labels are written as Markdown; recorded code and output appear only inside
  * code fences. Render it as its own Markdown document: a fence left open in
  * text before it would otherwise change how its fences pair.
  */
 export function replSnapshotMarkdown(details) {
 	const events = Array.isArray(details?.events) ? details.events : [];
-	const partial = (Array.isArray(details?.notices) ? details.notices : []).some(notice => typeof notice === "string" && PARTIAL_NOTICE.test(notice));
+	const partial = (Array.isArray(details?.notices) ? details.notices : []).some(notice => typeof notice !== "string" || !COMPLETE_NOTICE.test(notice));
 	// Every repl_send call in order; one whose arguments can't be read (shortened, or
 	// not a REPL call's shape) is counted rather than dropped.
 	const submissions = events.flatMap(event => event?.kind === "tool" && isReplSendLabel(event.label)
@@ -165,7 +172,7 @@ export function replSnapshotMarkdown(details) {
 		`<summary>REPL · ${labels.join(", ")} · ${count} ${partial ? "shown from" : "in"} this turn</summary>`,
 		"",
 		"*Recorded in this response's turn; not the REPL's current state.*",
-		...(partial ? ["", "*Some of this turn's recorded activity is missing or shortened here, so submissions or results may be missing. Working shows what is available.*"] : []),
+		...(partial ? ["", "*Parts of this turn's recorded activity may be missing or shortened here, so some submissions or results may not appear. Working shows what is available and why.*"] : []),
 		"",
 		...[...body, ...more].flatMap(part => [part, ""]),
 		`</details>`,

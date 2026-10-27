@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { turnDetailsFromRecords } from "../shared/turn-details.js";
 import { buildTurnDetailsPage, buildLivePage, liveCardVersion, renderLiveCard } from "../shared/turn-details-page.js";
-import { isReplSendLabel, replSendCall, replSendCalls, replSendOutput, replSnapshotMarkdown } from "../shared/repl-snapshot.js";
+import { isReplResultLabel, isReplSendLabel, replSendCall, replSendCalls, replSendOutput, replSnapshotMarkdown } from "../shared/repl-snapshot.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const txt = text => ({ type: "text", text });
@@ -29,6 +29,8 @@ const claudeTurn = (calls, answer = "Answer") => {
 test("REPL tool names: Pi's repl_send and MCP-prefixed names only", () => {
  for (const name of ["repl_send", "mcp__agent-repl__repl_send", "mcp__repl__repl_send", "agent-repl__repl_send", "agent-repl_repl_send", "functions.repl_send"]) assert.ok(isReplSendLabel(`Tool: ${name}`), name);
  for (const label of ["Tool: repl_sender", "Tool: repl_send_x", "Tool: Bash", "Tool result: repl_send", "repl_send", "Tool: mcp__agent-repl__repl_status"]) assert.equal(isReplSendLabel(label), false, label);
+ for (const label of ["Tool result: repl_send", "Tool result: repl_send (error)", "Tool result (error): mcp__agent-repl__repl_send", "Tool result: agent-repl_repl_send"]) assert.ok(isReplResultLabel(label), label);
+ for (const label of ["Tool result: Bash", "Tool result", "Tool: repl_send", "Tool result: repl_sender"]) assert.equal(isReplResultLabel(label), false, label);
 });
 
 test("REPL calls: runtime labels come from known targets; other shapes are not REPL calls", () => {
@@ -127,7 +129,7 @@ test("Preview snapshot: when the turn details are bounded, it says so instead of
  assert.ok(details.notices.some(n => /some recorded events are omitted/.test(n)));
  const markdown = replSnapshotMarkdown(details);
  assert.match(markdown, /<summary>REPL · Python · 1 submission shown from this turn<\/summary>/);
- assert.match(markdown, /\*Some of this turn's recorded activity is missing or shortened here, so submissions or results may be missing\. Working shows what is available\.\*/);
+ assert.match(markdown, /\*Parts of this turn's recorded activity may be missing or shortened here, so some submissions or results may not appear\. Working shows what is available and why\.\*/);
  assert.match(markdown, /\*No result in the recorded activity shown\.\*/);
  assert.doesNotMatch(markdown, /No result recorded/);
  // Arguments shortened by the display limit no longer parse: the call is counted, not dropped.
@@ -135,6 +137,19 @@ test("Preview snapshot: when the turn details are bounded, it says so instead of
  const counted = replSnapshotMarkdown(long);
  assert.match(counted, /2 submissions shown from this turn/);
  assert.match(counted, /\*\*1\*\* · \*Its recorded arguments can't be read here; see Working\.\*\n\n\*\*2\*\* · Python/);
+ // Only notices that can't hide REPL activity leave the record complete; any other one,
+ // such as a bounded read or a notice this code doesn't know, may mean activity is missing.
+ const pending = { input: { code: "slow()" } };
+ const benign = claudeTurn([pending]);
+ benign.notices.push("Known harness-injected context is omitted; it is not labelled as a user prompt.", "Non-image file attachments are omitted.");
+ assert.match(replSnapshotMarkdown(benign), /1 submission in this turn[^]*\*No result recorded\.\*/);
+ for (const notice of ["Only a bounded portion of the session was read; earlier or oversized records may be missing.", "The turn-start marker is missing; only recorded activity after the preceding completion is shown.", "The read-size limit was reached; earlier activity is omitted.", "A notice added later"]) {
+  const bounded = claudeTurn([pending]);
+  bounded.notices.push(notice);
+  assert.match(replSnapshotMarkdown(bounded), /1 submission shown from this turn[^]*may be missing or shortened[^]*\*No result in the recorded activity shown\.\*/, notice);
+ }
+ const read = turnDetailsFromRecords("claude", [c("u", null, "user", "Run it"), c("call", "u", "assistant", [{ type: "tool_use", id: "t", name: "repl_send", input: { code: "1" } }], "w", "tool_use"), c("f", "call", "assistant", [txt("Answer")], "final", "end_turn")], { key: "claude:final", markdown: "Answer" }, true);
+ assert.match(replSnapshotMarkdown(read), /shown from this turn[^]*No result in the recorded activity shown/, "A reader's bounded read");
 });
 
 test("Working: a REPL call shows its runtime and code; its result shows only the output", () => {
@@ -204,6 +219,18 @@ test("Live updates: a REPL result is sent again when its call changes or leaves 
  assert.deepEqual(evicted.upserts.map(u => u.id), ["result"]);
  assert.equal(evicted.upserts[0].version, "r");
  assert.doesNotMatch(evicted.upserts[0].html, /<h3>Output<\/h3>/);
- // A view that missed all of it still gets the result once, at its current form.
+ // A view that missed all of it still gets the result, at its current form.
  assert.deepEqual((await updates(first.cursor)).upserts.map(u => [u.id, u.version]), [["result", "r"]]);
+ // A page loaded as HTML, never through the updates route, still gets the result when its call changes.
+ snapshot = { ...snapshot, sequence: 5, omitted: 0, events: [{ ...call("print(1)"), changed: 5 }, result] };
+ const livePage = await (await fetch(new URL(`/__pi_markdown_preview_live__/a?${query}`, server.url), { headers: { cookie } })).text();
+ assert.match(livePage, /data-event-id="result" data-event-version="r\.[a-z0-9]+"/);
+ const cursor = livePage.match(/data-live-cursor="([^"]+)"/)[1];
+ assert.equal((await updates(cursor)).unchanged, true);
+ snapshot = { ...snapshot, sequence: 6, events: [{ ...call("print(2)"), changed: 6 }, result] };
+ const changedBack = await updates(cursor);
+ assert.deepEqual(changedBack.upserts.map(u => [u.id, u.version]), [["call", "v-print(2)"], ["result", "r"]]);
+ // A result whose call is unchanged and still in the window is not resent.
+ snapshot = { ...snapshot, sequence: 7, events: [{ ...call("print(2)"), changed: 6 }, result, { kind: "progress", label: "Assistant progress", text: "more", id: "p", version: "p", changed: 7 }] };
+ assert.deepEqual((await updates(changedBack.cursor)).upserts.map(u => u.id), ["p"]);
 });
