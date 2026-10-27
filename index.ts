@@ -91,7 +91,7 @@ const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-contr
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
 const PANDOC_DETAILS_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-details.lua", import.meta.url));
 const PANDOC_SAFE_HTML_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-safe-html.lua", import.meta.url));
-const RENDER_VERSION = "v36";
+const RENDER_VERSION = "v37";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
 const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
@@ -4155,6 +4155,10 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
 }
+#preview-root mrow.pi-preview-math-box {
+  border: 0.06em solid currentColor;
+  padding: 0.2em;
+}
 #preview-root mjx-container[display="true"] {
   display: block;
   margin: 1em 0;
@@ -4511,6 +4515,20 @@ ${codeWrapControlsScript}
       }
     };
 
+    // Chromium implements MathML Core, which has no <menclose>, so Pandoc's \\boxed{...}
+    // shows no frame there. Each box becomes an mrow with a border, which Chromium, Safari
+    // and Firefox all draw; a border on the menclose itself would double the frame Safari
+    // and Firefox draw already. It runs before MathJax, so MathJax's own MathML is untouched.
+    const replaceMencloseBoxes = (root) => {
+      if (!root) return;
+      for (const box of root.querySelectorAll('math menclose[notation="box"]')) {
+        const row = document.createElementNS('http://www.w3.org/1998/Math/MathML', 'mrow');
+        row.classList.add('pi-preview-math-box');
+        row.append(...box.childNodes);
+        box.replaceWith(row);
+      }
+    };
+
     const renderMathFallback = async (root) => {
       const fallbackTargets = collectMathFallbackTargets(root);
       if (fallbackTargets.length === 0) return;
@@ -4584,6 +4602,7 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
 
     const root = document.getElementById('preview-root');
     try {
+      replaceMencloseBoxes(root);
       await renderMermaid();
       applyPreviewAnnotationPlaceholders(root);
       decorateDiffCodeBlocks(root);
