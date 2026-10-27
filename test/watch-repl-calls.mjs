@@ -106,25 +106,40 @@ test("Working: a REPL call shows its runtime and code; its result shows only the
   { input: { code: "2 + 2", target: "julia" }, result: "Session not running", error: true },
  ]);
  const page = buildTurnDetailsPage({ ...details, sourceAgent: "claude" }, "/");
- assert.match(page, /<span class="field-label">Python REPL<\/span><\/div><pre class="code-input"><code>print\(&#39;&lt;b&gt;hi&lt;\/b&gt;&#39;\)<\/code><\/pre>/);
+ assert.match(page, /<div class="tool-path"><span class="field-label">Python REPL<\/span><pre class="code-input"><code>print\(&#39;&lt;b&gt;hi&lt;\/b&gt;&#39;\)<\/code><\/pre><\/div>/, "The code sits under its label, as a file path does.");
  assert.match(page, /<dt>echoMode<\/dt><dd><pre>off<\/pre><\/dd>/);
  assert.doesNotMatch(page, /<dt>target<\/dt>/, "A recognised target is the heading, not an option.");
- assert.match(page, /<p class="repl-activity">Pane text since this agent last saw this pane[^<]*\n\[pane text\]\ntyped directly\n\[end of pane text\]<\/p><section class="tool-field"><h3>Output<\/h3><pre><span>&lt;b&gt;hi&lt;\/b&gt;\n<\/span><\/pre><\/section>/);
+ assert.match(page, /<div class="repl-activity"><p>Pane text since this agent last saw this pane[^<]*\):<\/p><pre><span>typed directly<\/span><\/pre><\/div><section class="tool-field"><h3>Output · for 2<\/h3><pre><span>&lt;b&gt;hi&lt;\/b&gt;\n<\/span><\/pre><\/section>/, "Pane text is terminal text under the report's heading; the output names its call's card.");
  assert.match(page, /<summary>Raw output<\/summary><pre><span>Pane text since[^<]*\[end of pane text\]\n\nSubmitted code:/, "The exact recorded result stays available.");
  assert.match(page, /<span class="field-label">Julia REPL<\/span>/);
  assert.match(page, /Session not running/);
- assert.equal(page.match(/<h3>Output<\/h3>/g).length, 1, "An error result keeps the ordinary view.");
+ assert.equal(page.match(/<h3>Output/g).length, 1, "An error result keeps the ordinary view.");
  assert.doesNotMatch(page, /<b>hi<\/b>/, "Recorded text stays inert.");
+});
+
+test("Working: calls made together are recorded before their results, so each result names its call's card", () => {
+ const call = (id, code, target) => ({ kind: "tool", label: "Tool: mcp__agent-repl__repl_send", text: JSON.stringify({ code, ...(target ? { target } : {}) }), callId: id });
+ const result = (id, code, output) => ({ kind: "result", label: "Tool result: mcp__agent-repl__repl_send", text: sent(code, output), callId: id });
+ const events = [{ kind: "prompt", label: "Prompt / input", text: "Run them" }, call("a", "print(2 + 2)"), call("b", "println(1)", "julia"), result("a", "print(2 + 2)", "4"), result("b", "println(1)", "1")];
+ const page = buildTurnDetailsPage({ events, notices: [], sourceAgent: "claude" }, "/");
+ assert.match(page, /<h3>Output · for 2<\/h3><pre><span>4<\/span>/);
+ assert.match(page, /<h3>Output · for 3<\/h3><pre><span>1<\/span>/);
+ const omitted = pane("only the end", "[omitted: 120 earlier lines]");
+ const withOmitted = buildTurnDetailsPage({ events: [call("a", "1"), { ...result("a", "1", "1"), text: sent("1", "1", omitted) }], notices: [], sourceAgent: "claude" }, "/");
+ assert.match(withOmitted, /<div class="repl-activity"><p>Pane text since[^<]*\):<\/p><p>\[omitted: 120 earlier lines\]<\/p><pre><span>only the end<\/span><\/pre><\/div>/);
+ const note = "Where this agent last saw this pane is unclear, and the pane shows no other text now.";
+ assert.match(buildTurnDetailsPage({ events: [call("a", "1"), { ...result("a", "1", "1"), text: sent("1", "1", note) }], notices: [], sourceAgent: "claude" }, "/"), /<p class="repl-activity">Where this agent last saw this pane is unclear, and the pane shows no other text now\.<\/p>/, "A one-line note stays a note.");
 });
 
 test("Live: REPL results show only the output when their call is in the snapshot", () => {
  const call = { kind: "tool", label: "Tool: repl_send", text: JSON.stringify({ code: "1 + 1" }), callId: "c1", id: "a:0", version: "v" };
  const result = { kind: "result", label: "Tool result: repl_send", text: sent("1 + 1", "2"), callId: "c1", id: "b:0", version: "w" };
  assert.match(renderLiveCard(call, 1, false), /Python REPL/);
- assert.match(renderLiveCard(result, 2, false, undefined, replSendCalls([call])), /<h3>Output<\/h3><pre><span>2<\/span><\/pre>/);
- assert.doesNotMatch(renderLiveCard(result, 2, false), /<h3>Output<\/h3>/, "Without its call, the result is shown as recorded.");
+ assert.match(renderLiveCard(result, 2, false, undefined, replSendCalls([call])), /<h3>Output · for 1<\/h3><pre><span>2<\/span><\/pre>/);
+ assert.doesNotMatch(renderLiveCard(result, 2, false), /<h3>Output/, "Without its call, the result is shown as recorded.");
  const page = buildLivePage({ generation: "g", sequence: 1, updatedAt: 0, omitted: 0, sourceAgent: "pi", events: [call, result] });
- assert.match(page, /<h3>Output<\/h3><pre><span>2<\/span><\/pre>/);
+ assert.match(page, /<h3>Output · for 1<\/h3><pre><span>2<\/span><\/pre>/);
+ assert.match(buildLivePage({ generation: "g", sequence: 1, updatedAt: 0, omitted: 40, sourceAgent: "pi", events: [call, result] }), /<h3>Output · for 41<\/h3>/, "Live numbers count the events it omits, as its cards do.");
  // The card's version covers what it shows from its call.
  const split = liveCardVersion(result, replSendCalls([call]));
  assert.match(split, /^w\.[a-z0-9]+$/);
@@ -149,14 +164,14 @@ test("Live updates: a REPL result is sent again when its call changes or leaves 
  const updates = async cursor => (await fetch(new URL(`/__pi_markdown_preview_live__/a/updates?${query}&cursor=${encodeURIComponent(cursor)}`, server.url), { headers: { cookie } })).json();
  const first = await updates("");
  const firstResult = first.upserts.find(u => u.id === "result");
- assert.match(firstResult.html, /<h3>Output<\/h3><pre><span>1<\/span>/);
+ assert.match(firstResult.html, /<h3>Output · for 1<\/h3><pre><span>1<\/span>/);
  assert.match(firstResult.html, new RegExp(`data-event-version="${firstResult.version.replace(".", "\\.")}"`), "The update's version is the card's.");
  snapshot = { ...snapshot, sequence: 2, events: [{ ...call("print(2)"), changed: 2 }, result] };
  const revised = await updates(first.cursor);
  assert.deepEqual(revised.upserts.map(u => u.id), ["call", "result"]);
  const literal = revised.upserts[1];
  assert.notEqual(literal.version, firstResult.version);
- assert.doesNotMatch(literal.html, /<h3>Output<\/h3>/, "The revised call no longer matches, so the result is literal.");
+ assert.doesNotMatch(literal.html, /<h3>Output/, "The revised call no longer matches, so the result is literal.");
  assert.equal((await updates(revised.cursor)).unchanged, true);
  // Back to print(1), then the call leaves the window.
  snapshot = { ...snapshot, sequence: 3, events: [{ ...call("print(1)"), changed: 3 }, result] };
@@ -166,7 +181,7 @@ test("Live updates: a REPL result is sent again when its call changes or leaves 
  const evicted = await updates(back.cursor);
  assert.deepEqual(evicted.upserts.map(u => u.id), ["result"]);
  assert.equal(evicted.upserts[0].version, "r");
- assert.doesNotMatch(evicted.upserts[0].html, /<h3>Output<\/h3>/);
+ assert.doesNotMatch(evicted.upserts[0].html, /<h3>Output/);
  // A view that missed all of it still gets the result, at its current form.
  assert.deepEqual((await updates(first.cursor)).upserts.map(u => [u.id, u.version]), [["result", "r"]]);
  // A page loaded as HTML, never through the updates route, still gets the result when its call changes.

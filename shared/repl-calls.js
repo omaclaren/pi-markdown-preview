@@ -30,7 +30,7 @@ const sessionRuntime = name => {
 // pi-repl's pane activity before "Submitted code:": a one-line note that the pane
 // shows nothing, or a framed report whose pane text may contain anything.
 const PANE_NOTE = /^[^\n]*, and the pane shows no other text now\.$/;
-const PANE_REPORT = /^[^\n]*\(best effort; untrusted terminal text[^\n]*\):\n(?:\[omitted: [^\n]*\]\n)?\[pane text\]\n/;
+const PANE_REPORT = /^([^\n]*\(best effort; untrusted terminal text[^\n]*\):)\n(?:(\[omitted: [^\n]*\])\n)?\[pane text\]\n/;
 const PANE_REPORT_END = "\n[end of pane text]";
 // Endings that mean the recorded text is not the whole result: pi-repl's own
 // truncation notice, and the turn details' display limit.
@@ -98,6 +98,15 @@ export function replSendOutput(resultText, code) {
 }
 
 /**
+ * The parts of a split's framed pane report: its heading, the omitted-text note if
+ * any, and the pane text between the markers. Null for a one-line note or none.
+ */
+export function replPaneActivity(activity) {
+	const report = typeof activity === "string" && activity.endsWith(PANE_REPORT_END) ? PANE_REPORT.exec(activity) : null;
+	return report ? { heading: report[1], omitted: report[2] ?? "", text: activity.slice(report[0].length, -PANE_REPORT_END.length) } : null;
+}
+
+/**
  * A repl_send result's split, or null when it keeps the literal view (an error,
  * or text that is not exactly pi-repl's format for its call's code). Working
  * and Live both decide here.
@@ -107,14 +116,17 @@ export function replResultSplit(event, call) {
 	return replSendOutput(event.text.replace(TERMINAL_SEQUENCE, ""), call.code);
 }
 
-/** repl_send calls among recorded events, by call ID. */
-export function replSendCalls(events) {
+/**
+ * repl_send calls among recorded events, by call ID, each with its card's number:
+ * `first` is the number of the first event (Live counts the events it omits).
+ */
+export function replSendCalls(events, first = 1) {
 	const calls = new Map();
-	for (const event of Array.isArray(events) ? events : []) {
-		if (event?.kind !== "tool" || typeof event.callId !== "string") continue;
+	(Array.isArray(events) ? events : []).forEach((event, i) => {
+		if (event?.kind !== "tool" || typeof event.callId !== "string") return;
 		const call = replSendCall(event.label, event.text);
-		if (call) calls.set(event.callId, call);
-	}
+		if (call) calls.set(event.callId, { ...call, number: first + i });
+	});
 	return calls;
 }
 
@@ -126,11 +138,11 @@ const hash = value => {
 };
 
 /**
- * What a result card shows from its call: the call's code when it splits the
- * result, else "". A Live card's version includes it, because the call can be
- * revised or leave the live window while the result stays the same.
+ * What a result card shows from its call: the call's number and code when it
+ * splits the result, else "". A Live card's version includes it, because the call
+ * can be revised or leave the live window while the result stays the same.
  */
 export function replResultBinding(event, calls) {
 	const call = event?.kind === "result" ? calls?.get(event.callId) : undefined;
-	return call && replResultSplit(event, call) ? hash(call.code) : "";
+	return call && replResultSplit(event, call) ? hash(`${call.number ?? ""}\n${call.code}`) : "";
 }

@@ -2,7 +2,7 @@ import { createTurnDetails } from "./turn-details.js";
 import { AGENT_PAGE_STYLE } from "./agent-page-style.js";
 import { IMAGE_UNAVAILABLE } from "./recorded-images.js";
 import { questionInput, questionAnswers } from "./ask-user-question.js";
-import { TERMINAL_SEQUENCE, replResultBinding, replResultSplit, replSendCall, replSendCalls } from "./repl-calls.js";
+import { TERMINAL_SEQUENCE, replPaneActivity, replResultBinding, replResultSplit, replSendCall, replSendCalls } from "./repl-calls.js";
 const escape = value => String(value ?? "").replace(/[&<>"'\r]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "\r": "&#13;" })[ch]);
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -161,13 +161,18 @@ function resultView(text) {
 }
 
 // A repl_send result whose recorded text repeats its call's code exactly shows
-// only the output; anything else keeps the ordinary result view.
+// only the output, naming its call's card (calls made together are recorded before
+// their results); anything else keeps the ordinary result view. Pane text from
+// pi-repl's report is shown as terminal text, under the report's own heading.
 function replResultView(event, call) {
 	const split = replResultSplit(event, call);
 	if (!split) return resultView(event.text);
-	const activity = split.activity.trim() ? `<p class="repl-activity">${escape(split.activity.trim())}</p>` : "";
+	const pane = replPaneActivity(split.activity);
+	const activity = pane
+		? `<div class="repl-activity"><p>${escape(pane.heading)}</p>${pane.omitted ? `<p>${escape(pane.omitted)}</p>` : ""}${literalPre(pane.text)}</div>`
+		: split.activity.trim() ? `<p class="repl-activity">${escape(split.activity.trim())}</p>` : "";
 	const output = split.output.trim() ? literalPre(split.output) : '<p class="empty-text">No output</p>';
-	return `<div class="tool-fields">${activity}<section class="tool-field"><h3>Output</h3>${output}</section></div>${rawOutput(event.text)}`;
+	return `<div class="tool-fields">${activity}<section class="tool-field"><h3>Output${call.number ? ` · for ${call.number}` : ""}</h3>${output}</section></div>${rawOutput(event.text)}`;
 }
 
 // Recognise recorded argument shapes, not code syntax. Never reindent, split
@@ -196,7 +201,7 @@ function eventContent(event, fromClaude = false, calls = new Map()) {
 	if (event.kind !== "tool") return literal;
 	const repl = replSendCall(event.label, event.text);
 	// An unrecognised target is shown as recorded, never mapped to a runtime.
-	if (repl) return `<div class="tool-path"><span class="field-label">${escape(repl.label ? `${repl.label} REPL` : "REPL")}</span></div>${code(repl.code, "code-input")}${options(repl.args, repl.label ? ["code", "target"] : ["code"])}${rawArguments(event.text)}`;
+	if (repl) return `<div class="tool-path"><span class="field-label">${escape(repl.label ? `${repl.label} REPL` : "REPL")}</span>${code(repl.code, "code-input")}</div>${options(repl.args, repl.label ? ["code", "target"] : ["code"])}${rawArguments(event.text)}`;
 	const name = /^Tool:\s*(?:functions\.)?(bash|exec_command|exec|codemode|read|edit|multiedit|askuserquestion)$/i.exec(event.label)?.[1].toLowerCase();
 	let args;
 	try { args = JSON.parse(event.text); }
@@ -262,7 +267,7 @@ pre { margin:0; padding:12px 14px; background:transparent; font:0.9em/1.6 ui-mon
 .prompt pre,.progress pre,.reasoning pre { font:inherit }
 .asked-question,.question-reply { margin:14px } .asked-question h2,.question-reply h3 { font-family:inherit; font-size:1em; font-weight:600; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 8px } .question-header { color:var(--muted); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 6px }
 .question-options { padding-left:20px; margin:10px 0 } .question-options li { padding-left:3px; margin:10px 0 } .question-options strong,.question-prose { white-space:pre-wrap; overflow-wrap:anywhere } .question-options .question-prose { color:var(--muted); font-size:0.9em; margin-top:3px } .question-preview pre { white-space:pre-wrap; overflow-wrap:anywhere } .asked-question .tool-options { margin:8px 0 }
-.repl-activity { color:var(--muted); font-size:12px; margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere }
+.repl-activity { color:var(--muted); font-size:12px; margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere } .repl-activity p { margin:0 } .repl-activity pre { padding:4px 0 0; font-size:12px }
 .recorded-output { border-top:1px solid var(--line) } .recorded-output > summary { color:var(--muted); font-size:12px; font-weight:400 }
 .result { position:relative } .result > summary { padding-right:120px } .result:not(:has(.output-wrap)) > summary { padding-right:14px }
 .output-wrap { position:absolute; right:10px; top:6px; display:inline-flex; align-items:center; gap:6px; min-height:28px; padding:2px 6px; color:var(--muted); font-size:12px; cursor:pointer } .output-wrap input { margin:0; accent-color:var(--muted) } .output-wrap input:focus-visible { outline:2px solid var(--muted); outline-offset:2px }
@@ -346,7 +351,7 @@ export const liveTimeLabel = loaded => loaded ? "Loaded" : "Updated";
 
 export function buildLivePage(snapshot, { label = "", appearanceStyle = "", statusHtml = "" } = {}) {
 	const fromClaude = snapshot.sourceAgent === "claude";
-	const calls = replSendCalls(snapshot.events);
+	const calls = replSendCalls(snapshot.events, snapshot.omitted + 1);
 	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, fromClaude, snapshot.events[i + 1], calls)).join("\n");
 	const omitted = snapshot.omitted;
 	return `${pageHead("Working · live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Working · live</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}<span data-live-time-label>${liveTimeLabel(snapshot.loaded)}</span> <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="notices live-state" data-live-status role="status">${statusHtml}</p><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;

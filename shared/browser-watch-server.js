@@ -1352,7 +1352,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const links = linksFor(snapshot);
 					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, previewHref: links.previewHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, loaded: snapshot.loaded === true, omitted: snapshot.omitted };
 					if (!resync && since === snapshot.sequence) { respondJson(res, 200, { ...base, unchanged: true }); return; }
-					const calls = replSendCalls(snapshot.events);
+					const calls = replSendCalls(snapshot.events, snapshot.omitted + 1);
 					// A REPL result's card also shows part of its call, so it is sent again when its
 					// call changed (revised or arrived) or is no longer in the window (evicted or
 					// reverted). Such results are few; the page skips any whose version is unchanged.
