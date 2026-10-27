@@ -12,6 +12,7 @@ import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
 import { buildTurnDetailsPage, buildLivePage, liveStatusHtml, renderLiveCard } from "./turn-details-page.js";
+import { replSendCalls } from "./repl-snapshot.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 
@@ -1351,8 +1352,9 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const links = linksFor(snapshot);
 					const base = { cursor: `${snapshot.generation}:${snapshot.sequence}`, statusHtml: liveStatusHtml(links), status: links.status, completedHref: links.completedHref, previewHref: links.previewHref, newerHref: links.newerHref, newerAnchor: links.newerAnchor, updatedAt: snapshot.updatedAt, loaded: snapshot.loaded === true, omitted: snapshot.omitted };
 					if (!resync && since === snapshot.sequence) { respondJson(res, 200, { ...base, unchanged: true }); return; }
+					const calls = replSendCalls(snapshot.events);
 					const upserts = snapshot.events.flatMap((event, i) => resync || event.changed > since
-						? [{ id: event.id, version: event.version, html: renderLiveCard(event, snapshot.omitted + i + 1, snapshot.sourceAgent === "claude", snapshot.events[i + 1]) }] : []);
+						? [{ id: event.id, version: event.version, html: renderLiveCard(event, snapshot.omitted + i + 1, snapshot.sourceAgent === "claude", snapshot.events[i + 1], calls) }] : []);
 					respondJson(res, 200, { ...base, resync, ids: snapshot.events.map(event => event.id), upserts });
 					return;
 				}

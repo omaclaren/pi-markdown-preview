@@ -2,6 +2,7 @@ import { createTurnDetails } from "./turn-details.js";
 import { AGENT_PAGE_STYLE } from "./agent-page-style.js";
 import { IMAGE_UNAVAILABLE } from "./recorded-images.js";
 import { questionInput, questionAnswers } from "./ask-user-question.js";
+import { TERMINAL_SEQUENCE, replSendCall, replSendCalls, replSendOutput } from "./repl-snapshot.js";
 const escape = value => String(value ?? "").replace(/[&<>"'\r]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "\r": "&#13;" })[ch]);
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -57,10 +58,9 @@ function jsonResult(text, recorded = text) {
 }
 const rawOutput = text => `<details class="recorded-output"><summary>Raw output</summary>${literalPre(text)}</details>`;
 
-// Terminal colour and control sequences (CSI, OSC and charset designators) are
-// presentation noise in recorded tool output. The reading view hides them;
-// Raw output keeps the exact recorded text.
-const TERMINAL_SEQUENCE = /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]/g;
+// Terminal colour and control sequences (TERMINAL_SEQUENCE) are presentation
+// noise in recorded tool output. The reading view hides them; Raw output keeps
+// the exact recorded text.
 
 function askedQuestions(args) {
 	return args.questions.map(q => `<section class="asked-question"><p class="question-header">${escape(q.header)}${typeof q.multiSelect === "boolean" ? ` · ${q.multiSelect ? "Multiple selections allowed" : "Single selection"}` : ""}</p><h2>${escape(q.question)}</h2><ul class="question-options">${q.options.map(o => `<li><strong>${escape(o.label)}</strong><div class="question-prose">${escape(o.description)}</div>${o.preview === undefined ? "" : textField("Preview", o.preview, "question-preview")}${options(o, ["label", "description", "preview"])}</li>`).join("")}</ul>${options(q, ["question", "header", "options", "multiSelect"])}</section>`).join("");
@@ -160,16 +160,27 @@ function resultView(text) {
 	return jsonResult(shown, text) ?? (shown === text ? literalPre(text) : `${literalPre(shown)}${rawOutput(text)}`);
 }
 
+// A repl_send result whose recorded text repeats its call's code exactly shows
+// only the output; anything else keeps the ordinary result view.
+function replResultView(event, call) {
+	const split = call && !/\(error\)/.test(event.label) ? replSendOutput(event.text.replace(TERMINAL_SEQUENCE, ""), call.code) : null;
+	if (!split) return resultView(event.text);
+	const activity = split.activity.trim() ? `<p class="repl-activity">${escape(split.activity.trim())}</p>` : "";
+	const output = split.output.trim() ? literalPre(split.output) : '<p class="empty-text">No output</p>';
+	return `<div class="tool-fields">${activity}<section class="tool-field"><h3>Output</h3>${output}</section></div>${rawOutput(event.text)}`;
+}
+
 // Recognise recorded argument shapes, not code syntax. Never reindent, split
 // operators, resolve file paths, infer a successful edit, or execute anything.
-function eventContent(event, fromClaude = false) {
+// `calls`: the recorded repl_send calls by call ID, for their results.
+function eventContent(event, fromClaude = false, calls = new Map()) {
 	const literal = literalPre(event.text);
 	if (event.kind === "result") {
 		const images = (event.images ?? []).map((image, i) => image.unavailable
 			? `<p class="recorded-image-error">Recorded image unavailable: ${escape(IMAGE_UNAVAILABLE[image.unavailable])}</p>`
 			: `<figure class="recorded-image"><button type="button" class="recorded-image-open" aria-expanded="false" aria-label="Recorded image ${i + 1} · ${image.width} × ${image.height}. Enlarge"><img data-recorded-src="data:${image.mimeType};base64,${image.data}" width="${image.width}" height="${image.height}" alt="Recorded tool-result image ${i + 1}" decoding="async"><span>Enlarge</span></button><figcaption>${image.width} × ${image.height} · ${escape(image.mimeType.slice(6).toUpperCase())}</figcaption><p class="recorded-image-error" role="status" hidden></p></figure>`).join('');
 		const answer = fromClaude && /^Tool result:\s*(?:functions\.)?AskUserQuestion$/i.test(event.label);
-		return (event.text || answer ? `<label class="output-wrap"><input type="checkbox" aria-label="Wrap lines for ${escape(event.label || "tool output")}">Wrap lines</label>${answer ? answeredQuestions(event) : resultView(event.text)}` : '') + images;
+		return (event.text || answer ? `<label class="output-wrap"><input type="checkbox" aria-label="Wrap lines for ${escape(event.label || "tool output")}">Wrap lines</label>${answer ? answeredQuestions(event) : replResultView(event, calls.get(event.callId))}` : '') + images;
 	}
 	if (event.kind === "prompt") {
 		const envelope = claudeEnvelope(event, fromClaude);
@@ -183,6 +194,9 @@ function eventContent(event, fromClaude = false) {
 		if (reading !== event.text) return `${literalPre(reading)}<details class="recorded-input"><summary>Raw input</summary>${literal}</details>`;
 	}
 	if (event.kind !== "tool") return literal;
+	const repl = replSendCall(event.label, event.text);
+	// An unrecognised target is shown as recorded, never mapped to a runtime.
+	if (repl) return `<div class="tool-path"><span class="field-label">${escape(repl.label ? `${repl.label} REPL` : "REPL")}</span></div>${code(repl.code, "code-input")}${options(repl.args, repl.label ? ["code", "target"] : ["code"])}${rawArguments(event.text)}`;
 	const name = /^Tool:\s*(?:functions\.)?(bash|exec_command|exec|codemode|read|edit|multiedit|askuserquestion)$/i.exec(event.label)?.[1].toLowerCase();
 	let args;
 	try { args = JSON.parse(event.text); }
@@ -248,6 +262,7 @@ pre { margin:0; padding:12px 14px; background:transparent; font:0.9em/1.6 ui-mon
 .prompt pre,.progress pre,.reasoning pre { font:inherit }
 .asked-question,.question-reply { margin:14px } .asked-question h2,.question-reply h3 { font-family:inherit; font-size:1em; font-weight:600; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 8px } .question-header { color:var(--muted); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 6px }
 .question-options { padding-left:20px; margin:10px 0 } .question-options li { padding-left:3px; margin:10px 0 } .question-options strong,.question-prose { white-space:pre-wrap; overflow-wrap:anywhere } .question-options .question-prose { color:var(--muted); font-size:0.9em; margin-top:3px } .question-preview pre { white-space:pre-wrap; overflow-wrap:anywhere } .asked-question .tool-options { margin:8px 0 }
+.repl-activity { color:var(--muted); font-size:12px; margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere }
 .recorded-output { border-top:1px solid var(--line) } .recorded-output > summary { color:var(--muted); font-size:12px; font-weight:400 }
 .result { position:relative } .result > summary { padding-right:120px } .result:not(:has(.output-wrap)) > summary { padding-right:14px }
 .output-wrap { position:absolute; right:10px; top:6px; display:inline-flex; align-items:center; gap:6px; min-height:28px; padding:2px 6px; color:var(--muted); font-size:12px; cursor:pointer } .output-wrap input { margin:0; accent-color:var(--muted) } .output-wrap input:focus-visible { outline:2px solid var(--muted); outline-offset:2px }
@@ -277,20 +292,22 @@ export function buildTurnDetailsPage(details, responseUrl, label = "", appearanc
 	}
 	const { events } = bounded.result;
 	const fromClaude = details?.sourceAgent === "claude";
-	const rows = events.map((e, i) => `<details class="event ${e.kind}"${startsOpen(e, events[i + 1], fromClaude) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(claudeEnvelope(e, fromClaude)?.label ?? (e.label || e.kind))}</summary><div class="event-content">${eventContent(e, fromClaude)}</div></details>`).join("\n");
+	const calls = replSendCalls(events);
+	const rows = events.map((e, i) => `<details class="event ${e.kind}"${startsOpen(e, events[i + 1], fromClaude) ? " open" : ""}><summary><span class="number"${e.callId ? ` title="Call ID: ${escape(e.callId)}"` : ""}>${i + 1}</span> ${escape(claudeEnvelope(e, fromClaude)?.label ?? (e.label || e.kind))}</summary><div class="event-content">${eventContent(e, fromClaude, calls)}</div></details>`).join("\n");
 	return `${pageHead("Working", appearanceStyle)}<body class="pi-preview-working"><main id="preview-root">${responseUrl ? `<nav><a href="${escape(responseUrl)}">← Preview</a></nav>` : ""}<h1>Working</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Prompt and activity for this response.</p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p>${rows ? '<button type="button" class="working-bulk" hidden>Expand all</button>' : ""}</div>${rows || "<p>No matching prompt or working details are available.</p>"}</main></body></html>`;
 }
 
 
 // ---- Live: recorded activity of one in-progress turn ----
 /** One live card, from the same escaping renderer as Working; `next` is the card after it, as in Working.
- * `fromClaude` applies Claude-only presentation, from the snapshot's source agent (never from prompt text). */
-export function renderLiveCard(event, number, fromClaude = false, next) {
+ * `fromClaude` applies Claude-only presentation, from the snapshot's source agent (never from prompt text).
+ * `calls`: the snapshot's repl_send calls (replSendCalls), so a REPL result can show only its output. */
+export function renderLiveCard(event, number, fromClaude = false, next, calls = new Map()) {
 	const open = startsOpen(event, next, fromClaude);
 	const label = claudeEnvelope(event, fromClaude)?.label ?? (event.label || event.kind);
 	// Only the record's absence is stated; nothing is inferred about the call.
 	const pending = event.kind === "tool" && event.pending === true ? ' <span class="live-pending">· No result recorded yet</span>' : "";
-	return `<details class="event ${escape(event.kind)}" data-event-id="${escape(event.id)}" data-event-version="${escape(event.version)}"${open ? " open" : ""}><summary><span class="number"${event.callId ? ` title="Call ID: ${escape(event.callId)}"` : ""}>${number}</span> ${escape(label)}${pending}</summary><div class="event-content">${eventContent(event, fromClaude)}</div></details>`;
+	return `<details class="event ${escape(event.kind)}" data-event-id="${escape(event.id)}" data-event-version="${escape(event.version)}"${open ? " open" : ""}><summary><span class="number"${event.callId ? ` title="Call ID: ${escape(event.callId)}"` : ""}>${number}</span> ${escape(label)}${pending}</summary><div class="event-content">${eventContent(event, fromClaude, calls)}</div></details>`;
 }
 
 /** Status line: only what the record says. Links are server-built, same-origin. */
@@ -323,7 +340,8 @@ export const liveTimeLabel = loaded => loaded ? "Loaded" : "Updated";
 
 export function buildLivePage(snapshot, { label = "", appearanceStyle = "", statusHtml = "" } = {}) {
 	const fromClaude = snapshot.sourceAgent === "claude";
-	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, fromClaude, snapshot.events[i + 1])).join("\n");
+	const calls = replSendCalls(snapshot.events);
+	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, fromClaude, snapshot.events[i + 1], calls)).join("\n");
 	const omitted = snapshot.omitted;
 	return `${pageHead("Working · live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Working · live</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}<span data-live-time-label>${liveTimeLabel(snapshot.loaded)}</span> <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="notices live-state" data-live-status role="status">${statusHtml}</p><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;
 }
