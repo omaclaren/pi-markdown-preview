@@ -26,8 +26,8 @@ const claudeTurn = (calls, answer = "Answer") => {
  return turnDetailsFromRecords("claude", rows, { key: "claude:final", markdown: answer });
 };
 
-test("REPL tool names: Pi's repl_send and MCP-prefixed names only", () => {
- for (const name of ["repl_send", "mcp__agent-repl__repl_send", "mcp__repl__repl_send", "agent-repl__repl_send", "agent-repl_repl_send", "functions.repl_send"]) assert.ok(isReplSendLabel(`Tool: ${name}`), name);
+test("REPL tool names: Pi's repl_send, MCP-prefixed names and Pi Studio's studio_repl_send only", () => {
+ for (const name of ["repl_send", "mcp__agent-repl__repl_send", "mcp__repl__repl_send", "agent-repl__repl_send", "agent-repl_repl_send", "functions.repl_send", "studio_repl_send"]) assert.ok(isReplSendLabel(`Tool: ${name}`), name);
  for (const label of ["Tool: repl_sender", "Tool: repl_send_x", "Tool: Bash", "Tool result: repl_send", "repl_send", "Tool: mcp__agent-repl__repl_status"]) assert.equal(isReplSendLabel(label), false, label);
  for (const label of ["Tool result: repl_send", "Tool result: repl_send (error)", "Tool result (error): mcp__agent-repl__repl_send", "Tool result: agent-repl_repl_send"]) assert.ok(isReplResultLabel(label), label);
  for (const label of ["Tool result: Bash", "Tool result", "Tool: repl_send", "Tool result: repl_sender"]) assert.equal(isReplResultLabel(label), false, label);
@@ -50,6 +50,22 @@ test("REPL calls: runtime labels come from known targets; other shapes are not R
  assert.equal(call(["code"]), null);
  assert.equal(replSendCall("Tool: repl_send", "{not json"), null);
  assert.equal(call({ code: "1" }, "Tool: Bash"), null);
+});
+
+test("REPL calls: Pi Studio's are labelled from the session they name, else their target, never by default", () => {
+ const studio = input => replSendCall("Tool: studio_repl_send", JSON.stringify(input));
+ assert.deepEqual([studio({ code: "1" }).label, studio({ code: "1" }).language], [undefined, undefined], "With neither, Studio sends to its active session, whatever its runtime.");
+ assert.equal(studio({ code: "1", target: " " }).label, undefined);
+ assert.equal(studio({ code: "1", target: "julia" }).label, "Julia");
+ assert.deepEqual([studio({ code: "ls", target: "shell" }).label, studio({ code: "ls", target: "shell" }).language], ["Shell", "bash"]);
+ for (const [sessionName, label] of [["pi-repl-julia", "Julia"], ["pi-repl-python", "Python"], ["pi-studio-repl-r", "R"], ["pi-studio-repl-ruby-3f2a9c1b", "Ruby"], ["pi-studio-repl-cpp-1a2b3c4d-mh2k9x-abc123", "C++"], ["pi-studio-repl-shell", "Shell"]]) {
+  assert.equal(studio({ code: "1", sessionName }).label, label, sessionName);
+ }
+ assert.equal(studio({ code: "1", sessionName: "pi-repl-julia", target: "python" }).label, "Julia", "A named session wins over the target, as in Studio.");
+ assert.equal(studio({ code: "1", sessionName: "my-session", target: "python" }).label, undefined, "A session name that doesn't give its runtime isn't guessed from the target.");
+ assert.equal(studio({ code: "1", sessionName: "pi-studio-repl-fortran" }).label, undefined);
+ assert.equal(studio({ code: "1", sessionName: 2 }), null);
+ assert.equal(replSendCall("Tool: repl_send", JSON.stringify({ code: "1", sessionName: "pi-repl-julia" })).label, "Python", "pi-repl's own calls have no session argument: the default stays Python.");
 });
 
 test("REPL results: output is split only when the recorded text is exactly pi-repl's format for the call's code", () => {

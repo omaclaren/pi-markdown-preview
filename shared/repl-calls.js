@@ -6,17 +6,27 @@
 /** Terminal colour and control sequences (CSI, OSC and charset designators). */
 export const TERMINAL_SEQUENCE = /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]/g;
 
-// repl_send targets as pi-repl accepts them, with a label and a highlighting
-// language. ipython selects the same session as python, which may
-// run either. Pi names the tool repl_send; MCP clients prefix the server name
+// repl_send targets as pi-repl accepts them (and Pi Studio's shell), with a label
+// and a highlighting language. ipython selects the same session as python, which
+// may run either. Pi names the tool repl_send; MCP clients prefix the server name
 // (Claude Code and Codex: mcp__agent-repl__repl_send; OpenCode: agent-repl_repl_send).
 const RUNTIMES = {
 	python: ["Python", "python"], ipython: ["Python", "python"], julia: ["Julia", "julia"], r: ["R", "r"],
 	ghci: ["Haskell", "haskell"], haskell: ["Haskell", "haskell"], clojure: ["Clojure", "clojure"], clj: ["Clojure", "clojure"],
 	ruby: ["Ruby", "ruby"], irb: ["Ruby", "ruby"], java: ["Java", "java"], jshell: ["Java", "java"],
 	octave: ["Octave", "octave"], matlab: ["MATLAB", "matlab"], gnuplot: ["gnuplot", "gnuplot"], cpp: ["C++", "cpp"],
+	shell: ["Shell", "bash"],
 };
 const REPL_SEND_TOOL = /^Tool:\s*(?:functions\.)?(?:[A-Za-z0-9_.-]*?(?:__|_))?repl_send$/;
+// Pi Studio's studio_repl_send sends to the session it names, else to the first
+// with its target's runtime, else to Studio's active session, which isn't recorded.
+const STUDIO_SEND_TOOL = /^Tool:\s*(?:functions\.)?studio_repl_send$/;
+// Session names as Studio reads them: pi-repl-julia, pi-studio-repl-julia[-suffix].
+const SESSION_NAME = /^pi-(?:studio-)?repl-([a-z0-9-]+)$/i;
+const sessionRuntime = name => {
+	const raw = SESSION_NAME.exec(name)?.[1].toLowerCase();
+	return raw ? Object.keys(RUNTIMES).find(key => raw === key || raw.startsWith(`${key}-`)) : undefined;
+};
 // pi-repl's pane activity before "Submitted code:": a one-line note that the pane
 // shows nothing, or a framed report whose pane text may contain anything.
 const PANE_NOTE = /^[^\n]*, and the pane shows no other text now\.$/;
@@ -35,8 +45,9 @@ export const isReplResultLabel = label => {
 
 /**
  * A recorded repl_send call's arguments, or null for any other shape. An omitted
- * or blank target is the shared Python session, as in pi-repl. An unknown target
- * keeps no label or language: it is shown, never guessed.
+ * or blank target is the shared Python session, as in pi-repl. A Studio call takes
+ * its runtime from the session it names, else its target; with neither, it has
+ * none. An unknown target keeps no label or language: it is shown, never guessed.
  */
 export function replSendCall(label, argumentsText) {
 	if (!isReplSendLabel(label) || typeof argumentsText !== "string") return null;
@@ -44,7 +55,13 @@ export function replSendCall(label, argumentsText) {
 	try { args = JSON.parse(argumentsText); } catch { return null; }
 	if (args === null || typeof args !== "object" || Array.isArray(args) || typeof args.code !== "string") return null;
 	if (args.target !== undefined && typeof args.target !== "string") return null;
-	const runtime = RUNTIMES[args.target?.trim().toLowerCase() || "python"];
+	let target = args.target?.trim().toLowerCase() || "python";
+	if (STUDIO_SEND_TOOL.test(label)) {
+		if (args.sessionName !== undefined && typeof args.sessionName !== "string") return null;
+		const session = args.sessionName?.trim();
+		target = session ? sessionRuntime(session) : args.target?.trim().toLowerCase();
+	}
+	const runtime = target ? RUNTIMES[target] : undefined;
 	return { args, code: args.code, label: runtime?.[0], language: runtime?.[1] };
 }
 
