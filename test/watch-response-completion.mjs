@@ -27,7 +27,7 @@ const waitFor = async (check, label) => {
 	throw new Error(`Timed out: ${label}`);
 };
 
-async function fixture(run, args = "--watch --live", before) {
+async function fixture(run) {
 	const events = new Map(), commands = new Map(), notifications = [];
 	const manager = SessionManager.inMemory(root);
 	const prompt = text => manager.appendMessage({ role: "user", content: text, timestamp: ++sequence });
@@ -35,15 +35,14 @@ async function fixture(run, args = "--watch --live", before) {
 	const ctx = { cwd: root, sessionManager: manager, isIdle: () => true, ui: { theme: undefined, notify: (message, type) => notifications.push({ message, type }) } };
 	preview.default({ on: (name, fn) => events.set(name, fn), registerCommand: (name, definition) => commands.set(name, definition), registerTool() {} });
 	const emit = (name, messages = []) => events.get(name)({ messages }, ctx);
-	before?.({ manager, prompt });
 	try {
-		await commands.get("preview-browser").handler(args, ctx);
+		await commands.get("preview-browser").handler("--watch --live", ctx);
 		const url = preview.testOpened.at(-1);
 		const bootstrap = await fetch(url);
 		assert.equal(bootstrap.status, 200);
 		const cookie = bootstrap.headers.get("set-cookie").split(";")[0];
 		const html = await bootstrap.text();
-		const statePath = /data-live-state="([^"]+)"/.exec(html)?.[1].replaceAll("&amp;", "&");
+		const statePath = /data-live-state="([^"]+)"/.exec(html)[1].replaceAll("&amp;", "&");
 		const get = path => fetch(new URL(path, url), { headers: { cookie } });
 		const state = () => get("/__pi_markdown_preview_state__").then(r => r.json());
 		const current = () => get(statePath).then(r => r.json());
@@ -53,14 +52,13 @@ async function fixture(run, args = "--watch --live", before) {
 			return get(live.liveHref.replace("?", "/updates?") + "&cursor=").then(r => r.json());
 		};
 		const rendered = text => waitFor(async () => (await (await get("/")).text()).includes(`<p>${text}</p>`), "response render");
-		const page = async () => (await get("/")).text();
 		const linked = async text => {
 			const data = await updates();
 			assert.equal(data.status, "completed");
 			assert.ok(data.completedHref, "Completed Live turn must link to its retained Preview.");
 			assert.ok((await (await get(data.completedHref)).text()).includes(`<p>${text}</p>`), "Completion link must lead to the exact response.");
 		};
-		await run({ manager, prompt, emit, url, cookie, state, current, updates, rendered, linked, page });
+		await run({ manager, prompt, emit, url, state, current, updates, rendered, linked });
 		assert.deepEqual(notifications.filter(n => n.type === "error" || n.type === "warning"), []);
 	} finally {
 		await emit("session_shutdown");
@@ -132,35 +130,6 @@ try {
 			assert.equal((await f.updates()).completedHref, undefined, "A mismatched or ambiguous fallback must not associate the Preview with another recorded entry.");
 		}));
 	}
-
-	// A turn that ran pi-repl's repl_send, then answered.
-	const replTurn = f => {
-		const code = "import math\nprint(math.pi)";
-		f.prompt("What is pi?");
-		f.manager.appendMessage({ ...assistant(""), content: [{ type: "toolCall", id: "repl-call", name: "repl_send", arguments: { code } }], stopReason: "toolUse" });
-		f.manager.appendMessage({ role: "toolResult", toolCallId: "repl-call", toolName: "repl_send", content: [{ type: "text", text: `Submitted code:\n${code}\n\nOutput:\n3.141592653589793\n` }], isError: false, timestamp: ++sequence });
-		const message = assistant("Pi is about 3.14."); f.manager.appendMessage(message);
-		return message;
-	};
-	for (const [args, working] of [["--watch --working", true], ["--watch --live", true], ["--watch", false]]) {
-		await test(`response completion: ${args} ${working ? "folds in" : "leaves out"} the REPL code the turn ran`, () => fixture(async f => {
-			const message = replTurn(f);
-			await f.emit("agent_end", [message]); await f.rendered("Pi is about 3.14.");
-			const html = await f.page();
-			if (working) {
-				assert.match(html, /<p>Pi is about 3\.14\.<\/p>[^]*<details[^>]*>\s*<summary>REPL · Python · 1 submission in this turn<\/summary>/);
-				assert.match(html, /3\.141592653589793/);
-			} else assert.doesNotMatch(html, /REPL ·|3\.141592653589793/, "tool output needs Working");
-		}, args));
-	}
-	await test("response completion: a watch opened after a REPL turn folds it in from the start, for the latest and earlier responses", () => fixture(async f => {
-		const html = await f.page();
-		assert.match(html, /<p>Next answer<\/p>/);
-		assert.doesNotMatch(html, /REPL ·/, "The latest turn ran no REPL code.");
-		const { revisions } = await f.state();
-		const earlier = await (await fetch(new URL(`/?revision=${revisions.at(-2)}`, f.url), { headers: { cookie: f.cookie } })).text();
-		assert.match(earlier, /<p>Pi is about 3\.14\.<\/p>[^]*<summary>REPL · Python · 1 submission in this turn<\/summary>/);
-	}, "--watch --working", f => { replTurn(f); f.prompt("Next"); f.manager.appendMessage(assistant("Next answer")); }));
 
 	await test("response completion: timestamp-only event matches the exact persisted response", () => fixture(async f => {
 		f.prompt("No provider response id"); const message = assistant("Timestamp-only answer"); delete message.responseId;

@@ -379,9 +379,7 @@ assert.match(src, /from "\.\/shared\/annotation-scanner\.js"/, "Markdown preview
 assert.match(src, /const PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX = "PIMDPREVIEWANNOT";/, "Missing browser preview annotation placeholder prefix.");
 assert.match(src, /const ANNOTATION_HELPERS_SOURCE = readFileSync\(new URL\("\.\/client\/annotation-helpers\.js", import\.meta\.url\), "utf-8"\);/, "Browser preview should embed the annotation helper script.");
 assert.match(src, /function prepareBrowserPreviewMarkdown\s*\(/, "Missing browser preview annotation preparation helper.");
-assert.match(src, /function prepareBrowserPreviewMarkdown\(markdown: string, isLatex\?: boolean, placeholderPrefix = PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX\)/, "Browser preview placeholders should default to the prefix the page looks for.");
-assert.match(src, /prepareMarkdownForPandocPreview\(normalizedMarkdown, placeholderPrefix\)/, "Browser preview should replace prose annotations with placeholders before pandoc.");
-assert.match(src, /prepareBrowserPreviewMarkdown\(section, isLatex, i \? `\$\{PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX\}S\$\{i\}X` : PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX\)/, "Each preview section's placeholders should start with the prefix the page looks for, and be distinct.");
+assert.match(src, /prepareMarkdownForPandocPreview\(normalizedMarkdown, PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX\)/, "Browser preview should replace prose annotations with placeholders before pandoc.");
 assert.match(src, /buildBrowserHtmlFromPandocFragment\(fragmentHtml, style, resourcePath, annotationPlaceholders, previewFontSizePx, \{\}, false, \{ wrapCode, controls: false \}\)/, "Terminal HTML should receive annotation placeholders and wrapping without browser controls.");
 assert.match(src, /#preview-root pre \{[^}]*white-space: pre;[^}]*overflow-wrap: normal;/, "Code blocks should retain fixed-width layout by default.");
 

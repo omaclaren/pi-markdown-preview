@@ -142,21 +142,10 @@ try {
 	}
 	const style = preview.getPreviewStyle(undefined);
 	const html = async markdown => (await preview.renderPreviewHtmlDocument(markdown, style, scratch)).html.replace('</head>', '<style>html { overflow-anchor: none; }</style></head>');
-	// Sections: the answer keeps its IDs, and a later section whose prefix one of them starts with gets a free one.
-	const laterNote = "Note[^n]\n\n[^n]: SECOND_NOTE\n";
-	for (const [answer, later, id] of [["# s1-fn1\n\nAnswer\n", laterNote, "s1-1-fn1"], ["# s1-fn1\n\n# s1-1-fn1\n", laterNote, "s1-2-fn1"], ["# s1-cb1\n\nAnswer\n", "```python\nx = 1\n```\n", "s1-1-cb1"]]) {
-		const body = (await preview.renderPreviewHtmlDocument([answer, later], style, scratch)).html.split('id="preview-root"')[1];
-		const ids = [...body.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
-		assert.deepEqual(ids.filter((value, i) => ids.indexOf(value) !== i), [], `${JSON.stringify(answer)}: no duplicate IDs`);
-		assert.ok(ids.includes(id) && answer.match(/s1-[\w-]+/g).every(heading => ids.includes(heading)), `${JSON.stringify(answer)}: ${id}, and the answer keeps its IDs`);
-		if (later === laterNote) assert.match(body, new RegExp(`href="#${id}" class="footnote-ref"[^]*id="${id}"[^>]*>[^]*?SECOND_NOTE`), "the reference links to its own note");
-	}
-	for (const sections of [["<div id='s1-fn1'>\n\nBody\n", laterNote], ["Answer\n", '<div id="target">\n\nx\n', '<div id="target">\n\ny\n']]) {
-		const body = (await preview.renderPreviewHtmlDocument(sections, style, scratch)).html.split('id="preview-root"')[1];
-		assert.doesNotMatch(body, /<div\b[^>]*\bid\s*=\s*["']?(?:s1-fn1|target)\b/i, "an unclosed <div> keeps no ID");
-		assert.match(body, /&lt;div id=/, "it is shown as text");
-		if (sections[1] === laterNote) assert.match(body, /href="#s1-fn1" class="footnote-ref"[^]*id="s1-fn1"[^>]*>[^]*?SECOND_NOTE/, "the later section keeps s1-");
-	}
+	// A rendered Preview shows an unclosed <div> as text, with no ID or attributes of its own.
+	const strayDiv = (await preview.renderPreviewHtmlDocument("<div id='x' onclick=\"alert(1)\">\n\nBody\n", style, scratch)).html.split('id="preview-root"')[1];
+	assert.doesNotMatch(strayDiv, /<div\b[^>]*\b(?:id\s*=\s*["']?x\b|onclick)/i);
+	assert.match(strayDiv, /<p>&lt;div id='x' onclick="alert\(1\)"&gt;<\/p>\s*<p>Body<\/p>/);
 	const prepared = preview.prepareBrowserPreviewMarkdown(affiliation);
 	assert.equal(prepared.normalizedMarkdown, normalizeSubSupTags(affiliation));
 	assert.equal(preview.prepareBrowserPreviewMarkdown(affiliation, true).normalizedMarkdown, affiliation, 'Do not normalize LaTeX source.');

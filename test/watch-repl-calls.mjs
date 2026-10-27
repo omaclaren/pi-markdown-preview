@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { turnDetailsFromRecords } from "../shared/turn-details.js";
 import { buildTurnDetailsPage, buildLivePage, liveCardVersion, renderLiveCard } from "../shared/turn-details-page.js";
-import { isReplResultLabel, isReplSendLabel, replSendCall, replSendCalls, replSendOutput, replSnapshotMarkdown } from "../shared/repl-snapshot.js";
+import { isReplResultLabel, isReplSendLabel, replSendCall, replSendCalls, replSendOutput } from "../shared/repl-calls.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const txt = text => ({ type: "text", text });
@@ -82,74 +82,6 @@ test("REPL results: output is split only when the recorded text is exactly pi-re
  assert.equal(replSendOutput(`${sent("print(1)", "x".repeat(100))}\n[… truncated]`, "print(1)"), null);
  // A shared-record warning is not output.
  assert.equal(replSendOutput(`${sent("1", "1")}\n\nShared record warning: the record could not be written`, "1"), null);
-});
-
-test("Preview snapshot: a folded, literal record of the turn's REPL submissions", () => {
- const details = claudeTurn([
-  { input: { code: "import math\nprint(math.pi)", target: "python" }, result: [txt(sent("import math\nprint(math.pi)", "3.141592653589793\n"))] },
-  { input: { code: "x = \"```\"\n\\[ y \\]", target: "julia", timeoutMs: 5000 }, result: sent("x = \"```\"\n\\[ y \\]", "\x1b[32m\"```\"\x1b[0m") },
-  { input: { code: "1/0" }, result: "Traceback: ZeroDivisionError", error: true },
-  { input: { code: "slow()", target: "r" } },
-  { input: { command: "ls" }, name: "Bash", result: "SHELL OUTPUT" },
- ]);
- const markdown = replSnapshotMarkdown(details);
- assert.match(markdown, /^<details>\n<summary>REPL · Python, Julia, R · 4 submissions in this turn<\/summary>\n/);
- assert.match(markdown, /\*Recorded in this response's turn; not the REPL's current state\.\*\n\n\*\*1\*\*/);
- assert.doesNotMatch(markdown, /missing or shortened/);
- assert.match(markdown, /\*\*1\*\* · Python\n\n```python\nimport math\nprint\(math\.pi\)\n```\n\nOutput\n\n```\n3\.141592653589793\n```/);
- assert.match(markdown, /\*\*2\*\* · Julia\n\n````julia\nx = "```"\n\\\[ y \\\]\n````\n\nOutput\n\n````\n"```"\n````/, "Fences outgrow backtick runs; terminal colours are removed.");
- assert.match(markdown, /\*\*3\*\* · Python\n\n```python\n1\/0\n```\n\nRecorded result \(error\)\n\n```\nTraceback: ZeroDivisionError\n```/);
- assert.match(markdown, /\*\*4\*\* · R\n\n```r\nslow\(\)\n```\n\n\*No result recorded\.\*/);
- assert.doesNotMatch(markdown, /SHELL OUTPUT|timeoutMs/);
- assert.match(markdown, /\n<\/details>$/);
- assert.equal(replSnapshotMarkdown(claudeTurn([{ input: { command: "ls" }, name: "Bash", result: "x" }])), "", "No REPL calls, no snapshot.");
- assert.equal(replSnapshotMarkdown(undefined), "");
-});
-
-test("Preview snapshot: an unrecognised target is labelled as such, and long turns point to Working", () => {
- const unknown = replSnapshotMarkdown(claudeTurn([{ input: { code: "print *, 1", target: "fortran" }, result: sent("print *, 1", "1") }]));
- assert.match(unknown, /<summary>REPL · REPL · 1 submission in this turn<\/summary>/);
- assert.match(unknown, /\*\*1\*\* · Unrecognised target\n\n```\nprint \*, 1\n```/);
- const many = replSnapshotMarkdown(claudeTurn(Array.from({ length: 23 }, (_, i) => ({ input: { code: `${i}` }, result: sent(`${i}`, `${i}`) }))));
- assert.match(many, /23 submissions in this turn/);
- assert.match(many, /\*\*20\*\* · Python/);
- assert.doesNotMatch(many, /\*\*21\*\*/);
- assert.match(many, /\*3 more in Working\.\*/);
-});
-
-test("Preview snapshot: when the turn details are bounded, it says so instead of claiming a complete record", () => {
- // The 250-event limit drops this call's result.
- const rows = [c("u", null, "user", "Run it")];
- let parent = "u";
- for (let i = 0; i < 248; i++) { rows.push(c(`p${i}`, parent, "assistant", [txt(`step ${i}`)], `work${i}`, null)); parent = `p${i}`; }
- rows.push(c("call", parent, "assistant", [{ type: "tool_use", id: "t", name: "mcp__agent-repl__repl_send", input: { code: "print(1)" } }], "workc", "tool_use"));
- rows.push(c("r", "call", "user", [{ type: "tool_result", tool_use_id: "t", content: sent("print(1)", "1") }]));
- rows.push(c("f", "r", "assistant", [txt("Answer")], "final", "end_turn"));
- const details = turnDetailsFromRecords("claude", rows, { key: "claude:final", markdown: "Answer" });
- assert.ok(details.notices.some(n => /some recorded events are omitted/.test(n)));
- const markdown = replSnapshotMarkdown(details);
- assert.match(markdown, /<summary>REPL · Python · 1 submission shown from this turn<\/summary>/);
- assert.match(markdown, /\*Parts of this turn's recorded activity may be missing or shortened here, so some submissions or results may not appear\. Working shows what is available and why\.\*/);
- assert.match(markdown, /\*No result in the recorded activity shown\.\*/);
- assert.doesNotMatch(markdown, /No result recorded/);
- // Arguments shortened by the display limit no longer parse: the call is counted, not dropped.
- const long = claudeTurn([{ input: { code: "x".repeat(20_000) }, result: "done" }, { input: { code: "2" }, result: sent("2", "2") }]);
- const counted = replSnapshotMarkdown(long);
- assert.match(counted, /2 submissions shown from this turn/);
- assert.match(counted, /\*\*1\*\* · \*Its recorded arguments can't be read here; see Working\.\*\n\n\*\*2\*\* · Python/);
- // Only notices that can't hide REPL activity leave the record complete; any other one,
- // such as a bounded read or a notice this code doesn't know, may mean activity is missing.
- const pending = { input: { code: "slow()" } };
- const benign = claudeTurn([pending]);
- benign.notices.push("Known harness-injected context is omitted; it is not labelled as a user prompt.", "Non-image file attachments are omitted.");
- assert.match(replSnapshotMarkdown(benign), /1 submission in this turn[^]*\*No result recorded\.\*/);
- for (const notice of ["Only a bounded portion of the session was read; earlier or oversized records may be missing.", "The turn-start marker is missing; only recorded activity after the preceding completion is shown.", "The read-size limit was reached; earlier activity is omitted.", "A notice added later"]) {
-  const bounded = claudeTurn([pending]);
-  bounded.notices.push(notice);
-  assert.match(replSnapshotMarkdown(bounded), /1 submission shown from this turn[^]*may be missing or shortened[^]*\*No result in the recorded activity shown\.\*/, notice);
- }
- const read = turnDetailsFromRecords("claude", [c("u", null, "user", "Run it"), c("call", "u", "assistant", [{ type: "tool_use", id: "t", name: "repl_send", input: { code: "1" } }], "w", "tool_use"), c("f", "call", "assistant", [txt("Answer")], "final", "end_turn")], { key: "claude:final", markdown: "Answer" }, true);
- assert.match(replSnapshotMarkdown(read), /shown from this turn[^]*No result in the recorded activity shown/, "A reader's bounded read");
 });
 
 test("Working: a REPL call shows its runtime and code; its result shows only the output", () => {

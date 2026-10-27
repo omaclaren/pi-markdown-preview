@@ -12,7 +12,7 @@ import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
 import { buildTurnDetailsPage, buildLivePage, liveCardVersion, liveStatusHtml, renderLiveCard } from "./turn-details-page.js";
-import { isReplResultLabel, replSendCalls } from "./repl-snapshot.js";
+import { isReplResultLabel, replSendCalls } from "./repl-calls.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 

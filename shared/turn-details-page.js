@@ -2,7 +2,7 @@ import { createTurnDetails } from "./turn-details.js";
 import { AGENT_PAGE_STYLE } from "./agent-page-style.js";
 import { IMAGE_UNAVAILABLE } from "./recorded-images.js";
 import { questionInput, questionAnswers } from "./ask-user-question.js";
-import { TERMINAL_SEQUENCE, replResultBinding, replResultSplit, replSendCall, replSendCalls } from "./repl-snapshot.js";
+import { TERMINAL_SEQUENCE, replResultBinding, replResultSplit, replSendCall, replSendCalls } from "./repl-calls.js";
 const escape = value => String(value ?? "").replace(/[&<>"'\r]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "\r": "&#13;" })[ch]);
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
