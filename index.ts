@@ -35,6 +35,7 @@ import {
 import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
 import { readTurnDetails } from "./shared/read-turn-details.js";
 import { createLiveTurnProjector, turnDetailsFromRecords } from "./shared/turn-details.js";
+import { replSnapshotMarkdown } from "./shared/repl-snapshot.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 import { isHtmlPagePath } from "./shared/html-page-preview.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
@@ -1093,6 +1094,19 @@ function piTurnDetails(ctx: ExtensionContext, response: AssistantResponseSnapsho
 // The key a live turn's recorded end uses (pi:<entry id>), so a finished turn links to its response.
 const piResponseKey = (response: AssistantResponseSnapshot | undefined) => response?.entryId ? `pi:${response.entryId}` : undefined;
 
+/**
+ * A response's Preview Markdown. With Working enabled, it also folds in the REPL
+ * code the agent ran in that turn and its recorded output, as a separate section:
+ * that is tool output, so it needs Working. A snapshot that can't be read is left
+ * out; Working says why.
+ */
+async function piResponseSections(response: AssistantResponseSnapshot, details: ReturnType<typeof piTurnDetails>): Promise<string | string[]> {
+	if (!details) return response.markdown;
+	let repl = "";
+	try { repl = replSnapshotMarkdown(await details(AbortSignal.timeout(10_000))); } catch { /* Shown without it. */ }
+	return repl ? [response.markdown, repl] : response.markdown;
+}
+
 const PI_LIVE_LEASE_MS = 30_000;
 const PI_LIVE_ENTRY_LIMIT = 10_000;
 /**
@@ -2145,7 +2159,7 @@ async function collectPreviewPageLayout(page: Page): Promise<PreviewPageLayout> 
 	}, PAGE_HEIGHT_PX);
 }
 
-function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean): {
+function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean, placeholderPrefix = PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX): {
 	normalizedMarkdown: string;
 	pandocMarkdown: string;
 	annotationPlaceholders: PreviewAnnotationPlaceholder[];
@@ -2156,7 +2170,7 @@ function prepareBrowserPreviewMarkdown(markdown: string, isLatex?: boolean): {
 		return { normalizedMarkdown, pandocMarkdown: normalizedMarkdown, annotationPlaceholders: [] };
 	}
 
-	const prepared = prepareMarkdownForPandocPreview(normalizedMarkdown, PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX) as {
+	const prepared = prepareMarkdownForPandocPreview(normalizedMarkdown, placeholderPrefix) as {
 		markdown?: string;
 		placeholders?: PreviewAnnotationPlaceholder[];
 	};
@@ -4613,8 +4627,12 @@ async function renderBrowserWatchLinkedDocument(path: string, style: PreviewStyl
 	return (await renderPreviewHtmlDocument(prepared.markdown, style, dirname(path), prepared.isLatex, fontSizePx, signal)).html;
 }
 
+/**
+ * `markdown` can be several sections. Each is parsed on its own and the HTML joined,
+ * so a fence or block left open in one cannot change how the next one parses.
+ */
 async function renderPreviewHtmlDocument(
-	markdown: string,
+	markdown: string | readonly string[],
 	style: PreviewStyle,
 	resourcePath?: string,
 	isLatex?: boolean,
@@ -4623,8 +4641,13 @@ async function renderPreviewHtmlDocument(
 	inlineLocalPdfData = false,
 ): Promise<{ html: string; normalizedMarkdown: string; fontSizePx: number }> {
 	const previewFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
-	const { normalizedMarkdown, pandocMarkdown, annotationPlaceholders } = prepareBrowserPreviewMarkdown(markdown, isLatex);
-	const fragmentHtml = markPandocPdfEmbeds(await renderMarkdownToHtmlWithPandoc(pandocMarkdown, resourcePath, isLatex, signal));
+	// Later sections get their own annotation placeholder tokens; all share the prefix the page looks for.
+	const sections = (typeof markdown === "string" ? [markdown] : markdown).map((section, i) =>
+		prepareBrowserPreviewMarkdown(section, isLatex, i ? `${PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX}S${i}X` : PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX));
+	const fragments = await Promise.all(sections.map(section => renderMarkdownToHtmlWithPandoc(section.pandocMarkdown, resourcePath, isLatex, signal)));
+	const fragmentHtml = markPandocPdfEmbeds(fragments.join("\n"));
+	const normalizedMarkdown = sections.map(section => section.normalizedMarkdown).join("\n\n");
+	const annotationPlaceholders = sections.flatMap(section => section.annotationPlaceholders);
 	const inlinePdfData = inlineLocalPdfData
 		? await collectInlineLocalPdfData(fragmentHtml, resourcePath, signal)
 		: {};
@@ -5351,11 +5374,12 @@ export default function (pi: ExtensionAPI) {
 		const renderGeneration = ++activeWatch.renderGeneration;
 		const renderController = beginBrowserWatchRender(activeWatch);
 		try {
-			const rendered = await renderPreviewHtmlDocument(response.markdown, style, activeWatch.resourcePath, false, activeWatch.fontSizePx, renderController.signal);
+			const turnDetails = piTurnDetails(ctx, response, activeWatch.source.turnDetails === true);
+			const rendered = await renderPreviewHtmlDocument(await piResponseSections(response, turnDetails), style, activeWatch.resourcePath, false, activeWatch.fontSizePx, renderController.signal);
 			if (!isBrowserWatchActive(activeWatch) || activeWatch.renderGeneration !== renderGeneration || activeWatch.source.kind !== "responses") return false;
 			activeWatch.server.updateDocument(rendered.html, {
 				appendToHistory: response.responseKey !== activeWatch.source.lastResponseKey,
-				turnDetails: piTurnDetails(ctx, response, activeWatch.source.turnDetails === true),
+				turnDetails,
 				responseKey: piResponseKey(response),
 			});
 			activeWatch.lastRenderKey = renderKey;
@@ -5594,8 +5618,8 @@ export default function (pi: ExtensionAPI) {
 			if (response) {
 				const renderController = beginBrowserWatchRender(provisional);
 				try {
-					const render = async (markdown: string) => (await renderPreviewHtmlDocument(markdown, style, resourcePath, false, previewFontSizePx, renderController.signal)).html;
-					html = await render(response.markdown);
+					const render = async (snapshot: AssistantResponseSnapshot) => (await renderPreviewHtmlDocument(await piResponseSections(snapshot, piTurnDetails(ctx, snapshot, provisional.turnDetails === true)), style, resourcePath, false, previewFontSizePx, renderController.signal)).html;
+					html = await render(response);
 					// A few renders at a time; an earlier response that fails to render is skipped.
 					const earlierHtml: (string | undefined)[] = new Array(earlier.length);
 					let next = 0;
@@ -5603,7 +5627,7 @@ export default function (pi: ExtensionAPI) {
 						while (next < earlier.length) {
 							const index = next++;
 							try {
-								earlierHtml[index] = await render(earlier[index]!.markdown);
+								earlierHtml[index] = await render(earlier[index]!);
 							} catch (error) {
 								if (renderController.signal.aborted) throw error;
 							}
