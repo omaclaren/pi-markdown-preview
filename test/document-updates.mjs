@@ -136,6 +136,15 @@ try {
 	}
 	const style = preview.getPreviewStyle(undefined);
 	const html = async markdown => (await preview.renderPreviewHtmlDocument(markdown, style, scratch)).html.replace('</head>', '<style>html { overflow-anchor: none; }</style></head>');
+	// Sections: the answer keeps its IDs, and a later section whose prefix one of them starts with gets a free one.
+	const laterNote = "Note[^n]\n\n[^n]: SECOND_NOTE\n";
+	for (const [answer, later, id] of [["# s1-fn1\n\nAnswer\n", laterNote, "s1-1-fn1"], ["# s1-fn1\n\n# s1-1-fn1\n", laterNote, "s1-2-fn1"], ["# s1-cb1\n\nAnswer\n", "```python\nx = 1\n```\n", "s1-1-cb1"]]) {
+		const body = (await preview.renderPreviewHtmlDocument([answer, later], style, scratch)).html.split('id="preview-root"')[1];
+		const ids = [...body.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
+		assert.deepEqual(ids.filter((value, i) => ids.indexOf(value) !== i), [], `${JSON.stringify(answer)}: no duplicate IDs`);
+		assert.ok(ids.includes(id) && answer.match(/s1-[\w-]+/g).every(heading => ids.includes(heading)), `${JSON.stringify(answer)}: ${id}, and the answer keeps its IDs`);
+		if (later === laterNote) assert.match(body, new RegExp(`href="#${id}" class="footnote-ref"[^]*id="${id}"[^>]*>[^]*?SECOND_NOTE`), "the reference links to its own note");
+	}
 	const prepared = preview.prepareBrowserPreviewMarkdown(affiliation);
 	assert.equal(prepared.normalizedMarkdown, normalizeSubSupTags(affiliation));
 	assert.equal(preview.prepareBrowserPreviewMarkdown(affiliation, true).normalizedMarkdown, affiliation, 'Do not normalize LaTeX source.');

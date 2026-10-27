@@ -4635,7 +4635,9 @@ async function renderBrowserWatchLinkedDocument(path: string, style: PreviewStyl
  * `markdown` can be several sections. Each is parsed on its own and the HTML joined,
  * so a fence or block left open in one cannot change how the next one parses. Later
  * sections prefix their element IDs and internal links (s1-, s2-, …) so footnotes and
- * code lines stay distinct; figures are numbered and cross-referenced per section.
+ * code lines stay distinct; the first keeps its own, and a later section whose prefix
+ * one of them starts with gets another (s1-1-, …). Figures are numbered and
+ * cross-referenced per section.
  */
 async function renderPreviewHtmlDocument(
 	markdown: string | readonly string[],
@@ -4651,6 +4653,16 @@ async function renderPreviewHtmlDocument(
 	const sections = (typeof markdown === "string" ? [markdown] : markdown).map((section, i) =>
 		prepareBrowserPreviewMarkdown(section, isLatex, i ? `${PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX}S${i}X` : PREVIEW_ANNOTATION_PLACEHOLDER_PREFIX));
 	const fragments = await Promise.all(sections.map((section, i) => renderMarkdownToHtmlWithPandoc(section.pandocMarkdown, resourcePath, isLatex, signal, i ? `s${i}-` : undefined)));
+	// The first section's IDs are unprefixed, so one can start with a later section's prefix (a
+	// heading "s1-fn1"); that section is parsed again with a prefix none of them starts with.
+	const firstIds = fragments.length > 1 ? [...fragments[0].matchAll(/\sid="([^"]*)"/g)].map(match => match[1]) : [];
+	const taken = (prefix: string) => firstIds.some(id => id.startsWith(prefix));
+	await Promise.all(sections.map(async (section, i) => {
+		if (!i || !taken(`s${i}-`)) return;
+		let n = 1;
+		while (taken(`s${i}-${n}-`)) n++;
+		fragments[i] = await renderMarkdownToHtmlWithPandoc(section.pandocMarkdown, resourcePath, isLatex, signal, `s${i}-${n}-`);
+	}));
 	const fragmentHtml = markPandocPdfEmbeds(fragments.join("\n"));
 	const normalizedMarkdown = sections.map(section => section.normalizedMarkdown).join("\n\n");
 	const annotationPlaceholders = sections.flatMap(section => section.annotationPlaceholders);
