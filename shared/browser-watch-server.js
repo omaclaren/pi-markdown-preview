@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -1364,8 +1364,12 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const latest = documents[documents.length - 1];
 			const latestWorking = documents.findLast(d => d.turnDetails);
 			const appearanceStyle = previewAppearanceStyle(latest.html);
-			// Element IDs in highlighted code are the entry's, so the same code twice doesn't share them.
-			const highlight = async view => view.entries?.length ? replHighlight(view.entries.map(entry => ({ key: entry.id, code: entry.code, id: `repl-entry-${entry.id}` })), view.runtime).catch(() => new Map()) : new Map();
+			// Highlighting a disconnected request's code is skipped if it hasn't started.
+			const controller = new AbortController();
+			res.once("close", () => controller.abort());
+			// Element IDs in highlighted code are the entry's: a fixed-width hash, so that one entry's
+			// line IDs (Pandoc adds "-1", "-2", …) can't be another entry's.
+			const highlight = async view => view.entries?.length ? replHighlight(view.entries.map(entry => ({ key: entry.id, code: entry.code, id: `repl-entry-${createHash("sha256").update(entry.id).digest("hex").slice(0, 16)}` })), view.runtime, { signal: controller.signal }).catch(() => new Map()) : new Map();
 			const respondPage = (html, replSession) => {
 				res.writeHead(200, turnSecurityHeaders(scriptNonce));
 				res.end(prepareBrowserWatchHtml(html, {

@@ -119,8 +119,11 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		if (seen.recordId !== pin.recordId) return false;
 		if (seen.recordVersion !== pin.recordVersion) {
 			pin.recordVersion = seen.recordVersion;
-			// A version this page doesn't read: what it showed from the earlier one goes.
-			if (pin.recordVersion !== "1" && pin.record) { pin.record = undefined; pin.window = undefined; pin.stamp = undefined; pin.shown = undefined; pin.sequence++; }
+			// A read begun under the earlier version is discarded when it lands.
+			pin.epoch++;
+			// A version this page doesn't read: what browsers show from the earlier one goes, even
+			// when this pin no longer holds that record in memory.
+			if (pin.recordVersion !== "1") { pin.record = undefined; pin.window = undefined; pin.stamp = undefined; pin.shown = undefined; pin.sequence++; }
 		}
 		return true;
 	};
@@ -138,7 +141,10 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		if (!pin.recordId || pin.recordVersion !== "1") return;
 		if (pin.record && now() - pin.statAt < STAT_MS) return;
 		if (!pin.reading) {
-			// Reads of different sessions' records are admitted only while fewer than READ_CONCURRENCY are running.
+			// One operation per pin at a time, even past its deadline, so a stuck one holds at most one of
+			// the READ_CONCURRENCY slots. A filesystem that never answers still stops reads: that loss is
+			// accepted, since a check between steps can't interrupt one.
+			if (pin.operation) return;
 			if (reading >= READ_CONCURRENCY) { if (!pin.record) pin.readError = "Other shared records are being read; trying again shortly."; return; }
 			pin.reading = readPin(pin).finally(() => { pin.reading = undefined; });
 		}
@@ -150,25 +156,28 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 	async function readPin(pin) {
 		pin.statAt = now();
 		reading++;
+		const epoch = pin.epoch;
 		const controller = new AbortController();
-		const work = (async () => {
+		const work = pin.operation = (async () => {
 			const stamp = await statRecord(pin.recordId, { root });
 			if (stamp === null) throw new Error("The shared record file isn't there.");
 			if (pin.record && stamp === pin.stamp && now() - pin.readAt < REREAD_MS) return null;
 			return await readRecord(pin.recordId, pin, { root, signal: controller.signal });
-		})().finally(() => { reading--; });
+		})().finally(() => { reading--; if (pin.operation === work) pin.operation = undefined; });
 		work.catch(() => {});
 		let timer;
 		const late = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve("late"); }, readTimeout); });
 		try {
 			const result = await Promise.race([work, late]);
 			if (result === "late") { pin.readError = "Reading the shared record took too long; trying again shortly."; return; }
-			if (!result) return;
+			// The pin moved on (another record version, or ended) while this read ran.
+			if (!result || pin.epoch !== epoch || pin.ended) return;
 			const window = replWindow(result.record);
 			const shown = JSON.stringify([result.record.revision, result.record.clearedAt, result.record.droppedEntries, window.notShown, window.entries.map(entry => entry.version)]);
 			if (shown !== pin.shown) { pin.shown = shown; pin.sequence++; }
 			pin.record = result.record; pin.window = window; pin.stamp = result.stamp; pin.readAt = now(); pin.readError = undefined;
 		} catch (error) {
+			if (pin.epoch !== epoch || pin.ended) return;
 			pin.readError = error instanceof ReplRecordError ? error.message : String(error?.message ?? error).slice(0, 200);
 			if (error instanceof ReplRecordError && error.code === "mismatch") { pin.state = "replaced"; pin.ended = true; }
 		} finally { clearTimeout(timer); }
@@ -187,7 +196,7 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		}
 		const pinId = randomBytes(9).toString("base64url");
 		pins.set(pinId, { ...session, tmuxSessionId: seen.tmuxSessionId, tmuxSessionCreatedAt: seen.tmuxSessionCreatedAt, recordId: seen.recordId, recordVersion: seen.recordVersion,
-			state: seen.state, checkedAt: now(), statAt: 0, readAt: 0, sequence: 0, seenAt: now() });
+			state: seen.state, checkedAt: now(), statAt: 0, readAt: 0, sequence: 0, epoch: 0, seenAt: now() });
 		sweep();
 		return { pinId };
 	}

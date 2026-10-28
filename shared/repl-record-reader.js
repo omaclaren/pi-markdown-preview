@@ -128,7 +128,9 @@ export function validateReplRecord(record, recordId, pin) {
 		throw new ReplRecordError("mismatch", "The shared REPL record belongs to another session lifetime.");
 	}
 	if (!runtimeFits(session.sessionName, session.runtime)) fail("The shared REPL record names a runtime its session doesn't run.");
-	if (!integer(record.revision) || !timestamp(record.createdAt) || !timestamp(record.updatedAt) || record.updatedAt < record.createdAt) fail("The shared REPL record's revision or times are invalid.");
+	// The writer sets the record's update time straight from the clock, so after a clock change it
+	// can come before its creation time (unlike an entry's).
+	if (!integer(record.revision) || !timestamp(record.createdAt) || !timestamp(record.updatedAt)) fail("The shared REPL record's revision or times are invalid.");
 	if (record.clearedAt !== null && !timestamp(record.clearedAt)) fail("The shared REPL record's clear time is invalid.");
 	if (!integer(record.droppedEntries)) fail("The shared REPL record's dropped-entry count is invalid.");
 	if (!Array.isArray(record.entries) || record.entries.length > MAX_ENTRIES) fail("The shared REPL record's entries are invalid.");

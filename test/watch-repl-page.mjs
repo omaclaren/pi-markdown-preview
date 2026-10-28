@@ -107,7 +107,6 @@ test("REPL record reader: validates strictly, without the writer's corrections",
 		["malformed", record([entry(1, { label: "" })])],
 		["malformed", record([entry(1, { requestId: "a\nb" })])],
 		["malformed", record([entry(1, { runtime: "Python" })])],
-		["malformed", record([entry(1)], { updatedAt: 1_600_000_000_000 })],
 	];
 	for (const [code, value] of bad) {
 		const { root } = await fixture(t, value);
@@ -119,6 +118,7 @@ test("REPL record reader: validates strictly, without the writer's corrections",
 	// Python and IPython share pi-repl-python; tmux may not have said which runtime it runs.
 	for (const runtime of ["ipython", "unknown"]) assert.ok(validateReplRecord(record([entry(1)], { session: { ...PIN, runtime } }), ID, PIN), runtime);
 	assert.ok(validateReplRecord(record([entry(1, { sessionName: "", skippedChunks: 100_000, completedAt: 1_700_000_000_005 })]), ID, PIN), "An older entry without a session, and the writer's own bounds.");
+	assert.ok(validateReplRecord(record([entry(1)], { updatedAt: 1_600_000_000_000 }), ID, PIN), "After a clock change the writer can give the record an update time before its creation (R21).");
 });
 
 test("REPL record reader: a file replaced after it was read, or a read past its deadline, gives nothing", async t => {
@@ -300,6 +300,67 @@ test("REPL source: record reads have a deadline, and at most two run at once (R1
 	live.close();
 });
 
+// Several running sessions, each with its own record and version; `readHeld` makes a session's reads wait until released.
+function sessions(names) {
+	let clock = 1_000_000;
+	const state = Object.fromEntries(names.map((name, i) => [name, { version: "1", id: `$${i + 1}`, readHeld: false, reads: 0, waiting: [] }]));
+	const run = async args => args[0] === "list-panes" && state[args[3].slice(1)]
+		? panes([[state[args[3].slice(1)].id, "1793150000", "0", "0", "%1", "0", ID, state[args[3].slice(1)].version]]) : { code: 1, stdout: "", stderr: "can't find session: x" };
+	const held = (s, kind) => new Promise(resolve => s.waiting.push({ kind, resolve }));
+	const live = createReplLiveSource({ run, root: "/unused", now: () => clock, readTimeout: 30,
+		statRecord: async () => "stamp",
+		readRecord: async (id, pin) => {
+			const s = state[pin.sessionName];
+			s.reads++;
+			if (s.readHeld) await held(s, "read");
+			const value = record([entry(1, { sessionName: pin.sessionName, runtime: pin.runtime })], { session: { sessionName: pin.sessionName, tmuxSessionId: s.id, tmuxSessionCreatedAt: 1793150000, runtime: pin.runtime } });
+			return { record: validateReplRecord(structuredClone(value), id, pin), stamp: "stamp" };
+		} });
+	return { live, state, tick: ms => { clock += ms; }, release: name => { for (const w of state[name].waiting.splice(0)) w.resolve(); } };
+}
+
+test("REPL source: an unreadable record version resets what browsers show, and a read begun before it is discarded (R18)", async () => {
+	const names = ["python", "julia", "r", "ruby", "java"].map(runtime => `pi-repl-${runtime}`);
+	const s = sessions(names);
+	const { pinId } = await s.live.pinSession("pi-repl-python");
+	const shown = await s.live.view(pinId, "");
+	assert.deepEqual(shown.entries.map(e => e.id), ["e1"]);
+	// Four other sessions viewed since: this pin no longer holds its record in memory…
+	for (const name of names.slice(1)) { s.tick(10); const other = await s.live.pinSession(name); await s.live.view(other.pinId, ""); }
+	s.state["pi-repl-python"].version = "2";
+	s.tick(5_100);
+	const after = await s.live.view(pinId, shown.version);
+	assert.deepEqual([after.unchanged, after.record, after.entries?.length], [undefined, "unsupported", 0], "…but the browser, which still shows its cards, is told to drop them.");
+	// A read running when the version changes doesn't land.
+	const t = sessions(["pi-repl-python"]);
+	const pinned = await t.live.pinSession("pi-repl-python");
+	t.state["pi-repl-python"].readHeld = true;
+	const viewing = t.live.view(pinned.pinId, "");
+	await new Promise(resolve => setImmediate(resolve));
+	t.state["pi-repl-python"].version = "2";
+	assert.equal((await t.live.pinSession("pi-repl-python")).pinId, pinned.pinId);
+	t.release("pi-repl-python");
+	const landed = await viewing;
+	assert.deepEqual([landed.record, landed.entries.length], ["unsupported", 0]);
+});
+
+test("REPL source: a stuck read holds at most one slot, and its session starts no second one (R19)", async () => {
+	const s = sessions(["pi-repl-python", "pi-repl-julia"]);
+	const python = await s.live.pinSession("pi-repl-python"), julia = await s.live.pinSession("pi-repl-julia");
+	s.state["pi-repl-python"].readHeld = true;
+	assert.match((await s.live.view(python.pinId, "")).readError, /took too long/);
+	s.tick(1_100);
+	await s.live.view(python.pinId, "");
+	assert.equal(s.state["pi-repl-python"].reads, 1, "No second read of the stuck session…");
+	const healthy = await s.live.view(julia.pinId, "");
+	assert.deepEqual([healthy.readError, healthy.entries.map(e => e.id)], [undefined, ["e1"]], "…and another session still reads.");
+	s.release("pi-repl-python");
+	await new Promise(resolve => setImmediate(resolve));
+	s.state["pi-repl-python"].readHeld = false;
+	s.tick(1_100);
+	assert.deepEqual((await s.live.view(python.pinId, "")).entries.map(e => e.id), ["e1"], "Once it stops, the session reads again.");
+});
+
 test("REPL window: the latest 50 entries, each field and the whole response bounded", () => {
 	const many = record(Array.from({ length: 80 }, (_, i) => entry(i)));
 	const window = replWindow(many);
@@ -381,13 +442,23 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	assert.match(changed.cards[1].html, /<div class="repl-code"><div class="sourceCode" id="x">[^]*HIGHLIGHTED/, "Highlighted code replaces the plain block…");
 	assert.match(changed.cards[0].html, /<pre class="code-input"><code>print\(1\)<\/code><\/pre>/, "…and code that couldn't be highlighted stays plain.");
 	assert.equal(changed.noticesHtml, "", "A changed window brings its notices, here none.");
-	assert.deepEqual([...new Set(asked.map(item => item.id))].sort(), ["repl-entry-e1", "repl-entry-e2"], "Highlighted code gets each entry's own IDs (R14).");
-	// However the record's text escapes, the update stays within its 2 MB (R11).
-	s.set(record(Array.from({ length: 50 }, (_, i) => entry(i, { output: "&".repeat(20_000) }))));
+	const ids = [...new Set(asked.map(item => item.id))];
+	assert.ok(ids.length === 2 && ids.every(id => /^repl-entry-[0-9a-f]{16}$/.test(id)), "Highlighted code gets each entry's own IDs, of fixed width (R14, R22)…");
+	s.set(record([entry(1), entry(2, { id: "e1-1" })]));
 	s.tick(1_100);
-	const heavy = await (await get(`${updatesHref}&version=${encodeURIComponent(changed.version)}`)).text();
-	assert.ok(Buffer.byteLength(heavy) < REPL_RESPONSE_BYTES + 20_000, `${Buffer.byteLength(heavy)} bytes`);
-	assert.match(JSON.parse(heavy).noticesHtml, /older entries aren&#39;t shown here/);
+	asked.length = 0;
+	await get(`${updatesHref}&version=${encodeURIComponent(version)}`);
+	const [plainId, suffixedId] = asked.map(item => item.id);
+	assert.ok(plainId !== suffixedId && !suffixedId.startsWith(`${plainId}-`), "…so entry e1's line IDs can't be entry e1-1's.");
+	// However the record's text escapes, and however long its IDs, the update stays within 2 MB (R11, R23).
+	let heavy;
+	for (const entries of [Array.from({ length: 50 }, (_, i) => entry(i, { output: "&".repeat(20_000) })), Array.from({ length: 20 }, (_, i) => entry(i, { id: `${"x".repeat(236)}-${String(i).padStart(2, "0")}`, output: "&".repeat(19_913) }))]) {
+		s.set(record(entries));
+		s.tick(1_100);
+		heavy = await (await get(`${updatesHref}&version=`)).text();
+		assert.ok(Buffer.byteLength(heavy) <= REPL_RESPONSE_BYTES, `${Buffer.byteLength(heavy)} bytes`);
+	}
+	assert.match(JSON.parse(heavy).noticesHtml, /older entr(y isn|ies aren)&#39;t shown here/);
 	assert.match(sessions, /aria-keyshortcuts="Alt\+ArrowLeft" aria-disabled="true"/, "No response history on the REPL pages.");
 	assert.match(sessions, /Back a page/);
 	assert.equal((await get(updatesHref.replace(/instance=[^&]+/, "instance=old"))).status, 409, "A link from an earlier run is refused.");
@@ -457,6 +528,29 @@ test("REPL highlighting: one run per block however many ask, one run at a time, 
 	assert.doesNotMatch(results[3].get("k3"), /repl-[0-9a-f]{20}/, "No ID shared with another entry's copy.");
 	await Promise.all([highlight([{ key: "a", code: "1" }], "python"), highlight([{ key: "b", code: "2" }], "python"), highlight([{ key: "c", code: "3" }], "python")]);
 	assert.deepEqual([runs, most], [4, 1], "Different blocks wait their turn.");
+});
+
+test("REPL highlighting: a bounded queue, and runs nobody waits for any more are skipped (R20)", async () => {
+	let gate, ran = [];
+	const highlight = createReplHighlighter({ run: async (args, input) => {
+		if (args.includes("markdown")) return JSON.stringify({ "pandoc-api-version": [1, 22] });
+		const blocks = JSON.parse(input).blocks;
+		ran.push(blocks[0].c[1][0].c[1]);
+		if (ran.length === 1) await new Promise(resolve => { gate = resolve; });
+		return blocks.map(div => `<div id="${div.c[0][0]}">\n<div class="sourceCode" id="${div.c[1][0].c[0][0]}"><pre><code>C</code></pre></div>\n</div>`).join("\n");
+	} });
+	const first = highlight([{ key: "k0", code: "x = 0" }], "python");
+	await new Promise(resolve => setTimeout(resolve, 10));
+	const controllers = Array.from({ length: 4 }, () => new AbortController());
+	const waiting = controllers.map((controller, i) => highlight([{ key: `k${i + 1}`, code: `x = ${i + 1}` }], "python", { signal: controller.signal }));
+	const full = await highlight([{ key: "k5", code: "x = 5" }], "python");
+	assert.equal(full.size, 0, "With four runs waiting, more code stays plain at once.");
+	for (const controller of controllers.slice(0, 3)) controller.abort();
+	assert.deepEqual((await Promise.all(waiting.slice(0, 3))).map(result => result.size), [0, 0, 0], "A request that has gone stops waiting…");
+	gate();
+	await first;
+	assert.equal((await waiting[3]).size, 1);
+	assert.deepEqual(ran, ["x = 0", "x = 4"], "…and runs nobody waits for are skipped.");
 });
 
 test("REPL page in a browser: new entries arrive, and a changed entry updates in place", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {

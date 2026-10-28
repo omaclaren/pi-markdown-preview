@@ -382,8 +382,10 @@ const REPL_STATES = {
 };
 const REPL_STATUSES = { sending: "sending", sent: "sent", captured: "captured", timeout: "timed out", error: "error", note: "note" };
 const REPL_LONG_OUTPUT_LINES = 40;
-/** The most the cards of one REPL page or update take, as sent. */
+/** The most one REPL update takes, as sent. A page is the same cards plus its fixed shell. */
 export const REPL_RESPONSE_BYTES = 2_000_000;
+// Room left for an update's version, flags, state line and notices (each bounded).
+const REPL_ENVELOPE_BYTES = 16_384;
 const clockTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
 const omittedNote = (what, chars) => chars > 0 ? `<p class="empty-text">${escape(`${chars.toLocaleString("en")} more characters of ${what} not shown`)}</p>` : "";
 
@@ -430,19 +432,22 @@ export function replWindowNoticesHtml(view) {
 
 /**
  * The cards for a view's window, numbered within what is shown: the newest entries whose cards fit in
- * `budget` bytes as sent (a card too big highlighted is tried plain). `highlighted` maps entry IDs to
- * highlighted code. Returns the cards and how many older entries the page doesn't show.
+ * an update of `budget` bytes as sent, counting each card's ID twice (in `ids` and the card) and
+ * leaving room for the rest of the update; a card too big highlighted is tried plain. `highlighted`
+ * maps entry IDs to highlighted code. Returns the cards and how many older entries aren't shown.
  */
 export function replEntryCards(view, highlighted = new Map(), budget = REPL_RESPONSE_BYTES) {
 	const entries = view.entries ?? [];
+	budget -= REPL_ENVELOPE_BYTES;
 	const render = (entry, number, plain) => renderReplEntryCard(entry, number, view.label, plain ? undefined : highlighted.get(entry.id));
-	const size = html => Buffer.byteLength(JSON.stringify(html));
+	// As sent: the card's HTML, its ID and version, and its ID again in `ids`.
+	const size = (entry, html) => Buffer.byteLength(JSON.stringify({ id: entry.id, version: entry.version, html })) + Buffer.byteLength(JSON.stringify(entry.id)) + 2;
 	const plain = new Set(), html = [];
 	let bytes = 0, start = entries.length;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		let card = render(entries[i], i + 1, false);
-		if (bytes + size(card) > budget && highlighted.has(entries[i].id)) { card = render(entries[i], i + 1, true); plain.add(entries[i].id); }
-		const cardBytes = size(card);
+		if (bytes + size(entries[i], card) > budget && highlighted.has(entries[i].id)) { card = render(entries[i], i + 1, true); plain.add(entries[i].id); }
+		const cardBytes = size(entries[i], card);
 		if (bytes + cardBytes > budget && start < entries.length) break;
 		bytes += cardBytes; start = i; html[i] = card;
 	}
