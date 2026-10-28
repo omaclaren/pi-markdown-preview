@@ -9,8 +9,9 @@ import { createHash } from "node:crypto";
 const LANGUAGES = { python: "python", ipython: "python", julia: "julia", r: "r", ghci: "haskell", clojure: "clojure", ruby: "ruby", java: "java", octave: "octave", matlab: "matlab", gnuplot: "gnuplot", cpp: "cpp" };
 const CACHE_ENTRIES = 400, CACHE_CHARS = 8_000_000, QUEUE_RUNS = 4, QUEUE_CHARS = 2_000_000, WAITING = 32, TIMEOUT_MS = 5_000;
 
+// Killed at TIMEOUT_MS: SIGKILL, since a process can ignore the default SIGTERM and hold the queue.
 const runPandoc = (args, input) => new Promise((resolve, reject) => {
-	const child = execFile(process.env.PANDOC_PATH || "pandoc", args, { timeout: TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
+	const child = execFile(process.env.PANDOC_PATH || "pandoc", args, { timeout: TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
 	child.stdin?.end(input);
 });
 
@@ -22,7 +23,8 @@ const runPandoc = (args, input) => new Promise((resolve, reject) => {
  * one at a time, behind at most QUEUE_RUNS waiting runs (QUEUE_CHARS of code), and at most WAITING
  * requests wait at once. When any of these is full, code stays plain. A request that has gone
  * (`signal`) stops waiting and holds nothing; a run nobody waits for any more is skipped, but one
- * that has started finishes (within TIMEOUT_MS) and is cached.
+ * that has started goes on: Pandoc's version, then the HTML, each killed at TIMEOUT_MS, and HTML
+ * it gives is cached.
  */
 export function createReplHighlighter({ run = runPandoc } = {}) {
 	const cache = new Map(); // code hash -> HTML, oldest use first

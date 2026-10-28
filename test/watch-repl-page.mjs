@@ -629,6 +629,22 @@ test("REPL highlighting: at most 32 requests wait, one that has gone holds nothi
 	assert.equal(renders, 1, "Nobody waits any more, so Pandoc isn't run.");
 });
 
+test("REPL highlighting: a Pandoc that ignores SIGTERM is still stopped at its timeout (R28)", { skip: process.platform === "win32" && "POSIX shell", timeout: 20_000 }, async t => {
+	const base = await mkdtemp(join(tmpdir(), "repl-pandoc-"));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	const pandoc = join(base, "pandoc");
+	await writeFile(pandoc, `#!/bin/sh\ncase "$*" in *markdown*) echo '{"pandoc-api-version":[1,22]}' ;; *) trap '' TERM; exec sleep 60 ;; esac\n`, { mode: 0o700 });
+	const before = process.env.PANDOC_PATH;
+	process.env.PANDOC_PATH = pandoc;
+	try {
+		const started = Date.now();
+		assert.equal((await createReplHighlighter()([{ key: "a", code: "print(1)" }], "python")).size, 0, "Plain code once it's stopped…");
+		assert.ok(Date.now() - started < 10_000, "…at the 5 s timeout, not when it chooses to exit.");
+	} finally {
+		if (before === undefined) delete process.env.PANDOC_PATH; else process.env.PANDOC_PATH = before;
+	}
+});
+
 test("REPL page in a browser: new entries arrive, and a changed entry updates in place", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
 	const dir = await mkdtemp(join(tmpdir(), "repl-page-browser-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
