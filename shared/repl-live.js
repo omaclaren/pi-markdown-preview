@@ -120,7 +120,9 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 			if (seen.state === "absent") { pin.state = "ended"; pin.ended = true; pin.checkedAt = now(); return; }
 			if (seen.state === "unchecked") { pin.state = "unchecked"; pin.reason = seen.reason; return; }
 			if (seen.tmuxSessionId !== pin.tmuxSessionId || seen.tmuxSessionCreatedAt !== pin.tmuxSessionCreatedAt) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
-			if (seen.recordId !== pin.recordId) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
+			// A session's first send gives it its record; any other change of record is a new lifetime.
+			if (!pin.recordId && seen.recordId) { pin.recordId = seen.recordId; pin.recordVersion = seen.recordVersion; }
+			else if (seen.recordId !== pin.recordId) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
 			pin.state = seen.state; pin.reason = undefined; pin.checkedAt = now();
 		}
 		if (!pin.recordId || pin.recordVersion !== "1") return;
@@ -153,7 +155,9 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		if (seen.state === "absent") return { error: "absent" };
 		if (seen.state === "unchecked") return { error: "unchecked", reason: seen.reason };
 		for (const [id, pin] of pins) {
-			if (!pin.ended && pin.sessionName === sessionName && pin.tmuxSessionId === seen.tmuxSessionId && pin.tmuxSessionCreatedAt === seen.tmuxSessionCreatedAt && pin.recordId === seen.recordId) return { pinId: id };
+			if (pin.ended || pin.sessionName !== sessionName || pin.tmuxSessionId !== seen.tmuxSessionId || pin.tmuxSessionCreatedAt !== seen.tmuxSessionCreatedAt) continue;
+			if (!pin.recordId && seen.recordId) { pin.recordId = seen.recordId; pin.recordVersion = seen.recordVersion; }
+			if (pin.recordId === seen.recordId) return { pinId: id };
 		}
 		const pinId = randomBytes(9).toString("base64url");
 		pins.set(pinId, { ...session, tmuxSessionId: seen.tmuxSessionId, tmuxSessionCreatedAt: seen.tmuxSessionCreatedAt, recordId: seen.recordId, recordVersion: seen.recordVersion,

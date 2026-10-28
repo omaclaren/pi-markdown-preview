@@ -138,19 +138,20 @@ test("REPL sessions: read from tmux as pi-repl does, and only tmux's own message
 
 // A source over a scripted tmux and an in-memory record, with a settable clock.
 function source(overrides = {}) {
-	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true;
+	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true, recordId = overrides.noRecord ? "" : ID;
 	const reads = [], stats = [];
 	const run = async args => {
 		if (args[0] === "list-panes") {
 			if (!alive || args[3] !== "=pi-repl-python") return { code: 1, stdout: "", stderr: `can't find window: ${args[3].slice(1)}` };
-			return panes([[...identity, "0", "0", "%1", "0", ID, "1"]]);
+			return panes([[...identity, "0", "0", "%1", "0", recordId, recordId ? "1" : ""]]);
 		}
 		return { code: 1, stdout: "", stderr: `can't find session: ${args[2].slice(1)}` };
 	};
+	const { noRecord, ...rest } = overrides;
 	const live = createReplLiveSource({ run, now: () => clock, root: "/unused",
 		statRecord: async () => { stats.push(clock); return `stamp-${JSON.stringify(current).length}-${current.revision}`; },
-		readRecord: async (id, pin) => { reads.push(clock); return { record: validateReplRecord(structuredClone(current), id, pin), stamp: `stamp-${JSON.stringify(current).length}-${current.revision}` }; }, ...overrides });
-	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; } };
+		readRecord: async (id, pin) => { reads.push(clock); return { record: validateReplRecord(structuredClone(current), id, pin), stamp: `stamp-${JSON.stringify(current).length}-${current.revision}` }; }, ...rest });
+	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; }, record: () => { recordId = ID; } };
 }
 
 test("REPL source: lists the shared sessions, pins one lifetime, and sends its window only when it changed", async () => {
@@ -220,6 +221,19 @@ test("REPL source: a replaced or ended session stays on its own lifetime and sto
 	t.end();
 	t.tick(5_100);
 	assert.equal((await t.live.view(pinned.pinId, "")).state, "ended");
+});
+
+test("REPL source: a session's first send gives it a record, which the open view adopts", async () => {
+	const s = source({ noRecord: true });
+	const { pinId } = await s.live.pinSession("pi-repl-python");
+	const before = await s.live.view(pinId, "");
+	assert.deepEqual([before.state, before.record, before.entries.length], ["running", "none", 0]);
+	s.record();
+	s.tick(5_100);
+	const after = await s.live.view(pinId, before.version);
+	assert.deepEqual([after.state, after.record, after.ended], ["running", "v1", false], "Not a replacement: the same lifetime got its record.");
+	assert.deepEqual(after.entries.map(e => e.code), ["print(1)"]);
+	assert.equal((await s.live.pinSession("pi-repl-python")).pinId, pinId);
 });
 
 test("REPL window: the latest 50 entries, each field and the whole response bounded", () => {
