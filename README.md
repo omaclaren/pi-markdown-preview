@@ -82,7 +82,7 @@ Working shows recorded prompts and tool output to anyone with the tab's link. Fo
 
 ### Live and Working
 
-Working shows a response's recorded prompts, progress, any exposed reasoning, and its tool calls and results. Prompts start expanded and activity starts folded. Commands, file reads and edits have readable views, with the recorded JSON available, and recorded images can be enlarged. **Ctrl+Alt+P** and **Ctrl+Alt+W** (Control+Option on macOS) switch between Preview and Working. **Ctrl+Alt+L** goes to the latest response in Preview from any view, including an earlier Working page.
+Working shows a response's recorded prompts, progress, any exposed reasoning, and its tool calls and results. Prompts start expanded and activity starts folded. Commands, file reads and edits have readable views, with the recorded JSON available, and recorded images can be enlarged. Code sent to a shared REPL (pi-repl, agent-repl or Pi Studio) shows its runtime and code, and its result shows just the output, headed with the call it belongs to. **Ctrl+Alt+P** and **Ctrl+Alt+W** (Control+Option on macOS) switch between Preview and Working. **Ctrl+Alt+L** goes to the latest response in Preview from any view, including an earlier Working page.
 
 With `--live` and **Follow activity** on, the page moves to Working when a turn starts and back to Preview when it ends. If you have scrolled up or moved to another page, it leaves you there. Updates arrive as Pi records each message, not token by token, so a tool call shows "No result recorded yet" until its result is recorded. Anything Live leaves out, such as cards beyond its display limits, is listed in its status line. Pi Studio has a fuller live view.
 
