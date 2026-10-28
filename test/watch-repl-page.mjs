@@ -342,6 +342,17 @@ test("REPL source: an unreadable record version resets what browsers show, and a
 	t.release("pi-repl-python");
 	const landed = await viewing;
 	assert.deepEqual([landed.record, landed.entries.length], ["unsupported", 0]);
+	// Nor does its deadline notice (R27).
+	const u = sessions(["pi-repl-python"]);
+	const again = await u.live.pinSession("pi-repl-python");
+	u.state["pi-repl-python"].readHeld = true;
+	const slow = u.live.view(again.pinId, "");
+	await new Promise(resolve => setImmediate(resolve));
+	u.state["pi-repl-python"].version = "2";
+	await u.live.pinSession("pi-repl-python");
+	const late = await slow;
+	assert.deepEqual([late.record, late.readError], ["unsupported", undefined]);
+	u.release("pi-repl-python");
 });
 
 test("REPL source: a stuck read holds at most one slot, and its session starts no second one (R19)", async () => {
@@ -359,6 +370,27 @@ test("REPL source: a stuck read holds at most one slot, and its session starts n
 	s.state["pi-repl-python"].readHeld = false;
 	s.tick(1_100);
 	assert.deepEqual((await s.live.view(python.pinId, "")).entries.map(e => e.id), ["e1"], "Once it stops, the session reads again.");
+});
+
+test("REPL source: a stuck read's pin outlasts its viewers, so reopening the session starts no second read (R24)", async () => {
+	const s = sessions(["pi-repl-python", "pi-repl-julia", "pi-repl-r"]);
+	const python = await s.live.pinSession("pi-repl-python"), julia = await s.live.pinSession("pi-repl-julia");
+	s.state["pi-repl-python"].readHeld = true;
+	assert.match((await s.live.view(python.pinId, "")).readError, /took too long/);
+	// Nobody views Python past the idle period; Julia's view sweeps.
+	s.tick(61_000);
+	assert.equal((await s.live.view(julia.pinId, "")).readError, undefined);
+	const reopened = await s.live.pinSession("pi-repl-python");
+	assert.equal(reopened.pinId, python.pinId, "Reopening finds the pin whose read is still running…");
+	assert.match((await s.live.view(reopened.pinId, "")).readError, /took too long/);
+	assert.equal(s.state["pi-repl-python"].reads, 1, "…and starts no second read of the stuck file…");
+	const r = await s.live.pinSession("pi-repl-r");
+	assert.deepEqual((await s.live.view(r.pinId, "")).entries.map(e => e.id), ["e1"], "…so another session still has a slot.");
+	s.release("pi-repl-python");
+	await new Promise(resolve => setImmediate(resolve));
+	s.tick(61_000);
+	await s.live.view(julia.pinId, "");
+	assert.notEqual((await s.live.pinSession("pi-repl-python")).pinId, python.pinId, "Once its read stops, an idle pin goes as usual.");
 });
 
 test("REPL window: the latest 50 entries, each field and the whole response bounded", () => {
@@ -551,6 +583,50 @@ test("REPL highlighting: a bounded queue, and runs nobody waits for any more are
 	await first;
 	assert.equal((await waiting[3]).size, 1);
 	assert.deepEqual(ran, ["x = 0", "x = 4"], "…and runs nobody waits for are skipped.");
+});
+
+test("REPL highlighting: at most 32 requests wait, one that has gone holds nothing, and nobody waiting means no run (R25, R26)", async () => {
+	let gate, api, renders = 0;
+	const highlight = createReplHighlighter({ run: async (args, input) => {
+		if (args.includes("markdown")) { await api; return JSON.stringify({ "pandoc-api-version": [1, 22] }); }
+		renders++;
+		await new Promise(resolve => { gate = resolve; });
+		return JSON.parse(input).blocks.map(div => `<div id="${div.c[0][0]}">\n<div class="sourceCode" id="${div.c[1][0].c[0][0]}"><pre><code>C</code></pre></div>\n</div>`).join("\n");
+	} });
+	const first = highlight([{ key: "a", code: "print(1)" }], "python");
+	await new Promise(resolve => setTimeout(resolve, 10));
+	// Requests for the running block come and go; count what each promise has attached.
+	const then = Promise.prototype.then, attached = new WeakMap();
+	let most = 0;
+	Promise.prototype.then = function (...args) { const n = (attached.get(this) ?? 0) + 1; attached.set(this, n); most = Math.max(most, n); return then.apply(this, args); };
+	try {
+		for (let i = 0; i < 200; i++) {
+			const controller = new AbortController();
+			const asked = highlight([{ key: "a", code: "print(1)" }], "python", { signal: controller.signal });
+			controller.abort();
+			await asked;
+		}
+	} finally { Promise.prototype.then = then; }
+	assert.ok(most < 10, `Requests that have gone leave nothing on the job (${most} on one promise).`);
+	let answered = 0;
+	const more = Array.from({ length: 40 }, () => highlight([{ key: "a", code: "print(1)" }], "python").then(result => { answered++; return result.size; }));
+	await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(answered, 9, "With 32 waiting, more requests get plain code at once.");
+	gate();
+	assert.equal((await first).size, 1);
+	assert.deepEqual([(await Promise.all(more)).filter(Boolean).length, renders], [31, 1]);
+	// The only request goes while Pandoc's version is being found: no run starts afterwards.
+	let found;
+	api = new Promise(resolve => { found = resolve; });
+	const fresh = createReplHighlighter({ run: async args => { if (args.includes("markdown")) { await api; return JSON.stringify({ "pandoc-api-version": [1, 22] }); } renders++; return ""; } });
+	const controller = new AbortController();
+	const asked = fresh([{ key: "b", code: "print(2)" }], "python", { signal: controller.signal });
+	await new Promise(resolve => setTimeout(resolve, 10));
+	controller.abort();
+	assert.equal((await asked).size, 0);
+	found();
+	await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(renders, 1, "Nobody waits any more, so Pandoc isn't run.");
 });
 
 test("REPL page in a browser: new entries arrive, and a changed entry updates in place", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {

@@ -100,11 +100,13 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 	};
 	const sweep = () => {
 		const t = now();
-		for (const [id, pin] of pins) if (t - pin.seenAt > IDLE_MS) pins.delete(id);
+		// A pin whose stat or read is still running stays until it stops (at most READ_CONCURRENCY do), so
+		// reopening its session finds it and starts no second one.
+		for (const [id, pin] of pins) if (t - pin.seenAt > IDLE_MS && !pin.operation) pins.delete(id);
 		// At most MAX_SOURCES pins keep a record in memory; the least recently seen lets go.
 		const holding = [...pins.values()].filter(pin => pin.record).sort((a, b) => b.seenAt - a.seenAt);
 		for (const pin of holding.slice(MAX_SOURCES)) { pin.record = undefined; pin.window = undefined; pin.stamp = undefined; }
-		while (pins.size > MAX_PINS) pins.delete([...pins.entries()].sort((a, b) => a[1].seenAt - b[1].seenAt)[0][0]);
+		while (pins.size > MAX_PINS) pins.delete([...pins.entries()].filter(([, pin]) => !pin.operation).sort((a, b) => a[1].seenAt - b[1].seenAt)[0][0]);
 	};
 
 	async function list() {
@@ -141,9 +143,11 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		if (!pin.recordId || pin.recordVersion !== "1") return;
 		if (pin.record && now() - pin.statAt < STAT_MS) return;
 		if (!pin.reading) {
-			// One operation per pin at a time, even past its deadline, so a stuck one holds at most one of
-			// the READ_CONCURRENCY slots. A filesystem that never answers still stops reads: that loss is
-			// accepted, since a check between steps can't interrupt one.
+			// One operation per pin at a time, even past its deadline and after the pin's viewers have gone, so
+			// a stuck one holds at most one of the READ_CONCURRENCY slots. Two records whose reads never return
+			// still stop all reads, since a check between steps can't interrupt them, and admission is first
+			// come at each poll, so under sustained contention a session can keep missing its turn. Both are
+			// accepted: reads take milliseconds and views poll every second or so.
 			if (pin.operation) return;
 			if (reading >= READ_CONCURRENCY) { if (!pin.record) pin.readError = "Other shared records are being read; trying again shortly."; return; }
 			pin.reading = readPin(pin).finally(() => { pin.reading = undefined; });
@@ -169,9 +173,10 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		const late = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve("late"); }, readTimeout); });
 		try {
 			const result = await Promise.race([work, late]);
-			if (result === "late") { pin.readError = "Reading the shared record took too long; trying again shortly."; return; }
 			// The pin moved on (another record version, or ended) while this read ran.
-			if (!result || pin.epoch !== epoch || pin.ended) return;
+			if (pin.epoch !== epoch || pin.ended) return;
+			if (result === "late") { pin.readError = "Reading the shared record took too long; trying again shortly."; return; }
+			if (!result) return;
 			const window = replWindow(result.record);
 			const shown = JSON.stringify([result.record.revision, result.record.clearedAt, result.record.droppedEntries, window.notShown, window.entries.map(entry => entry.version)]);
 			if (shown !== pin.shown) { pin.shown = shown; pin.sequence++; }
