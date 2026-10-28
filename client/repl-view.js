@@ -11,6 +11,7 @@
    if (!root || !document.body.classList.contains('pi-preview-repl')) return;
    const list = root.querySelector('.repl-entries');
    const status = root.querySelector('.repl-session-status');
+   const notices = root.querySelector('.repl-window-notices');
    const newer = root.querySelector('.repl-new-entries');
    const updates = root.getAttribute('data-repl-updates');
    if (!list || !updates) return;
@@ -22,6 +23,8 @@
    const toBottom = () => window.scrollTo(0, document.documentElement.scrollHeight);
    const fromHtml = html => { const template = document.createElement('template'); template.innerHTML = html; return template.content.firstElementChild; };
    const cardsNow = () => Array.from(list.querySelectorAll(':scope > .repl-entry'));
+   // The shown window's order, and whether a held card is still waiting for its number.
+   let order = cardsNow().map(card => card.getAttribute('data-entry-id')), numbersHeld = false;
    const held = card => {
     const focused = document.activeElement;
     if (focused && focused !== document.body && card.contains(focused)) return true;
@@ -38,12 +41,14 @@
     const freshFold = card.querySelector('details.repl-output');
     if (freshFold && fold !== undefined) freshFold.open = fold;
    };
-   const renumber = ids => {
-    const position = new Map(ids.map((id, i) => [id, String(i + 1)]));
+   const renumber = () => {
+    const position = new Map(order.map((id, i) => [id, String(i + 1)]));
+    numbersHeld = false;
     for (const card of cardsNow()) {
      const number = position.get(card.getAttribute('data-entry-id'));
      const span = card.querySelector(':scope > summary > .number');
-     if (number !== undefined && span && span.textContent !== number && !held(card)) span.textContent = number;
+     if (number === undefined || !span || span.textContent === number) continue;
+     if (held(card)) numbersHeld = true; else span.textContent = number;
     }
    };
    // Ages are counted from the server's clock, so a skewed browser clock doesn't matter.
@@ -66,7 +71,7 @@
      if (!card.isConnected) { deferred.delete(card); continue; }
      if (!held(card)) { replaceContent(card, next.fresh, next.version); deferred.delete(card); any = true; }
     }
-    if (any) renumber(cardsNow().map(card => card.getAttribute('data-entry-id')));
+    if (any || numbersHeld) renumber();
    };
    document.addEventListener('selectionchange', settle);
    document.addEventListener('focusout', () => setTimeout(settle, 0));
@@ -98,7 +103,9 @@
      previous = card;
     }
     list.querySelector(':scope > .repl-empty')?.toggleAttribute('hidden', data.ids.length > 0);
-    renumber(data.ids);
+    if (notices && typeof data.noticesHtml === 'string') { notices.innerHTML = data.noticesHtml; notices.hidden = !data.noticesHtml; }
+    order = data.ids.slice();
+    renumber();
     version = data.version;
    };
    const newCount = data => { const shown = new Set(cardsNow().map(card => card.getAttribute('data-entry-id'))); return data.ids.filter(id => !shown.has(id)).length; };

@@ -382,6 +382,8 @@ const REPL_STATES = {
 };
 const REPL_STATUSES = { sending: "sending", sent: "sent", captured: "captured", timeout: "timed out", error: "error", note: "note" };
 const REPL_LONG_OUTPUT_LINES = 40;
+/** The most the cards of one REPL page or update take, as sent. */
+export const REPL_RESPONSE_BYTES = 2_000_000;
 const clockTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
 const omittedNote = (what, chars) => chars > 0 ? `<p class="empty-text">${escape(`${chars.toLocaleString("en")} more characters of ${what} not shown`)}</p>` : "";
 
@@ -404,7 +406,7 @@ export function renderReplEntryCard(entry, number, runtimeLabel, highlighted) {
 	return `<details class="event result repl-entry" open data-entry-id="${escape(entry.id)}" data-entry-version="${escape(entry.version)}"><summary>${head}</summary><div class="event-content">${prose}${source}${output}</div></details>`;
 }
 
-/** The session view's state line and notes, from `view` (createReplLiveSource). */
+/** The session view's state line, from `view` (createReplLiveSource): sent with every update. */
 export function replSessionStatusHtml(view, { sessionsHref = "" } = {}) {
 	const parts = [];
 	const state = REPL_STATES[view.state] ?? view.state;
@@ -414,21 +416,49 @@ export function replSessionStatusHtml(view, { sessionsHref = "" } = {}) {
 	else if (view.record === "unsupported") parts.push("Its shared record uses a version this page doesn't read.");
 	parts.push(`<span class="repl-ages" data-repl-now="${Number(view.now) || 0}" data-repl-checked="${Number(view.checkedAt) || 0}" data-repl-read="${Number(view.readAt) || 0}">Session checked <span data-repl-age="checked"></span>${view.readAt ? `; record read <span data-repl-age="read"></span>` : ""}.</span>`);
 	if (view.readError) parts.push(`<span class="live-notice">${escape(`The record couldn't be read just now: ${view.readError}`)}</span>`);
+	return parts.join(" ");
+}
+
+/** What the shown window leaves out: sent with its cards, and kept until the next window. */
+export function replWindowNoticesHtml(view) {
+	const parts = [];
 	if (view.clearedAt) parts.push(`<span class="live-notice">${escape(`Cleared at ${clockTime(view.clearedAt)}; earlier submissions are gone from the record.`)}</span>`);
 	if (view.droppedEntries) parts.push(`<span class="live-notice">${escape(`${view.droppedEntries.toLocaleString("en")} older ${view.droppedEntries === 1 ? "entry was" : "entries were"} dropped to keep the record within its limits.`)}</span>`);
 	if (view.notShown) parts.push(`<span class="live-notice">${escape(`${view.notShown.toLocaleString("en")} older ${view.notShown === 1 ? "entry isn't" : "entries aren't"} shown here.`)}</span>`);
 	return parts.join(" ");
 }
 
-/** The cards for a view's window, numbered within it; `highlighted` maps entry IDs to highlighted code. */
-export const replEntryCards = (view, highlighted = new Map()) => (view.entries ?? []).map((entry, i) => ({ id: entry.id, version: entry.version, html: renderReplEntryCard(entry, i + 1, view.label, highlighted.get(entry.id)) }));
+/**
+ * The cards for a view's window, numbered within what is shown: the newest entries whose cards fit in
+ * `budget` bytes as sent (a card too big highlighted is tried plain). `highlighted` maps entry IDs to
+ * highlighted code. Returns the cards and how many older entries the page doesn't show.
+ */
+export function replEntryCards(view, highlighted = new Map(), budget = REPL_RESPONSE_BYTES) {
+	const entries = view.entries ?? [];
+	const render = (entry, number, plain) => renderReplEntryCard(entry, number, view.label, plain ? undefined : highlighted.get(entry.id));
+	const size = html => Buffer.byteLength(JSON.stringify(html));
+	const plain = new Set(), html = [];
+	let bytes = 0, start = entries.length;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		let card = render(entries[i], i + 1, false);
+		if (bytes + size(card) > budget && highlighted.has(entries[i].id)) { card = render(entries[i], i + 1, true); plain.add(entries[i].id); }
+		const cardBytes = size(card);
+		if (bytes + cardBytes > budget && start < entries.length) break;
+		bytes += cardBytes; start = i; html[i] = card;
+	}
+	// Numbers count from the first card shown, so cards left out mean rendering again.
+	const cards = entries.slice(start).map((entry, i) => ({ id: entry.id, version: entry.version, html: start ? render(entry, i + 1, plain.has(entry.id)) : html[i] }));
+	return { cards, notShown: (view.notShown ?? 0) + start };
+}
 
 const REPL_INTRO = "Recent recorded submissions to this shared session, from any agent, Pi Studio or project, updating as they arrive. Code typed directly into the terminal isn't recorded here.";
 
 /** One session's page. `updatesHref` is the page's same-origin polling address. */
 export function buildReplSessionPage(view, { label = "", appearanceStyle = "", updatesHref = "", sessionsHref = "", highlighted } = {}) {
-	const cards = replEntryCards(view, highlighted).map(card => card.html).join("\n");
-	return `${pageHead(`REPL · ${view.label}`, appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root" data-repl-updates="${escape(updatesHref)}" data-repl-version="${escape(view.version ?? "")}">${sessionsHref ? `<nav><a href="${escape(sessionsHref)}">← REPL sessions</a></nav>` : ""}<h1>REPL · ${escape(view.label)}</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}${escape(view.sessionName)}</p><p class="notices">${escape(REPL_INTRO)}</p><p class="live-status repl-session-status" aria-live="polite">${replSessionStatusHtml(view, { sessionsHref })}</p><div class="repl-entries">${cards || '<p class="empty-text repl-empty">No submissions recorded yet.</p>'}</div><button type="button" class="repl-new-entries" hidden>New entries below</button></main></body></html>`;
+	const shown = replEntryCards(view, highlighted);
+	const cards = shown.cards.map(card => card.html).join("\n");
+	const notices = replWindowNoticesHtml({ ...view, notShown: shown.notShown });
+	return `${pageHead(`REPL · ${view.label}`, appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root" data-repl-updates="${escape(updatesHref)}" data-repl-version="${escape(view.version ?? "")}">${sessionsHref ? `<nav><a href="${escape(sessionsHref)}">← REPL sessions</a></nav>` : ""}<h1>REPL · ${escape(view.label)}</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}${escape(view.sessionName)}</p><p class="notices">${escape(REPL_INTRO)}</p><p class="live-status repl-session-status" aria-live="polite">${replSessionStatusHtml(view, { sessionsHref })}</p><p class="live-status repl-window-notices"${notices ? "" : " hidden"}>${notices}</p><div class="repl-entries">${cards || '<p class="empty-text repl-empty">No submissions recorded yet.</p>'}</div><button type="button" class="repl-new-entries" hidden>New entries below</button></main></body></html>`;
 }
 
 /** The list of pi-repl's shared sessions. `sessionHref(name)` links a running one. */

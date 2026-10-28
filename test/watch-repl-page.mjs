@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord } from "../shared/repl-record-reader.js";
 import { createReplLiveSource, inspectReplSession, replWindow, REPL_FIELD_DISPLAY_CHARS } from "../shared/repl-live.js";
 import { createReplHighlighter } from "../shared/repl-highlight.js";
-import { buildReplSessionPage, renderReplEntryCard } from "../shared/turn-details-page.js";
+import { buildReplSessionPage, renderReplEntryCard, replEntryCards, REPL_RESPONSE_BYTES } from "../shared/turn-details-page.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const ID = "0123456789abcdef0123456789abcdef";
@@ -98,6 +98,16 @@ test("REPL record reader: validates strictly, without the writer's corrections",
 		["malformed", record([entry(1, { label: "two\nlines" })])],
 		["malformed", record([entry(1, { createdAt: -1 })])],
 		["malformed", record(Array.from({ length: 301 }, (_, i) => entry(i)))],
+		// What pi-repl's writer guarantees (R15): the session's runtime, the entry's session, ordered times, its bounds.
+		["malformed", record([entry(1)], { session: { ...PIN, runtime: "julia" } })],
+		["malformed", record([entry(1, { sessionName: "pi-repl-julia" })])],
+		["malformed", record([entry(1, { updatedAt: 1_700_000_000_000 })])],
+		["malformed", record([entry(1, { completedAt: 1_700_000_000_000 })])],
+		["malformed", record([entry(1, { skippedChunks: 100_001 })])],
+		["malformed", record([entry(1, { label: "" })])],
+		["malformed", record([entry(1, { requestId: "a\nb" })])],
+		["malformed", record([entry(1, { runtime: "Python" })])],
+		["malformed", record([entry(1)], { updatedAt: 1_600_000_000_000 })],
 	];
 	for (const [code, value] of bad) {
 		const { root } = await fixture(t, value);
@@ -106,6 +116,17 @@ test("REPL record reader: validates strictly, without the writer's corrections",
 	// Fields a writer may leave out are optional; unknown ones are ignored.
 	const { prose, requestId, ...lean } = entry(1);
 	assert.ok(validateReplRecord(record([{ ...lean, future: true }]), ID, PIN));
+	// Python and IPython share pi-repl-python; tmux may not have said which runtime it runs.
+	for (const runtime of ["ipython", "unknown"]) assert.ok(validateReplRecord(record([entry(1)], { session: { ...PIN, runtime } }), ID, PIN), runtime);
+	assert.ok(validateReplRecord(record([entry(1, { sessionName: "", skippedChunks: 100_000, completedAt: 1_700_000_000_005 })]), ID, PIN), "An older entry without a session, and the writer's own bounds.");
+});
+
+test("REPL record reader: a file replaced after it was read, or a read past its deadline, gives nothing", async t => {
+	const { base, root, file } = await fixture(t);
+	await writeFile(join(base, "other.json"), JSON.stringify(record([entry(9)])), { mode: 0o600 });
+	await refusal(readReplRecord(ID, PIN, { root, afterRead: () => rename(join(base, "other.json"), file) }), "swapped");
+	const controller = new AbortController();
+	await assert.rejects(readReplRecord(ID, PIN, { root, signal: controller.signal, afterOpen: async () => controller.abort() }), error => error.name === "AbortError");
 });
 
 test("REPL entry version: covers what the card shows, so a same-millisecond update isn't missed (D1)", () => {
@@ -140,20 +161,20 @@ test("REPL sessions: read from tmux as pi-repl does, and only tmux's own message
 
 // A source over a scripted tmux and an in-memory record, with a settable clock.
 function source(overrides = {}) {
-	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true, recordId = overrides.noRecord ? "" : ID;
+	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true, recordId = overrides.noRecord ? "" : ID, recordVersion = overrides.recordVersion ?? "1";
 	const reads = [], stats = [];
 	const run = async args => {
 		if (args[0] === "list-panes") {
 			if (!alive || args[3] !== "=pi-repl-python") return { code: 1, stdout: "", stderr: `can't find window: ${args[3].slice(1)}` };
-			return panes([[...identity, "0", "0", "%1", "0", recordId, recordId ? "1" : ""]]);
+			return panes([[...identity, "0", "0", "%1", "0", recordId, recordId ? recordVersion : ""]]);
 		}
 		return { code: 1, stdout: "", stderr: `can't find session: ${args[2].slice(1)}` };
 	};
-	const { noRecord, ...rest } = overrides;
+	const { noRecord, recordVersion: _, ...rest } = overrides;
 	const live = createReplLiveSource({ run, now: () => clock, root: "/unused",
 		statRecord: async () => { stats.push(clock); return `stamp-${JSON.stringify(current).length}-${current.revision}`; },
 		readRecord: async (id, pin) => { reads.push(clock); return { record: validateReplRecord(structuredClone(current), id, pin), stamp: `stamp-${JSON.stringify(current).length}-${current.revision}` }; }, ...rest });
-	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; }, record: () => { recordId = ID; } };
+	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; }, record: () => { recordId = ID; }, version: value => { recordVersion = value; } };
 }
 
 test("REPL source: lists the shared sessions, pins one lifetime, and sends its window only when it changed", async () => {
@@ -238,6 +259,47 @@ test("REPL source: a session's first send gives it a record, which the open view
 	assert.equal((await s.live.pinSession("pi-repl-python")).pinId, pinId);
 });
 
+test("REPL source: a record's version is read afresh at each check, not only with its ID (R10)", async () => {
+	// pi-repl sets the record's ID before its version: a view can see the ID alone first.
+	const s = source({ recordVersion: "" });
+	const { pinId } = await s.live.pinSession("pi-repl-python");
+	const staged = await s.live.view(pinId, "");
+	assert.deepEqual([staged.record, staged.entries.length, s.reads.length], ["unsupported", 0, 0]);
+	s.version("1");
+	s.tick(5_100);
+	const ready = await s.live.view(pinId, staged.version);
+	assert.deepEqual([ready.record, ready.ended, ready.entries.map(e => e.code)], ["v1", false, ["print(1)"]]);
+	s.version("2");
+	s.tick(5_100);
+	const reads = s.reads.length;
+	const newer = await s.live.view(pinId, ready.version);
+	assert.deepEqual([newer.record, newer.entries.length, newer.ended], ["unsupported", 0, false], "A version this page doesn't read shows nothing from the earlier one…");
+	assert.equal(s.reads.length, reads, "…and isn't read.");
+	assert.equal((await s.live.pinSession("pi-repl-python")).pinId, pinId, "Still the same lifetime.");
+});
+
+test("REPL source: record reads have a deadline, and at most two run at once (R12)", async () => {
+	const sessions = ["python", "julia", "r", "ruby", "java"].map(runtime => `pi-repl-${runtime}`);
+	const run = async args => args[0] === "list-panes" && sessions.includes(args[3].slice(1))
+		? panes([[`$${sessions.indexOf(args[3].slice(1)) + 1}`, "1793150000", "0", "0", "%1", "0", ID, "1"]]) : { code: 1, stdout: "", stderr: "can't find session: x" };
+	const hanging = [];
+	const live = createReplLiveSource({ run, root: "/unused", readTimeout: 30, statRecord: async () => "stamp",
+		readRecord: (id, pin, { signal }) => new Promise((resolve, reject) => hanging.push({ resolve, reject, signal })) });
+	const pins = await Promise.all(sessions.map(async name => (await live.pinSession(name)).pinId));
+	const views = await Promise.all(pins.map(pinId => live.view(pinId, "")));
+	assert.equal(hanging.length, 2, "Two reads admitted…");
+	assert.deepEqual(views.map(view => /took too long|being read/.exec(view.readError ?? "")?.[0]), ["took too long", "took too long", "being read", "being read", "being read"], "…each abandoned at its deadline, and the rest told to wait.");
+	assert.ok(hanging.every(read => read.signal.aborted), "An abandoned read is told to stop.");
+	await live.view(pins[2], "");
+	assert.equal(hanging.length, 2, "A read past its deadline still counts until it stops.");
+	for (const read of hanging) read.reject(read.signal.reason);
+	await new Promise(resolve => setImmediate(resolve));
+	await live.view(pins[2], "");
+	assert.equal(hanging.length, 3, "Once they stop, another is admitted.");
+	for (const read of hanging.slice(2)) read.reject(new Error("done"));
+	live.close();
+});
+
 test("REPL window: the latest 50 entries, each field and the whole response bounded", () => {
 	const many = record(Array.from({ length: 80 }, (_, i) => entry(i)));
 	const window = replWindow(many);
@@ -249,6 +311,21 @@ test("REPL window: the latest 50 entries, each field and the whole response boun
 	assert.equal(big.entries[0].displayOmitted.output, 150_000 - REPL_FIELD_DISPLAY_CHARS);
 	const heavy = replWindow(record(Array.from({ length: 50 }, (_, i) => entry(i, { output: "z".repeat(150_000), code: "c".repeat(150_000) }))));
 	assert.ok(heavy.entries.length < 50 && heavy.entries.at(-1).id === "e49", "Newest entries are kept when the byte budget runs out.");
+});
+
+test("REPL cards: the newest that fit in 2 MB as sent, numbered from the first shown (R11)", () => {
+	// Fifty entries of 20,000 ampersands: about 1 MB of record, five times that escaped.
+	const window = replWindow(record(Array.from({ length: 50 }, (_, i) => entry(i, { output: "&".repeat(20_000) }))));
+	const { cards, notShown } = replEntryCards({ ...window, label: "Python" }, new Map());
+	const bytes = cards.reduce((sum, card) => sum + Buffer.byteLength(JSON.stringify(card.html)), 0);
+	assert.ok(bytes <= REPL_RESPONSE_BYTES, `${bytes} bytes`);
+	assert.ok(cards.length < 50 && cards.at(-1).id === "e49", "The newest are kept…");
+	assert.equal(notShown, 50 - cards.length, "…and the rest are counted.");
+	assert.match(cards[0].html, /<span class="number">1<\/span>/);
+	// A card too big highlighted is shown plain rather than not at all.
+	const one = replEntryCards({ entries: [{ ...entry(1), version: "v", displayOmitted: {} }], label: "Python" }, new Map([["e1", "<b>" + "x".repeat(REPL_RESPONSE_BYTES) + "</b>"]]));
+	assert.equal(one.cards.length, 1);
+	assert.match(one.cards[0].html, /<pre class="code-input"><code>print\(1\)<\/code><\/pre>/);
 });
 
 test("REPL page: record text stays inert, and the page says what it shows", () => {
@@ -273,7 +350,8 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	const plainPage = await (await fetch(plain.url)).text();
 	assert.doesNotMatch(plainPage, /data-watch-control="repl"/, "No REPL link without the option.");
 	const s = source();
-	const server = await createBrowserWatchServer(html, dir, { repl: s.live, replHighlight: async items => new Map(items.filter(item => item.code === "print(2)").map(item => [item.key, '<div class="sourceCode" id="x"><pre class="sourceCode python"><code class="sourceCode python">HIGHLIGHTED</code></pre></div>'])) });
+	const asked = [];
+	const server = await createBrowserWatchServer(html, dir, { repl: s.live, replHighlight: async items => { asked.push(...items); return new Map(items.filter(item => item.code === "print(2)").map(item => [item.key, '<div class="sourceCode" id="x"><pre class="sourceCode python"><code class="sourceCode python">HIGHLIGHTED</code></pre></div>'])); } });
 	t.after(() => server.close());
 	const first = await fetch(server.url);
 	const cookie = first.headers.get("set-cookie").split(";")[0];
@@ -295,18 +373,49 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	const unchanged = await (await get(`${updatesHref}&version=${encodeURIComponent(version)}`)).json();
 	assert.equal(unchanged.unchanged, true);
 	assert.equal(unchanged.cards, undefined);
+	assert.equal(unchanged.noticesHtml, undefined, "An unchanged update leaves the page's notices alone (R13).");
 	s.set(record([entry(1), entry(2)]));
 	s.tick(1_100);
 	const changed = await (await get(`${updatesHref}&version=${encodeURIComponent(version)}`)).json();
 	assert.deepEqual(changed.ids, ["e1", "e2"]);
 	assert.match(changed.cards[1].html, /<div class="repl-code"><div class="sourceCode" id="x">[^]*HIGHLIGHTED/, "Highlighted code replaces the plain block…");
 	assert.match(changed.cards[0].html, /<pre class="code-input"><code>print\(1\)<\/code><\/pre>/, "…and code that couldn't be highlighted stays plain.");
+	assert.equal(changed.noticesHtml, "", "A changed window brings its notices, here none.");
+	assert.deepEqual([...new Set(asked.map(item => item.id))].sort(), ["repl-entry-e1", "repl-entry-e2"], "Highlighted code gets each entry's own IDs (R14).");
+	// However the record's text escapes, the update stays within its 2 MB (R11).
+	s.set(record(Array.from({ length: 50 }, (_, i) => entry(i, { output: "&".repeat(20_000) }))));
+	s.tick(1_100);
+	const heavy = await (await get(`${updatesHref}&version=${encodeURIComponent(changed.version)}`)).text();
+	assert.ok(Buffer.byteLength(heavy) < REPL_RESPONSE_BYTES + 20_000, `${Buffer.byteLength(heavy)} bytes`);
+	assert.match(JSON.parse(heavy).noticesHtml, /older entries aren&#39;t shown here/);
 	assert.match(sessions, /aria-keyshortcuts="Alt\+ArrowLeft" aria-disabled="true"/, "No response history on the REPL pages.");
 	assert.match(sessions, /Back a page/);
 	assert.equal((await get(updatesHref.replace(/instance=[^&]+/, "instance=old"))).status, 409, "A link from an earlier run is refused.");
 	assert.equal((await get(`${replHref.split("?")[0]}pi-repl-julia?${replHref.split("?")[1]}`)).status, 404, "A session that isn't running.");
+	// Copy link on a session's page hands out that session, for a browser without the cookie (R9).
+	const query = new URL(replHref, server.url).searchParams;
+	const share = path => get(`/__pi_markdown_preview_share__?${path}&identity=${query.get("identity")}`);
+	const shared = new URL(await (await share(`view=repl&instance=${query.get("instance")}&session=pi-repl-python`)).text());
+	assert.deepEqual([shared.searchParams.get("view"), shared.searchParams.get("session"), shared.searchParams.get("revision")], ["repl", "pi-repl-python", null]);
+	const opened = await fetch(shared, { redirect: "manual" });
+	assert.equal(opened.status, 302);
+	assert.match(opened.headers.get("location"), /^\/__pi_markdown_preview_repl__\/pi-repl-python\?identity=[0-9a-f]+&instance=/);
+	const recipient = opened.headers.get("set-cookie").split(";")[0];
+	assert.equal((await get(opened.headers.get("location"), { cookie: recipient })).status, 302, "The recipient pins the session's current lifetime.");
+	assert.equal((await share(`view=repl&instance=${query.get("instance")}&session=../x`)).status, 404);
+	assert.equal((await share(`view=repl&instance=old&session=pi-repl-python`)).status, 404);
+	assert.match(sessions, /data-watch-control="preview" href="\/\?identity=[0-9a-f]+"/, "Preview from a REPL page is the latest response.");
 	const noRepl = await fetch(new URL(replHref, plain.url), { headers: { cookie: (await fetch(plain.url)).headers.get("set-cookie").split(";")[0] } });
 	assert.equal(noRepl.status, 404, "A watcher without the option has no REPL page.");
+	// With Live too, Follow activity stays off the REPL pages: it would take the reader to Working (R9).
+	const withLive = await createBrowserWatchServer(html, dir, { repl: source().live, live: {} });
+	t.after(() => withLive.close());
+	const liveFirst = await fetch(withLive.url);
+	const liveCookie = liveFirst.headers.get("set-cookie").split(";")[0];
+	assert.match(await liveFirst.text(), /<button data-watch-control="follow-activity"/);
+	const liveReplHref = (await (await fetch(withLive.url, { headers: { cookie: liveCookie } })).text()).match(/data-watch-control="repl" href="([^"]+)"/)[1].replaceAll("&amp;", "&");
+	const liveRepl = await (await fetch(new URL(liveReplHref, withLive.url), { headers: { cookie: liveCookie } })).text();
+	assert.doesNotMatch(liveRepl, /<button data-watch-control="follow-activity"|Follow activity on \/ off|With Follow activity on/);
 });
 
 test("REPL highlighting: code goes to Pandoc as data, highlighted once and cached", { skip: spawnPandoc() }, async () => {
@@ -323,6 +432,24 @@ test("REPL highlighting: code goes to Pandoc as data, highlighted once and cache
 	assert.equal((await highlight([{ key: "z", code: "1" }], "fortran")).size, 0, "An unknown runtime stays plain.");
 	const failing = createReplHighlighter({ run: async () => { throw new Error("no pandoc"); } });
 	assert.equal((await failing([{ key: "a", code: "1" }], "python")).size, 0, "Without Pandoc, code stays plain.");
+});
+
+test("REPL highlighting: one run per block however many ask, one run at a time, IDs per entry (R12, R14)", async () => {
+	let runs = 0, active = 0, most = 0;
+	const highlight = createReplHighlighter({ run: async (args, input) => {
+		if (args.includes("markdown")) return JSON.stringify({ "pandoc-api-version": [1, 22] });
+		runs++; active++; most = Math.max(most, active);
+		await new Promise(resolve => setTimeout(resolve, 20));
+		active--;
+		// Stands in for Pandoc: each block's Div, with the CodeBlock's ID on its line anchors.
+		return JSON.parse(input).blocks.map(div => { const [[id], [block]] = div.c; const [[blockId]] = block.c; return `<div id="${id}">\n<div class="sourceCode" id="${blockId}"><pre><code><span id="${blockId}-1"><a href="#${blockId}-1"></a>CODE</span></code></pre></div>\n</div>`; }).join("\n");
+	} });
+	const results = await Promise.all(Array.from({ length: 8 }, (_, i) => highlight([{ key: `k${i}`, code: "print(1)", id: `repl-entry-e${i}` }], "python")));
+	assert.equal(runs, 1, "Eight requests for one block share one run.");
+	assert.match(results[3].get("k3"), /id="repl-entry-e3"[^]*id="repl-entry-e3-1"><a href="#repl-entry-e3-1"/);
+	assert.doesNotMatch(results[3].get("k3"), /repl-[0-9a-f]{20}/, "No ID shared with another entry's copy.");
+	await Promise.all([highlight([{ key: "a", code: "1" }], "python"), highlight([{ key: "b", code: "2" }], "python"), highlight([{ key: "c", code: "3" }], "python")]);
+	assert.deepEqual([runs, most], [4, 1], "Different blocks wait their turn.");
 });
 
 test("REPL page in a browser: new entries arrive, and a changed entry updates in place", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
@@ -369,4 +496,52 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	await fresh.waitForSelector(".repl-entry");
 	await Promise.all([fresh.waitForNavigation(), fresh.keyboard.down("Alt").then(() => fresh.keyboard.press("ArrowLeft")).then(() => fresh.keyboard.up("Alt"))]);
 	assert.match(await fresh.$eval("h1", h => h.textContent), /REPL sessions/);
+});
+
+test("REPL page in a browser: notices stay, held numbers settle, Copy link and newer responses (R9, R13, R17)", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "repl-page-browser-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const s = source();
+	s.set(record([entry(1), entry(2), entry(3)], { droppedEntries: 7 }));
+	const answer = text => `<!doctype html><html><head><title>R</title></head><body><main id='preview-root'><p>${text}</p></main></body></html>`;
+	const server = await createBrowserWatchServer(answer("Answer"), dir, { repl: s.live });
+	t.after(() => server.close());
+	const { default: puppeteer } = await import("puppeteer-core");
+	const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+	t.after(() => browser.close());
+	const page = await browser.newPage();
+	await page.goto(server.url);
+	const replHref = await page.$eval('[data-watch-control="repl"]', a => a.href);
+	await page.goto(replHref.replace("/__pi_markdown_preview_repl__/?", "/__pi_markdown_preview_repl__/pi-repl-python?"));
+	await page.waitForSelector(".repl-entry");
+	const notices = () => page.$eval(".repl-window-notices", el => el.hidden ? "" : el.textContent);
+	assert.match(await notices(), /7 older entries were dropped/);
+	for (let i = 0; i < 2; i++) await page.waitForResponse(response => response.url().includes("/updates"));
+	assert.match(await notices(), /7 older entries were dropped/, "Unchanged updates leave the notices (R13).");
+	// A held card keeps its number while an earlier one goes, and takes its new one when let go (R17).
+	// As a reader's focused window, so that focus and blur fire their events.
+	await page.bringToFront();
+	await page.emulateFocusedPage(true);
+	await page.focus('.repl-entry[data-entry-id="e2"] > summary');
+	s.set(record([entry(2), entry(3)], { droppedEntries: 7 }));
+	s.tick(1_100);
+	await page.waitForFunction(() => !document.querySelector('.repl-entry[data-entry-id="e1"]'), { timeout: 10_000 });
+	const numbers = () => page.$$eval(".repl-entry .number", spans => spans.map(span => span.textContent).join(","));
+	assert.equal(await numbers(), "2,2");
+	await page.evaluate(() => document.activeElement.blur());
+	await page.waitForFunction(() => [...document.querySelectorAll(".repl-entry .number")].map(span => span.textContent).join(",") === "1,2", { timeout: 5_000 });
+	// Copy link asks for this session's link, never a response's (R9). The clipboard is stubbed.
+	await page.evaluate(() => {
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } });
+		document.execCommand = () => true;
+	});
+	const copy = page.waitForResponse(response => new URL(response.url()).pathname === "/__pi_markdown_preview_share__");
+	await page.$eval('[data-watch-control="copy-link"]', button => button.click());
+	const copied = await copy;
+	assert.equal(copied.status(), 200);
+	assert.deepEqual(["view", "session", "revision"].map(name => new URL(copied.url()).searchParams.get(name)), ["repl", "pi-repl-python", null]);
+	// A newer response: the count follows it, with no New badge or Next link.
+	server.updateDocument(answer("Second answer"));
+	await page.waitForFunction(() => document.querySelector('[data-watch-control="count"]')?.textContent === "2/2", { timeout: 10_000 });
+	assert.deepEqual(await page.evaluate(() => [document.querySelector('[data-watch-control="new"]').hidden, document.querySelector('[data-watch-control="next"]').getAttribute("aria-disabled")]), [true, "true"]);
 });

@@ -17,8 +17,8 @@ const SESSION_BY_NAME = new Map(REPL_SESSIONS.map(session => [session.sessionNam
 const PANE_FORMAT = "#{session_id}|#{session_created}|#{window_index}|#{pane_index}|#{pane_id}|#{pane_dead}|#{@pi_repl_record_id}|#{@pi_repl_record_version}";
 // As pi-repl reads tmux: only these mean the session isn't there.
 const ABSENT = /no server running|can't find session:|(?:error connecting|failed to connect).*?(?:No such file|Connection refused)/i;
-const IDENTITY_MS = 5_000, STAT_MS = 1_000, REREAD_MS = 30_000, IDLE_MS = 60_000;
-const MAX_SOURCES = 4, MAX_PINS = 16, TMUX_CONCURRENCY = 2, TMUX_TIMEOUT_MS = 2_000;
+const IDENTITY_MS = 5_000, STAT_MS = 1_000, REREAD_MS = 30_000, IDLE_MS = 60_000, READ_MS = 2_000;
+const MAX_SOURCES = 4, MAX_PINS = 16, TMUX_CONCURRENCY = 2, READ_CONCURRENCY = 2, TMUX_TIMEOUT_MS = 2_000;
 export const REPL_WINDOW_ENTRIES = 50, REPL_FIELD_DISPLAY_CHARS = 20_000, REPL_WINDOW_BYTES = 2_000_000;
 
 /** Runs tmux as pi-repl does (`tmux -u`, default server, same environment). */
@@ -77,12 +77,13 @@ export function replWindow(record) {
 /**
  * The REPL page's source. `list()` gives each shared session's state; `view(name, pinId,
  * version)` gives one session lifetime's window, pinned on first view. Injected
- * `run`, `root` and `now` are for tests.
+ * `run`, `root`, `now`, `readRecord`, `statRecord` and `readTimeout` are for tests.
  */
-export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), now = Date.now, readRecord = readReplRecord, statRecord = statReplRecord } = {}) {
+export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), now = Date.now, readRecord = readReplRecord, statRecord = statReplRecord, readTimeout = READ_MS } = {}) {
 	const generation = randomBytes(6).toString("hex");
 	const pins = new Map(); // pinId -> pin state
 	let inspections = new Map(); // sessionName -> { at, promise }
+	let reading = 0; // record reads still running, including any past their deadline
 	let active = 0;
 	const queue = [];
 	const limited = async task => {
@@ -111,40 +112,66 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		return { checkedAt: now(), sessions: sessions.map(({ sessionName, runtime, label, state, recordId, recordVersion, reason }) => ({ sessionName, runtime, label, state, reason, record: recordId ? (recordVersion === "1" ? "v1" : "unsupported") : "none" })) };
 	}
 
+	// A session's first send gives it its record; any other change of record is a new lifetime.
+	// The version is taken afresh each time, since pi-repl sets a record's ID before its version.
+	const sameRecord = (pin, seen) => {
+		if (!pin.recordId && seen.recordId) pin.recordId = seen.recordId;
+		if (seen.recordId !== pin.recordId) return false;
+		if (seen.recordVersion !== pin.recordVersion) {
+			pin.recordVersion = seen.recordVersion;
+			// A version this page doesn't read: what it showed from the earlier one goes.
+			if (pin.recordVersion !== "1" && pin.record) { pin.record = undefined; pin.window = undefined; pin.stamp = undefined; pin.shown = undefined; pin.sequence++; }
+		}
+		return true;
+	};
+
 	// Refreshes a pin's identity, then its record when the file changed (or every 30 s).
 	async function refresh(pin) {
-		const t = now();
 		if (pin.ended) return;
-		if (t - pin.checkedAt >= IDENTITY_MS || pin.checkedAt === 0) {
+		if (now() - pin.checkedAt >= IDENTITY_MS || pin.checkedAt === 0) {
 			const seen = await inspect(pin.sessionName);
 			if (seen.state === "absent") { pin.state = "ended"; pin.ended = true; pin.checkedAt = now(); return; }
 			if (seen.state === "unchecked") { pin.state = "unchecked"; pin.reason = seen.reason; return; }
-			if (seen.tmuxSessionId !== pin.tmuxSessionId || seen.tmuxSessionCreatedAt !== pin.tmuxSessionCreatedAt) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
-			// A session's first send gives it its record; any other change of record is a new lifetime.
-			if (!pin.recordId && seen.recordId) { pin.recordId = seen.recordId; pin.recordVersion = seen.recordVersion; }
-			else if (seen.recordId !== pin.recordId) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
+			if (seen.tmuxSessionId !== pin.tmuxSessionId || seen.tmuxSessionCreatedAt !== pin.tmuxSessionCreatedAt || !sameRecord(pin, seen)) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
 			pin.state = seen.state; pin.reason = undefined; pin.checkedAt = now();
 		}
 		if (!pin.recordId || pin.recordVersion !== "1") return;
 		if (pin.record && now() - pin.statAt < STAT_MS) return;
-		pin.statAt = now();
-		let stamp;
-		try { stamp = await statRecord(pin.recordId, { root }); } catch (error) { pin.readError = String(error?.message ?? error).slice(0, 200); return; }
-		if (stamp === null) { pin.readError = "The shared record file isn't there."; return; }
-		if (pin.record && stamp === pin.stamp && now() - pin.readAt < REREAD_MS) return;
-		pin.reading ??= (async () => {
-			try {
-				const { record, stamp: read } = await readRecord(pin.recordId, pin, { root });
-				const window = replWindow(record);
-				const shown = JSON.stringify([record.revision, record.clearedAt, record.droppedEntries, window.notShown, window.entries.map(entry => entry.version)]);
-				if (shown !== pin.shown) { pin.shown = shown; pin.sequence++; }
-				pin.record = record; pin.window = window; pin.stamp = read; pin.readAt = now(); pin.readError = undefined;
-			} catch (error) {
-				pin.readError = error instanceof ReplRecordError ? error.message : String(error?.message ?? error).slice(0, 200);
-				if (error instanceof ReplRecordError && error.code === "mismatch") { pin.state = "replaced"; pin.ended = true; }
-			} finally { pin.reading = undefined; }
-		})();
+		if (!pin.reading) {
+			// Reads of different sessions' records are admitted only while fewer than READ_CONCURRENCY are running.
+			if (reading >= READ_CONCURRENCY) { if (!pin.record) pin.readError = "Other shared records are being read; trying again shortly."; return; }
+			pin.reading = readPin(pin).finally(() => { pin.reading = undefined; });
+		}
 		await pin.reading;
+	}
+
+	// Stats a pin's record and reads it when it changed, within `readTimeout`. Past the deadline the
+	// result is dropped and the read stops at its next step; it counts as running until it does.
+	async function readPin(pin) {
+		pin.statAt = now();
+		reading++;
+		const controller = new AbortController();
+		const work = (async () => {
+			const stamp = await statRecord(pin.recordId, { root });
+			if (stamp === null) throw new Error("The shared record file isn't there.");
+			if (pin.record && stamp === pin.stamp && now() - pin.readAt < REREAD_MS) return null;
+			return await readRecord(pin.recordId, pin, { root, signal: controller.signal });
+		})().finally(() => { reading--; });
+		work.catch(() => {});
+		let timer;
+		const late = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve("late"); }, readTimeout); });
+		try {
+			const result = await Promise.race([work, late]);
+			if (result === "late") { pin.readError = "Reading the shared record took too long; trying again shortly."; return; }
+			if (!result) return;
+			const window = replWindow(result.record);
+			const shown = JSON.stringify([result.record.revision, result.record.clearedAt, result.record.droppedEntries, window.notShown, window.entries.map(entry => entry.version)]);
+			if (shown !== pin.shown) { pin.shown = shown; pin.sequence++; }
+			pin.record = result.record; pin.window = window; pin.stamp = result.stamp; pin.readAt = now(); pin.readError = undefined;
+		} catch (error) {
+			pin.readError = error instanceof ReplRecordError ? error.message : String(error?.message ?? error).slice(0, 200);
+			if (error instanceof ReplRecordError && error.code === "mismatch") { pin.state = "replaced"; pin.ended = true; }
+		} finally { clearTimeout(timer); }
 	}
 
 	/** Pins the session's current lifetime (when it has one) and returns its id, or the reason it can't. */
@@ -156,8 +183,7 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		if (seen.state === "unchecked") return { error: "unchecked", reason: seen.reason };
 		for (const [id, pin] of pins) {
 			if (pin.ended || pin.sessionName !== sessionName || pin.tmuxSessionId !== seen.tmuxSessionId || pin.tmuxSessionCreatedAt !== seen.tmuxSessionCreatedAt) continue;
-			if (!pin.recordId && seen.recordId) { pin.recordId = seen.recordId; pin.recordVersion = seen.recordVersion; }
-			if (pin.recordId === seen.recordId) return { pinId: id };
+			if (sameRecord(pin, seen)) return { pinId: id };
 		}
 		const pinId = randomBytes(9).toString("base64url");
 		pins.set(pinId, { ...session, tmuxSessionId: seen.tmuxSessionId, tmuxSessionCreatedAt: seen.tmuxSessionCreatedAt, recordId: seen.recordId, recordVersion: seen.recordVersion,

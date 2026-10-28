@@ -11,7 +11,7 @@ import { buildImagePagePreview, IMAGE_CONTENT_TYPES as RESOURCE_CONTENT_TYPES } 
 import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
-import { buildTurnDetailsPage, buildLivePage, buildReplSessionPage, buildReplSessionsPage, liveCardVersion, liveStatusHtml, renderLiveCard, replEntryCards, replSessionStatusHtml } from "./turn-details-page.js";
+import { buildTurnDetailsPage, buildLivePage, buildReplSessionPage, buildReplSessionsPage, liveCardVersion, liveStatusHtml, renderLiveCard, replEntryCards, replSessionStatusHtml, replWindowNoticesHtml } from "./turn-details-page.js";
 import { isReplResultLabel, replSendCalls } from "./repl-calls.js";
 import { createReplHighlighter } from "./repl-highlight.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
@@ -365,8 +365,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
-  ${navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P; the latest: Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working && !repl ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a>${navigation.replUrl ? `<a data-watch-control="repl" href="${escapeBrowserWatchHtmlAttribute(navigation.replUrl)}"${repl ? ' aria-current="page"' : ''} title="REPL: recent recorded submissions to the shared REPL sessions">REPL</a>` : ""}</span>` : ""}
-  ${navigation.liveUrl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: switch to Live when a turn starts and back to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity: Off</button>` : ""}
+  ${navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="${repl ? `/?identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}` : `/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}`}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P; the latest: Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working && !repl ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl && !repl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a>${navigation.replUrl ? `<a data-watch-control="repl" href="${escapeBrowserWatchHtmlAttribute(navigation.replUrl)}"${repl ? ' aria-current="page"' : ''} title="REPL: recent recorded submissions to the shared REPL sessions">REPL</a>` : ""}</span>` : ""}
+  ${navigation.liveUrl && !repl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: switch to Live when a turn starts and back to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity: Off</button>` : ""}
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
     <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
     <span id="pi-markdown-preview-watch-new" data-watch-control="new" hidden>New</span>
@@ -390,7 +390,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   </div>
   <div id="pi-markdown-preview-watch-shortcuts" data-watch-control="shortcuts-panel" role="dialog" aria-labelledby="pi-markdown-preview-watch-shortcuts-title" tabindex="-1" hidden>
     <div class="pi-preview-shortcuts-head"><span id="pi-markdown-preview-watch-shortcuts-title">Keyboard shortcuts</span><button data-watch-control="shortcuts-close" type="button">Close</button></div>
-    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl), followActivity: Boolean(navigation.liveUrl), repl })}
+    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl), followActivity: Boolean(navigation.liveUrl) && !repl, repl })}
   </div>
 </nav>`;
 
@@ -404,6 +404,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const retainedScopes = ${JSON.stringify(revisions.map(r => `${positionBase}:revision:${r}`))};
   const live = ${live};
   const repl = ${repl};
+  const replSession = ${JSON.stringify(repl && /^pi-repl-[a-z]{1,16}$/.test(navigation.replSession ?? "") ? navigation.replSession : "")};
   window.PiMarkdownPreviewWorkingState?.install(document.getElementById('preview-root'), live || repl ? null : positionScope, retainedScopes);
   window.PiMarkdownPreviewLive?.install(document.getElementById('preview-root'));
   window.PiMarkdownPreviewRepl?.install(document.getElementById('preview-root'));
@@ -641,7 +642,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     copyLinkButton.setAttribute('aria-disabled', 'true');
     copyLinkButton.setAttribute('aria-busy', 'true');
     try {
-      const response = await fetch(withIdentity(${JSON.stringify(SHARE_PATH)} + '?revision=' + encodeURIComponent(revision) + (working ? '&view=working&instance=' + encodeURIComponent(instance) : '')));
+      const response = await fetch(withIdentity(${JSON.stringify(SHARE_PATH)} + (repl
+        ? '?view=repl&instance=' + encodeURIComponent(instance) + (replSession ? '&session=' + encodeURIComponent(replSession) : '')
+        : '?revision=' + encodeURIComponent(revision) + (working ? '&view=working&instance=' + encodeURIComponent(instance) : ''))));
       if (!response.ok) throw new Error('Could not create a transferable preview link');
       const transferableUrl = new URL(await response.text());
       transferableUrl.hash = window.location.hash;
@@ -688,6 +691,12 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   };
   const updateNavigation = (nextRevisions, hasNewResponse) => {
     revisions = nextRevisions.map(String);
+    if (repl) {
+      // The REPL pages belong to no response: their count and Preview link are the latest response's.
+      if (countLabel) countLabel.textContent = revisions.length + '/' + revisions.length;
+      controlsToggle?.setAttribute('aria-label', 'Preview controls, revision ' + revisions.length + ' of ' + revisions.length);
+      return;
+    }
     const currentIndex = revisions.indexOf(revision);
     const latestRevision = revisions[revisions.length - 1];
     if (currentIndex < 0) {
@@ -1192,6 +1201,17 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			if (requestedInstance !== null && requestedInstance !== instance) {
 				respondRecovery(req, res, 409, "Preview link expired", "This response belongs to an earlier preview run. Open the current preview to reconnect.", undefined, queryToken === token); return;
 			}
+			if (requestUrl.searchParams.get("view") === "repl") {
+				// A copied REPL link: the session's current view (or the list), not any response.
+				const session = requestUrl.searchParams.get("session") ?? "";
+				if (!options.repl || requestedInstance !== instance || (session && !/^pi-repl-[a-z]{1,16}$/.test(session))) {
+					respondRecovery(req, res, 404, "REPL page unavailable", "This preview has no REPL page at that address.", undefined, queryToken === token); return;
+				}
+				res.writeHead(302, { ...NON_HTML_SECURITY_HEADERS,
+					Location: `${REPL_PREFIX}${session}?identity=${identity}&instance=${instance}`,
+					...(queryToken === token ? { "Set-Cookie": `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/` } : {}),
+				}); res.end(); return;
+			}
 			const requestedRevisionRaw = requestUrl.searchParams.get("revision");
 			const requestedRevision = requestedRevisionRaw === null ? undefined : Number(requestedRevisionRaw);
 			if (requestedInstance !== null && !documents.some(d => d.revision === requestedRevision)) {
@@ -1326,11 +1346,12 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const latest = documents[documents.length - 1];
 			const latestWorking = documents.findLast(d => d.turnDetails);
 			const appearanceStyle = previewAppearanceStyle(latest.html);
-			const highlight = async view => view.entries?.length ? replHighlight(view.entries.map(entry => ({ key: entry.id, code: entry.code })), view.runtime).catch(() => new Map()) : new Map();
-			const respondPage = html => {
+			// Element IDs in highlighted code are the entry's, so the same code twice doesn't share them.
+			const highlight = async view => view.entries?.length ? replHighlight(view.entries.map(entry => ({ key: entry.id, code: entry.code, id: `repl-entry-${entry.id}` })), view.runtime).catch(() => new Map()) : new Map();
+			const respondPage = (html, replSession) => {
 				res.writeHead(200, turnSecurityHeaders(scriptNonce));
 				res.end(prepareBrowserWatchHtml(html, {
-					view: "repl", revision: latest.revision, revisions: documents.map(d => d.revision),
+					view: "repl", replSession, revision: latest.revision, revisions: documents.map(d => d.revision),
 					turnDetailsUrl: latestWorking ? `${TURN_PREFIX}${latestWorking.revision}?${query}` : undefined,
 					liveUrl: options.live ? `${LIVE_PREFIX}?${query}` : undefined,
 					replUrl: sessionsHref,
@@ -1362,14 +1383,16 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				const highlighted = view.unchanged ? new Map() : await highlight(view);
 				if (closed || res.destroyed) return;
 				if (match[3]) {
+					// The window's notices go with its cards; an unchanged update leaves the page's as they are.
+					const shown = view.unchanged ? undefined : replEntryCards(view, highlighted);
 					respondJson(res, 200, {
 						version: view.version, unchanged: view.unchanged === true, resync: view.resync === true, ended: view.ended === true,
 						statusHtml: replSessionStatusHtml(view, { sessionsHref }),
-						...(view.unchanged ? {} : { ids: view.entries.map(entry => entry.id), cards: replEntryCards(view, highlighted) }),
+						...(shown ? { ids: shown.cards.map(card => card.id), cards: shown.cards, noticesHtml: replWindowNoticesHtml({ ...view, notShown: shown.notShown }) } : {}),
 					});
 					return;
 				}
-				respondPage(buildReplSessionPage(view, { label: options.sourceLabel, appearanceStyle, updatesHref: `${REPL_PREFIX}pin/${match[2]}/updates?${query}`, sessionsHref, highlighted }));
+				respondPage(buildReplSessionPage(view, { label: options.sourceLabel, appearanceStyle, updatesHref: `${REPL_PREFIX}pin/${match[2]}/updates?${query}`, sessionsHref, highlighted }), view.sessionName);
 			} catch {
 				if (!closed && !res.destroyed) {
 					if (match?.[3]) respondJson(res, 503, { error: "unavailable" });
@@ -1546,6 +1569,21 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		}
 
 		if (requestUrl.pathname === SHARE_PATH) {
+			if (requestUrl.searchParams.get("view") === "repl") {
+				const session = requestUrl.searchParams.get("session") ?? "";
+				if (!options.repl || requestUrl.searchParams.get("instance") !== instance || (session && !/^pi-repl-[a-z]{1,16}$/.test(session))) {
+					respondText(res, 404, "The REPL page is not available here."); return;
+				}
+				const transferableUrl = new URL(`http://127.0.0.1:${port}/`);
+				transferableUrl.searchParams.set("token", token);
+				transferableUrl.searchParams.set("view", "repl");
+				if (session) transferableUrl.searchParams.set("session", session);
+				transferableUrl.searchParams.set("instance", instance);
+				transferableUrl.searchParams.set("identity", identity);
+				res.writeHead(200, { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "text/plain; charset=utf-8" });
+				res.end(method === "HEAD" ? undefined : transferableUrl.href);
+				return;
+			}
 			const requestedRevision = Number(requestUrl.searchParams.get("revision"));
 			const working = requestUrl.searchParams.get("view") === "working";
 			if (working && (requestUrl.searchParams.get("instance") !== instance || !documents.some(d => d.revision === requestedRevision && d.turnDetails))) {
