@@ -127,6 +127,11 @@ test("Working: calls made together are recorded before their results, so each re
  const omitted = pane("only the end", "[omitted: 120 earlier lines]");
  const withOmitted = buildTurnDetailsPage({ events: [call("a", "1"), { ...result("a", "1", "1"), text: sent("1", "1", omitted) }], notices: [], sourceAgent: "claude" }, "/");
  assert.match(withOmitted, /<div class="repl-activity"><p>Pane text since[^<]*\):<\/p><p>\[omitted: 120 earlier lines\]<\/p><pre><span>only the end<\/span><\/pre><\/div>/);
+ const long = pane(Array.from({ length: 12 }, (_, i) => `>>> step ${i}`).join("\n"));
+ const folded = buildTurnDetailsPage({ events: [call("a", "1"), { ...result("a", "1", "1"), text: sent("1", "1", long) }], notices: [], sourceAgent: "claude" }, "/");
+ assert.match(folded, /<details class="repl-activity"><summary>Pane activity before this submission · 12 lines<\/summary><p>Pane text since[^<]*\):<\/p><pre><span>&gt;&gt;&gt; step 0\n[^]*&gt;&gt;&gt; step 11<\/span><\/pre><\/details><section class="tool-field"><h3>Output · for 1<\/h3>/, "Long pane text starts folded, so the output comes first.");
+ const eight = buildTurnDetailsPage({ events: [call("a", "1"), { ...result("a", "1", "1"), text: sent("1", "1", pane(Array(8).fill(">>> x").join("\n"))) }], notices: [], sourceAgent: "claude" }, "/");
+ assert.match(eight, /<div class="repl-activity">/, "Up to eight lines stay open.");
  const note = "Where this agent last saw this pane is unclear, and the pane shows no other text now.";
  assert.match(buildTurnDetailsPage({ events: [call("a", "1"), { ...result("a", "1", "1"), text: sent("1", "1", note) }], notices: [], sourceAgent: "claude" }, "/"), /<p class="repl-activity">Where this agent last saw this pane is unclear, and the pane shows no other text now\.<\/p>/, "A one-line note stays a note.");
 });

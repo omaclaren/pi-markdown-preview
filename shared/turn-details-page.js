@@ -160,6 +160,9 @@ function resultView(text) {
 	return jsonResult(shown, text) ?? (shown === text ? literalPre(text) : `${literalPre(shown)}${rawOutput(text)}`);
 }
 
+// Pane text longer than this starts folded, so the output comes first.
+const PANE_OPEN_LINES = 8;
+
 // A repl_send result whose recorded text repeats its call's code exactly shows
 // only the output, naming its call's card (calls made together are recorded before
 // their results); anything else keeps the ordinary result view. Pane text from
@@ -168,9 +171,14 @@ function replResultView(event, call) {
 	const split = replResultSplit(event, call);
 	if (!split) return resultView(event.text);
 	const pane = replPaneActivity(split.activity);
-	const activity = pane
-		? `<div class="repl-activity"><p>${escape(pane.heading)}</p>${pane.omitted ? `<p>${escape(pane.omitted)}</p>` : ""}${literalPre(pane.text)}</div>`
-		: split.activity.trim() ? `<p class="repl-activity">${escape(split.activity.trim())}</p>` : "";
+	let activity = split.activity.trim() ? `<p class="repl-activity">${escape(split.activity.trim())}</p>` : "";
+	if (pane) {
+		const lines = pane.text.split("\n").length;
+		const report = `<p>${escape(pane.heading)}</p>${pane.omitted ? `<p>${escape(pane.omitted)}</p>` : ""}${literalPre(pane.text)}`;
+		activity = lines > PANE_OPEN_LINES
+			? `<details class="repl-activity"><summary>Pane activity before this submission · ${lines} lines</summary>${report}</details>`
+			: `<div class="repl-activity">${report}</div>`;
+	}
 	const output = split.output.trim() ? literalPre(split.output) : '<p class="empty-text">No output</p>';
 	return `<div class="tool-fields">${activity}<section class="tool-field"><h3>Output${call.number ? ` · for ${call.number}` : ""}</h3>${output}</section></div>${rawOutput(event.text)}`;
 }
@@ -267,7 +275,7 @@ pre { margin:0; padding:12px 14px; background:transparent; font:0.9em/1.6 ui-mon
 .prompt pre,.progress pre,.reasoning pre { font:inherit }
 .asked-question,.question-reply { margin:14px } .asked-question h2,.question-reply h3 { font-family:inherit; font-size:1em; font-weight:600; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 8px } .question-header { color:var(--muted); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 6px }
 .question-options { padding-left:20px; margin:10px 0 } .question-options li { padding-left:3px; margin:10px 0 } .question-options strong,.question-prose { white-space:pre-wrap; overflow-wrap:anywhere } .question-options .question-prose { color:var(--muted); font-size:0.9em; margin-top:3px } .question-preview pre { white-space:pre-wrap; overflow-wrap:anywhere } .asked-question .tool-options { margin:8px 0 }
-.repl-activity { color:var(--muted); font-size:12px; margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere } .repl-activity p { margin:0 } .repl-activity pre { padding:4px 0 0; font-size:12px }
+.repl-activity { color:var(--muted); font-size:12px; margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere } .repl-activity p { margin:0 } .repl-activity pre { padding:4px 0 0; font-size:12px } details.repl-activity > summary { padding:0; font-weight:400 } details.repl-activity[open] > summary { margin-bottom:4px }
 .recorded-output { border-top:1px solid var(--line) } .recorded-output > summary { color:var(--muted); font-size:12px; font-weight:400 }
 .result { position:relative } .result > summary { padding-right:120px } .result:not(:has(.output-wrap)) > summary { padding-right:14px }
 .output-wrap { position:absolute; right:10px; top:6px; display:inline-flex; align-items:center; gap:6px; min-height:28px; padding:2px 6px; color:var(--muted); font-size:12px; cursor:pointer } .output-wrap input { margin:0; accent-color:var(--muted) } .output-wrap input:focus-visible { outline:2px solid var(--muted); outline-offset:2px }
