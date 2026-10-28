@@ -737,6 +737,14 @@ for (const args of ["-b --stop --live", "-b --list --working", "-b --pick --live
 	assert.ok(parsePreviewArgs(args).error, `${args} is refused`);
 }
 assert.match(parsePreviewArgs("-b -w --working report.md").error ?? "", /assistant-response/);
+// --repl is its own opt-in: it starts the response watcher on its own and implies neither Working nor Live.
+for (const args of ["--repl", "-b --repl", "-b -w --repl"]) {
+	const parsed = parsePreviewArgs(args);
+	assert.equal(parsed.error, undefined, args);
+	assert.deepEqual([parsed.target, parsed.watch, parsed.repl, parsed.turnDetails, parsed.live], ["browser", true, true, false, false], args);
+}
+assert.deepEqual((({ turnDetails, live, repl }) => [turnDetails, live, repl])(parsePreviewArgs("--live --repl")), [true, true, true]);
+for (const args of ["-b -w --repl report.md", "-b --stop --repl", "--terminal --repl"]) assert.ok(parsePreviewArgs(args).error, `${args} is refused`);
 assert.equal(parsePreviewArgs("-b -w").history, undefined, "Without --history the watcher uses its default.");
 assert.equal(parsePreviewArgs("-b -w --history 5").history, 5);
 assert.equal(parsePreviewArgs("-b -w --history=0").history, 0);

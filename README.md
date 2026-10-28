@@ -63,6 +63,7 @@ Working shows recorded prompts and tool output to anyone with the tab's link. Fo
 | `/preview --pick --browser` | Choose a response and open it in the browser |
 | `/preview-browser --live` | Browser tab that follows the session, with Working and [Live](#live-and-working) |
 | `/preview-browser --working` | The same without Live |
+| `/preview-browser --repl` | Add the [REPL page](#repl-page): the shared REPL sessions' recent recorded submissions |
 | `/preview-browser --watch` (`-w`) | Browser tab that updates after each response, without Working |
 | `/preview-browser --watch <path>` | Browser tab that follows a file |
 | `/preview-browser --watch --history 5` | Start with up to 5 earlier responses (default 10, 0–20) |
@@ -89,6 +90,14 @@ With `--live` and **Follow activity** on, the page moves to Working when a turn 
 **Privacy:** prompts, tool output and recorded images can contain secrets, and nothing is redacted. Share these links only with people you trust. Working stays on until you stop the watcher. To start it with a fresh link, first stop any response watcher already running (`/preview-browser --stop --responses`).
 
 Some content may be shortened or left out; [details](docs/details.md#working) lists what Working reads and its limits.
+
+### REPL page
+
+`/preview-browser --repl` adds a **REPL** page, beside Preview and Working, for working alongside agents in a shared [pi-repl](https://github.com/omaclaren/pi-repl) or agent-repl session. It lists pi-repl's shared sessions (`pi-repl-python`, `pi-repl-julia`, …). Open one to follow its recent recorded submissions as they arrive: who sent each one (the agent's name, Pi or Pi Studio), its status and time, the code and the output. It updates without waiting for a response. Code typed directly into the terminal isn't in the record, so it doesn't appear here.
+
+The page only reads: it never runs or sends code, and inspects tmux without changing anything. It shows one session's lifetime; if the session ends or a new one starts with the same name, it says so and doesn't follow the new one.
+
+**Privacy:** the REPL page shows code and output from any agent or project that uses these sessions, including future submissions, to anyone with the link. It's a separate opt-in from Working, and Working links never gain it. A watcher with the REPL page always starts with a fresh link; to add it to a running watcher, stop that watcher first (`/preview-browser --stop --responses`).
 
 ### Browser watch mode
 

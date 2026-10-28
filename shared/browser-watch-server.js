@@ -11,7 +11,7 @@ import { buildImagePagePreview, IMAGE_CONTENT_TYPES as RESOURCE_CONTENT_TYPES } 
 import { addBrowserWatchLocalPathControls } from "./local-path-controls.js";
 import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
-import { buildTurnDetailsPage, buildLivePage, liveCardVersion, liveStatusHtml, renderLiveCard } from "./turn-details-page.js";
+import { buildTurnDetailsPage, buildLivePage, buildReplSessionPage, buildReplSessionsPage, liveCardVersion, liveStatusHtml, renderLiveCard, replEntryCards, replSessionStatusHtml } from "./turn-details-page.js";
 import { isReplResultLabel, replSendCalls } from "./repl-calls.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
@@ -28,11 +28,13 @@ const DOCUMENT_PREFIX = "/__pi_markdown_preview_document__/";
 const NATIVE_ACTION_PREFIX = "/__pi_markdown_preview_native_action__/";
 const TURN_PREFIX = "/__pi_markdown_preview_turn__/";
 const LIVE_PREFIX = "/__pi_markdown_preview_live__/";
+const REPL_PREFIX = "/__pi_markdown_preview_repl__/";
 const BASE_TAG_PATTERN = /<base\s+href=(?:"[^"]*"|'[^']*')\s*\/?>/i;
 const READING_POSITION_SOURCE = readFileSync(new URL("../client/watch-reading-position.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WORKING_STATE_SOURCE = readFileSync(new URL("../client/working-view-state.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WORKING_IMAGES_SOURCE = readFileSync(new URL("../client/working-images.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const LIVE_VIEW_SOURCE = readFileSync(new URL("../client/live-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const REPL_VIEW_SOURCE = readFileSync(new URL("../client/repl-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const FOLLOW_ACTIVITY_SOURCE = readFileSync(new URL("../client/follow-activity.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
 const DEFAULT_HISTORY_LIMIT = 20;
@@ -322,8 +324,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	}
 
 	const live = navigation.view === "live";
-	// Live shares Working's scripts and history links, but keeps its own URL.
-	const working = navigation.view === "working" || live;
+	const repl = navigation.view === "repl";
+	// Live and the REPL page share Working's scripts and history links, but keep their own URLs.
+	const working = navigation.view === "working" || live || repl;
 	const preserveReadingPosition = !working && navigation.preserveReadingPosition === true && Boolean(navigation.wrapScope);
 	const positionBase = working ? `${navigation.wrapScope}:working:${navigation.instance}` : navigation.wrapScope;
 	const positionScope = preserveReadingPosition ? positionBase : `${positionBase}:revision:${navigation.revision}`;
@@ -333,7 +336,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const isWaiting = navigation.isWaiting === true;
 	const sourceLabel = navigation.sourceLabel?.trim();
 	if (sourceLabel) {
-		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — ${live ? "Working · live" : working ? "Working" : navigation.titleSuffix || "Markdown Preview"}`);
+		const escapedTitle = escapeBrowserWatchHtmlText(`${sourceLabel} — ${repl ? "REPL" : live ? "Working · live" : working ? "Working" : navigation.titleSuffix || "Markdown Preview"}`);
 		watchedHtml = /<title\b[^>]*>[\s\S]*?<\/title>/i.test(watchedHtml)
 			? watchedHtml.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, `<title>${escapedTitle}</title>`)
 			: watchedHtml.replace(/<\/head>/i, `<title>${escapedTitle}</title>\n</head>`);
@@ -359,7 +362,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
-  ${navigation.turnDetailsUrl || navigation.liveUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P; the latest: Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a></span>` : ""}
+  ${navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P; the latest: Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working && !repl ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a>${navigation.replUrl ? `<a data-watch-control="repl" href="${escapeBrowserWatchHtmlAttribute(navigation.replUrl)}"${repl ? ' aria-current="page"' : ''} title="REPL: recent recorded submissions to the shared REPL sessions">REPL</a>` : ""}</span>` : ""}
   ${navigation.liveUrl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: switch to Live when a turn starts and back to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity: Off</button>` : ""}
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
     <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
@@ -384,7 +387,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   </div>
   <div id="pi-markdown-preview-watch-shortcuts" data-watch-control="shortcuts-panel" role="dialog" aria-labelledby="pi-markdown-preview-watch-shortcuts-title" tabindex="-1" hidden>
     <div class="pi-preview-shortcuts-head"><span id="pi-markdown-preview-watch-shortcuts-title">Keyboard shortcuts</span><button data-watch-control="shortcuts-close" type="button">Close</button></div>
-    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl), followActivity: Boolean(navigation.liveUrl) })}
+    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl), followActivity: Boolean(navigation.liveUrl) })}
   </div>
 </nav>`;
 
@@ -397,8 +400,10 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const counterpartScope = ${JSON.stringify(counterpartScope)};
   const retainedScopes = ${JSON.stringify(revisions.map(r => `${positionBase}:revision:${r}`))};
   const live = ${live};
-  window.PiMarkdownPreviewWorkingState?.install(document.getElementById('preview-root'), live ? null : positionScope, retainedScopes);
+  const repl = ${repl};
+  window.PiMarkdownPreviewWorkingState?.install(document.getElementById('preview-root'), live || repl ? null : positionScope, retainedScopes);
   window.PiMarkdownPreviewLive?.install(document.getElementById('preview-root'));
+  window.PiMarkdownPreviewRepl?.install(document.getElementById('preview-root'));
   window.PiMarkdownPreviewFollowActivity?.install();
   window.PiMarkdownPreviewWorkingImages?.install(document.getElementById('preview-root'));
   try {
@@ -914,7 +919,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 })();
 </script>`;
 
-	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}${live ? `<script>${LIVE_VIEW_SOURCE}</script>\n` : ""}${navigation.liveUrl ? `<script>${FOLLOW_ACTIVITY_SOURCE}</script>\n` : ""}`;
+	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}${live ? `<script>${LIVE_VIEW_SOURCE}</script>\n` : ""}${repl ? `<script>${REPL_VIEW_SOURCE}</script>\n` : ""}${navigation.liveUrl ? `<script>${FOLLOW_ACTIVITY_SOURCE}</script>\n` : ""}`;
 	const watchUi = `${readingPositionScript}${watchNavigation}\n${watchScript}`;
 	const completeHtml = /<\/body>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/body>/i, `${watchUi}\n</body>`)
@@ -1202,6 +1207,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				isWaiting: !hasHistoryDocument,
 				turnDetailsUrl: selectedDocument.turnDetails ? `${TURN_PREFIX}${selectedDocument.revision}?identity=${identity}&instance=${instance}` : undefined,
 				liveUrl: options.live ? `${LIVE_PREFIX}?identity=${identity}&instance=${instance}` : undefined,
+				replUrl: options.repl ? `${REPL_PREFIX}?identity=${identity}&instance=${instance}` : undefined,
 				sourceLabel: options.sourceLabel,
 				titleSuffix: options.titleSuffix,
 				wrapScope,
@@ -1271,6 +1277,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					view: "working", revision: document.revision, revisions: documents.map(d => d.revision),
 					turnDetailsUrl: `${TURN_PREFIX}${document.revision}?identity=${identity}&instance=${instance}`,
 					liveUrl: options.live ? `${LIVE_PREFIX}?identity=${identity}&instance=${instance}` : undefined,
+					replUrl: options.repl ? `${REPL_PREFIX}?identity=${identity}&instance=${instance}` : undefined,
 					sourceLabel: options.sourceLabel, wrapScope, identity, instance, reconnectAfterStop: fixedPort !== 0,
 				}, scriptNonce);
 				res.writeHead(200, turnSecurityHeaders(scriptNonce));
@@ -1280,6 +1287,74 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					const retained = documents.includes(document);
 					respondRecovery(req, res, retained ? 503 : 404, retained ? "Working unavailable" : "Response no longer retained",
 						retained ? "Recorded turn details could not be read. You can try again or view this response in Preview." : "This exact response is no longer available in the retained history.", retained ? document : undefined, false, retained);
+				}
+			}
+			return;
+		}
+
+		if (requestUrl.pathname.startsWith(REPL_PREFIX)) {
+			if (!options.repl) { respondText(res, 404, "The REPL page is not enabled for this preview."); return; }
+			if (requestedIdentity !== identity) { respondText(res, 409, "This REPL link belongs to a different preview."); return; }
+			if (requestUrl.searchParams.get("instance") !== instance) {
+				respondRecovery(req, res, 409, "REPL link expired", "This REPL view belongs to an earlier preview run. Open the current preview to reconnect."); return;
+			}
+			const rest = requestUrl.pathname.slice(REPL_PREFIX.length);
+			// A session name pins its current lifetime; the pinned view lives at pin/<id>.
+			const match = /^(?:(pi-repl-[a-z]{1,16})|pin\/([A-Za-z0-9_-]{12})(\/updates)?)$/.exec(rest);
+			if (rest !== "" && !match) { respondText(res, 404, "Unknown REPL view."); return; }
+			const scriptNonce = randomBytes(18).toString("base64url");
+			// HEAD never inspects tmux or reads a record.
+			if (method === "HEAD") { res.writeHead(200, match?.[3] ? { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" } : turnSecurityHeaders(scriptNonce)); res.end(); return; }
+			const query = `identity=${identity}&instance=${instance}`;
+			const sessionsHref = `${REPL_PREFIX}?${query}`;
+			const latest = documents[documents.length - 1];
+			const latestWorking = documents.findLast(d => d.turnDetails);
+			const appearanceStyle = previewAppearanceStyle(latest.html);
+			const respondPage = html => {
+				res.writeHead(200, turnSecurityHeaders(scriptNonce));
+				res.end(prepareBrowserWatchHtml(html, {
+					view: "repl", revision: latest.revision, revisions: documents.map(d => d.revision),
+					turnDetailsUrl: latestWorking ? `${TURN_PREFIX}${latestWorking.revision}?${query}` : undefined,
+					liveUrl: options.live ? `${LIVE_PREFIX}?${query}` : undefined,
+					replUrl: sessionsHref,
+					sourceLabel: options.sourceLabel, wrapScope, identity, instance, reconnectAfterStop: fixedPort !== 0,
+				}, scriptNonce));
+			};
+			try {
+				if (rest === "") {
+					const list = await options.repl.list();
+					if (closed || res.destroyed) return;
+					respondPage(buildReplSessionsPage(list, { label: options.sourceLabel, appearanceStyle, sessionHref: name => `${REPL_PREFIX}${name}?${query}` }));
+					return;
+				}
+				if (match[1]) {
+					const pinned = await options.repl.pinSession(match[1]);
+					if (closed || res.destroyed) return;
+					if (pinned.pinId) { res.writeHead(302, { ...NON_HTML_SECURITY_HEADERS, Location: `${REPL_PREFIX}pin/${pinned.pinId}?${query}` }); res.end(); return; }
+					if (pinned.error === "unchecked") respondRecovery(req, res, 503, "Couldn't check the session", `tmux didn't say whether ${match[1]} is running${pinned.reason ? ` (${pinned.reason})` : ""}. Try again shortly.`);
+					else respondRecovery(req, res, 404, "Session not running", `${match[1]} isn't running now. Open the REPL sessions to see which are.`);
+					return;
+				}
+				const view = await options.repl.view(match[2], requestUrl.searchParams.get("version") ?? "");
+				if (closed || res.destroyed) return;
+				if (view.gone) {
+					if (match[3]) respondJson(res, 404, { gone: true });
+					else respondRecovery(req, res, 404, "REPL view expired", "This view of a REPL session is no longer kept. Open the REPL sessions to follow it again.");
+					return;
+				}
+				if (match[3]) {
+					respondJson(res, 200, {
+						version: view.version, unchanged: view.unchanged === true, resync: view.resync === true, ended: view.ended === true,
+						statusHtml: replSessionStatusHtml(view, { sessionsHref }),
+						...(view.unchanged ? {} : { ids: view.entries.map(entry => entry.id), cards: replEntryCards(view) }),
+					});
+					return;
+				}
+				respondPage(buildReplSessionPage(view, { label: options.sourceLabel, appearanceStyle, updatesHref: `${REPL_PREFIX}pin/${match[2]}/updates?${query}`, sessionsHref }));
+			} catch {
+				if (!closed && !res.destroyed) {
+					if (match?.[3]) respondJson(res, 503, { error: "unavailable" });
+					else respondRecovery(req, res, 503, "REPL page unavailable", "The shared REPL sessions couldn't be read. Try again shortly.");
 				}
 			}
 			return;
@@ -1377,6 +1452,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					view: "live", liveAnchor: match[1], revision: latest.revision, revisions: documents.map(d => d.revision),
 					turnDetailsUrl: latestWorking ? `${TURN_PREFIX}${latestWorking.revision}?${query}` : undefined,
 					liveUrl: `${LIVE_PREFIX}?${query}`,
+					replUrl: options.repl ? `${REPL_PREFIX}?${query}` : undefined,
 					sourceLabel: options.sourceLabel, wrapScope, identity, instance, reconnectAfterStop: fixedPort !== 0,
 				}, scriptNonce);
 				res.writeHead(200, turnSecurityHeaders(scriptNonce));
@@ -1731,6 +1807,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			linkedDocuments.clear();
 			// Stopping the preview releases its live projection now, not at lease expiry.
 			try { options.live?.close?.(); } catch { /* Closing must still finish. */ }
+			try { options.repl?.close?.(); } catch { /* Closing must still finish. */ }
 			if (htmlPageServerPromise) await (await htmlPageServerPromise.catch(() => undefined))?.close();
 			for (const client of eventClients) {
 				if (!client.writableEnded && !client.destroyed) {

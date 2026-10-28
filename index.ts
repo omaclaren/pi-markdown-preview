@@ -35,6 +35,7 @@ import {
 import { createBrowserWatchServer, getBrowserWatchLocalMediaPath } from "./shared/browser-watch-server.js";
 import { readTurnDetails } from "./shared/read-turn-details.js";
 import { createLiveTurnProjector, turnDetailsFromRecords } from "./shared/turn-details.js";
+import { createReplLiveSource } from "./shared/repl-live.js";
 import { stripMarkdownHtmlCommentsPreservingYamlFrontMatter } from "./shared/markdown-html-comments.js";
 import { isHtmlPagePath } from "./shared/html-page-preview.js";
 import { normalizeSubSupTags } from "./shared/markdown-sub-sup.js";
@@ -4808,6 +4809,7 @@ interface ParsedPreviewArgs {
 	watch?: boolean;
 	turnDetails?: boolean;
 	live?: boolean;
+	repl?: boolean;
 	history?: number;
 	stop?: boolean;
 	stopAll?: boolean;
@@ -4827,6 +4829,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 	let watch = false;
 	let turnDetails = false;
 	let live = false;
+	let repl = false;
 	let history: number | undefined;
 	let stop = false;
 	let stopAll = false;
@@ -4876,6 +4879,12 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		// Live implies Working: the current turn's recorded activity, as it is recorded.
 		if (token === "--live") {
 			live = turnDetails = true;
+			continue;
+		}
+
+		// The shared REPL sessions' recent recorded submissions: its own opt-in, not implied by --live.
+		if (token === "--repl") {
+			repl = true;
 			continue;
 		}
 
@@ -4983,15 +4992,16 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 			continue;
 		}
 
-		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
+		return { error: `Unknown argument \"${token}\". Use /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--repl|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]` };
 	}
 
-	// --working and --live only exist for the response watcher, so on their own they start it.
-	if (turnDetails && !watch && file === undefined && !stop && !list && !pick) {
+	// --working, --live and --repl only exist for the response watcher, so on their own they start it.
+	if ((turnDetails || repl) && !watch && file === undefined && !stop && !list && !pick) {
 		watch = true;
 		if (!explicitTarget) target = "browser";
 	}
 	if (turnDetails && (!watch || file !== undefined)) return { error: `${live ? "--live" : "--working"} is only available for the assistant-response browser watcher (--watch without a file).` };
+	if (repl && (!watch || file !== undefined)) return { error: "--repl is only available for the assistant-response browser watcher (--watch without a file)." };
 	if (history !== undefined && (!watch || file !== undefined)) return { error: "--history is only available for the assistant-response browser watcher (--watch without a file)." };
 	if (file && pick) return { error: "Cannot use --pick and --file together." };
 	if (watch && stop) return { error: "Cannot use --watch and --stop together." };
@@ -5011,7 +5021,7 @@ function parsePreviewArgs(args: string): ParsedPreviewArgs {
 		return { error: "--list cannot be combined with a file, --pick, --font-size, --responses, or --all." };
 	}
 
-	return { target, pick, file, fontSizePx, watch, turnDetails, live, history, stop, stopAll, stopResponses, list };
+	return { target, pick, file, fontSizePx, watch, turnDetails, live, repl, history, stop, stopAll, stopResponses, list };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -5021,6 +5031,7 @@ export default function (pi: ExtensionAPI) {
 		kind: "responses";
 		turnDetails?: boolean;
 		live?: boolean;
+		repl?: boolean;
 		lastResponseKey?: string;
 		queuedResponseOverride?: AssistantResponseSnapshot;
 	}
@@ -5063,6 +5074,7 @@ export default function (pi: ExtensionAPI) {
 		requestedFontSizePx: number;
 		turnDetails?: boolean;
 		live?: boolean;
+		repl?: boolean;
 		promise: Promise<void>;
 		renderAbortController?: AbortController;
 		server?: BrowserWatchServer;
@@ -5545,7 +5557,7 @@ export default function (pi: ExtensionAPI) {
 		}, BROWSER_FILE_WATCH_DEBOUNCE_MS);
 	};
 
-	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number, turnDetails = false, history?: number, live = false): Promise<void> => {
+	const startBrowserResponseWatch = async (ctx: ExtensionCommandContext, fontSizePx?: number, turnDetails = false, history?: number, live = false, repl = false): Promise<void> => {
 		const id = RESPONSE_BROWSER_WATCH_ID;
 		if (pendingBrowserWatchCleanups.has(id)) {
 			throw new Error("The previous assistant-response watcher did not clean up completely. Retry /preview-browser --stop --responses first.");
@@ -5555,6 +5567,7 @@ export default function (pi: ExtensionAPI) {
 			if (existingWatch.source.kind !== "responses") throw new Error("Invalid response watcher state.");
 			if (turnDetails && !existingWatch.source.turnDetails) throw new Error(`${live ? "Live" : "Working"} needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch ${live ? "--live" : "--working"}.`);
 			if (live && !existingWatch.source.live) throw new Error("Live needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch --live.");
+			if (repl && !existingWatch.source.repl) throw new Error("The REPL page needs a fresh private preview link. Stop with /preview-browser --stop --responses, then run /preview-browser --watch --repl.");
 			const operation = claimBrowserWatchOperation(id);
 			const previewFontSizePx = fontSizePx === undefined
 				? existingWatch.fontSizePx
@@ -5575,6 +5588,7 @@ export default function (pi: ExtensionAPI) {
 		if (existingProvisional) {
 			if (turnDetails && !existingProvisional.turnDetails) throw new Error("The response watcher is starting without prompt and working access. Wait for it, stop it, then start a fresh watch with --working.");
 			if (live && !existingProvisional.live) throw new Error("The response watcher is starting without Live. Wait for it, stop it, then start a fresh watch with --live.");
+			if (repl && !existingProvisional.repl) throw new Error("The response watcher is starting without the REPL page. Wait for it, stop it, then start a fresh watch with --repl.");
 			if (fontSizePx !== undefined) {
 				existingProvisional.requestedFontSizePx = normalizePreviewFontSizePx(fontSizePx, DEFAULT_BROWSER_PREVIEW_FONT_SIZE_PX);
 			}
@@ -5590,6 +5604,7 @@ export default function (pi: ExtensionAPI) {
 			sourceLabel: "Assistant responses",
 			turnDetails,
 			live,
+			repl,
 			requestedFontSizePx: previewFontSizePx,
 			promise: Promise.resolve(),
 		};
@@ -5655,6 +5670,7 @@ export default function (pi: ExtensionAPI) {
 				initialTurnDetails: piTurnDetails(ctx, first?.snapshot ?? response, provisional.turnDetails === true),
 				initialResponseKey: piResponseKey(first?.snapshot ?? response),
 				...(provisional.live ? { live: piLiveSource(ctx) } : {}),
+				...(provisional.repl ? { repl: createReplLiveSource() } : {}),
 				sourceLabel: provisional.sourceLabel,
 				renderLocalDocument: (path, signal) => renderBrowserWatchLinkedDocument(path, getPreviewStyle(ctx.ui.theme), newWatch?.fontSizePx ?? provisional.requestedFontSizePx, signal),
 			});
@@ -5672,7 +5688,7 @@ export default function (pi: ExtensionAPI) {
 				id,
 				operationId: operation.operationId,
 				server,
-				source: { kind: "responses", turnDetails: provisional.turnDetails, live: provisional.live, lastResponseKey: response?.responseKey },
+				source: { kind: "responses", turnDetails: provisional.turnDetails, live: provisional.live, repl: provisional.repl, lastResponseKey: response?.responseKey },
 				sourceLabel: provisional.sourceLabel,
 				resourcePath,
 				fontSizePx: provisional.requestedFontSizePx,
@@ -5692,6 +5708,7 @@ export default function (pi: ExtensionAPI) {
 			hasShownBrowserWatchHint = true;
 			ctx.ui.notify("Watching completed assistant responses in browser. Stop with /preview-browser --stop --responses."
 				+ (newWatch.source.kind === "responses" && newWatch.source.live ? " Live is on: turn on Follow activity in the page's toolbar to see the current turn live in Working." : "")
+				+ (newWatch.source.kind === "responses" && newWatch.source.repl ? " The REPL page is on: it shows the shared REPL sessions' code and output, from any agent or project, including future submissions, to anyone with this link. The link stops working when the watcher stops." : "")
 				+ (newWatch.source.kind === "responses" && newWatch.source.turnDetails ? " Working includes potentially sensitive input/tool text and recorded images; share only with trusted viewers."
 					: newWatch.source.kind === "responses" ? " Tip: start with /preview-browser --watch --working to see prompts and activity." : ""), "info");
 		})();
@@ -5911,7 +5928,7 @@ export default function (pi: ExtensionAPI) {
 	const run = async (args: string, ctx: ExtensionCommandContext) => {
 		const parsed = parsePreviewArgs(args);
 		if (parsed.help) {
-			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only); --live also follows the current turn as it is recorded. Either starts the response watcher on its own, e.g. /preview-browser --live.\nA new response watcher starts with up to 10 earlier finished responses; --history <n> sets 0-20.", "info");
+			ctx.ui.notify("Usage: /preview [--pick|-p] [--file|-f <path>] [--browser|-b [--watch|-w [<path>|--working|--live|--repl|--history <n>]|--list|--stop [<path>|--responses|--all]]] [--pdf] [--terminal] [--font-size <px>]  or  /preview <path>\nAdd --working to a fresh response watcher to expose recorded inputs, tool text and images (trusted viewers only); --live also follows the current turn as it is recorded; --repl adds a page of the shared REPL sessions' recent recorded submissions (trusted viewers only). Each starts the response watcher on its own, e.g. /preview-browser --live.\nA new response watcher starts with up to 10 earlier finished responses; --history <n> sets 0-20.", "info");
 			return;
 		}
 		if (parsed.error || !parsed.target) {
@@ -5971,7 +5988,7 @@ export default function (pi: ExtensionAPI) {
 				if (parsed.file) {
 					await startBrowserFileWatch(ctx, parsed.file, parsed.fontSizePx);
 				} else {
-					await startBrowserResponseWatch(ctx, parsed.fontSizePx, parsed.turnDetails, parsed.history, parsed.live);
+					await startBrowserResponseWatch(ctx, parsed.fontSizePx, parsed.turnDetails, parsed.history, parsed.live, parsed.repl);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -6138,7 +6155,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("preview-browser", {
-		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --working opts into recorded inputs/tools, --live also follows the current turn (either starts the response watcher on its own), and --history <n> sets earlier responses for response watchers)",
+		description: "Open browser preview (--watch/-w starts or reopens response/file watchers; --list and --stop manage them; --working opts into recorded inputs/tools, --live also follows the current turn, --repl adds the shared REPL sessions' page (each starts the response watcher on its own), and --history <n> sets earlier responses for response watchers)",
 		handler: async (args, ctx) => {
 			await run(`--browser ${args}`.trim(), ctx);
 		},

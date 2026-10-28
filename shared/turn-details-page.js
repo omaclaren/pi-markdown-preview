@@ -250,6 +250,9 @@ function eventContent(event, fromClaude = false, calls = new Map()) {
 
 const LIVE_STYLE = `.live-omitted { color:var(--muted); font-size:12px; margin:0 0 12px } .live-status a,[data-live-status] a { color:inherit; text-underline-offset:3px }
 .live-state { margin:0 0 18px } .live-state:empty { display:none } .live-pending { color:var(--muted); font-size:12px; font-weight:400 } .live-notice { color:var(--muted); display:block; margin-top:4px }
+.repl-sessions { list-style:none; padding:0; margin:0 0 14px } .repl-session { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; padding:10px 14px; margin:0 0 8px; border:1px solid var(--line); border-radius:10px; background:var(--panel) } .repl-session-name { font-weight:600 } .repl-session-state,.repl-session code { color:var(--muted); font-size:12px }
+.repl-status-error,.repl-status-timeout { color:var(--warning, var(--muted)) } details.repl-output > summary { padding:0; font:600 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--muted) }
+.repl-new-entries { position:sticky; bottom:12px; display:block; margin:8px auto 0; padding:6px 12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; cursor:pointer } .repl-new-entries[hidden] { display:none }
 .live-newer { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50; min-height:32px; padding:6px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; box-shadow:0 2px 8px #0002; cursor:pointer } .live-newer[hidden] { display:none } .live-newer:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 @media(pointer:coarse) { .live-newer { min-height:44px } } @media print { .live-newer { display:none } }`;
 
@@ -363,4 +366,76 @@ export function buildLivePage(snapshot, { label = "", appearanceStyle = "", stat
 	const cards = snapshot.events.map((event, i) => renderLiveCard(event, snapshot.omitted + i + 1, fromClaude, snapshot.events[i + 1], calls)).join("\n");
 	const omitted = snapshot.omitted;
 	return `${pageHead("Working · live", appearanceStyle)}<body class="pi-preview-working pi-preview-live"><main id="preview-root" data-live-cursor="${escape(`${snapshot.generation}:${snapshot.sequence}`)}"><h1>Working · live</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}<span data-live-time-label>${liveTimeLabel(snapshot.loaded)}</span> <time data-live-updated="${Number(snapshot.updatedAt) || 0}">${escape(new Date(snapshot.updatedAt).toLocaleTimeString())}</time></p><div class="notices-row"><p class="notices">Read-only view; some conversation content may be missing or shortened.</p><button type="button" class="working-bulk" hidden>Expand all</button></div><p class="notices live-state" data-live-status role="status">${statusHtml}</p><p class="live-omitted" data-live-omitted="${omitted}"${omitted ? "" : " hidden"}>${omitted} earlier event${omitted === 1 ? "" : "s"} not shown.</p><div class="live-events">${cards}</div><button type="button" class="live-newer" hidden></button></main></body></html>`;
+}
+
+
+// ---- REPL: pi-repl's shared sessions and their recent recorded submissions ----
+// Record text is untrusted and escaped like Working's; nothing here runs or sends code.
+const REPL_STATES = {
+	running: "Running",
+	"runtime-ended": "Runtime ended: its pane has exited",
+	ended: "Session ended",
+	replaced: "Replaced by a new session with the same name; this view stays on the earlier one",
+	unchecked: "Couldn't check the session",
+	absent: "Not running",
+};
+const REPL_STATUSES = { sending: "sending", sent: "sent", captured: "captured", timeout: "timed out", error: "error", note: "note" };
+const REPL_LONG_OUTPUT_LINES = 40;
+const clockTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+const omittedNote = (what, chars) => chars > 0 ? `<p class="empty-text">${escape(`${chars.toLocaleString("en")} more characters of ${what} not shown`)}</p>` : "";
+
+/** One recorded submission. `number` is its place in the shown window; `runtimeLabel` names the session's runtime. */
+export function renderReplEntryCard(entry, number, runtimeLabel) {
+	const status = REPL_STATUSES[entry.status] ?? entry.status;
+	const who = entry.origin === "pi-studio" && !/studio/i.test(entry.label) ? `${entry.label} (Pi Studio)` : entry.label;
+	const timeout = entry.status === "timeout" ? ' title="The sender stopped waiting; the code may have kept running."' : "";
+	const head = `<span class="number">${number}</span> ${escape(who)} · <span class="repl-status repl-status-${escape(entry.status)}"${timeout}>${escape(status)}</span>${entry.mode === "literate" ? " · note" : ""} · <time>${escape(clockTime(entry.createdAt))}</time>`;
+	const prose = entry.prose ? `<div class="task-summary">${escape(entry.prose)}</div>${omittedNote("prose", (entry.displayOmitted?.prose ?? 0) + (entry.proseOmittedChars ?? 0))}` : "";
+	const source = entry.code ? `<div class="tool-path"><span class="field-label">${escape(`${runtimeLabel} REPL`)}</span>${code(entry.code, "code-input")}</div>${omittedNote("code", (entry.displayOmitted?.code ?? 0) + (entry.codeOmittedChars ?? 0))}` : "";
+	const lines = entry.output ? entry.output.split("\n").length : 0;
+	const outputBody = entry.output.trim() ? literalPre(entry.output) : `<p class="empty-text">${entry.status === "sending" || entry.status === "sent" ? "No output recorded yet" : "No output"}</p>`;
+	const output = entry.status === "note" && !entry.output ? "" : `<div class="tool-fields"><section class="tool-field">${lines > REPL_LONG_OUTPUT_LINES
+		? `<details class="repl-output"><summary>Output · ${lines} lines</summary>${outputBody}</details>`
+		: `<h3>Output</h3>${outputBody}`}${omittedNote("output", (entry.displayOmitted?.output ?? 0) + (entry.outputOmittedChars ?? 0))}</section></div>`;
+	return `<details class="event result repl-entry" open data-entry-id="${escape(entry.id)}" data-entry-version="${escape(entry.version)}"><summary>${head}</summary><div class="event-content">${prose}${source}${output}</div></details>`;
+}
+
+/** The session view's state line and notes, from `view` (createReplLiveSource). */
+export function replSessionStatusHtml(view, { sessionsHref = "" } = {}) {
+	const parts = [];
+	const state = REPL_STATES[view.state] ?? view.state;
+	parts.push(`<strong>${escape(state)}</strong>${view.state === "unchecked" && view.reason ? `: ${escape(view.reason)}` : ""}.`);
+	if (view.state === "replaced" && sessionsHref) parts.push(`<a href="${escape(sessionsHref)}">Open the current sessions</a>`);
+	if (view.record === "none") parts.push("No shared record yet: nothing has been sent to it through pi-repl, agent-repl or Pi Studio.");
+	else if (view.record === "unsupported") parts.push("Its shared record uses a version this page doesn't read.");
+	parts.push(`<span class="repl-ages" data-repl-now="${Number(view.now) || 0}" data-repl-checked="${Number(view.checkedAt) || 0}" data-repl-read="${Number(view.readAt) || 0}">Session checked <span data-repl-age="checked"></span>${view.readAt ? `; record read <span data-repl-age="read"></span>` : ""}.</span>`);
+	if (view.readError) parts.push(`<span class="live-notice">${escape(`The record couldn't be read just now: ${view.readError}`)}</span>`);
+	if (view.clearedAt) parts.push(`<span class="live-notice">${escape(`Cleared at ${clockTime(view.clearedAt)}; earlier submissions are gone from the record.`)}</span>`);
+	if (view.droppedEntries) parts.push(`<span class="live-notice">${escape(`${view.droppedEntries.toLocaleString("en")} older ${view.droppedEntries === 1 ? "entry was" : "entries were"} dropped to keep the record within its limits.`)}</span>`);
+	if (view.notShown) parts.push(`<span class="live-notice">${escape(`${view.notShown.toLocaleString("en")} older ${view.notShown === 1 ? "entry isn't" : "entries aren't"} shown here.`)}</span>`);
+	return parts.join(" ");
+}
+
+/** The cards for a view's window, numbered within it. */
+export const replEntryCards = view => (view.entries ?? []).map((entry, i) => ({ id: entry.id, version: entry.version, html: renderReplEntryCard(entry, i + 1, view.label) }));
+
+const REPL_INTRO = "Recent recorded submissions to this shared session, from any agent, Pi Studio or project, updating as they arrive. Code typed directly into the terminal isn't recorded here.";
+
+/** One session's page. `updatesHref` is the page's same-origin polling address. */
+export function buildReplSessionPage(view, { label = "", appearanceStyle = "", updatesHref = "", sessionsHref = "" } = {}) {
+	const cards = replEntryCards(view).map(card => card.html).join("\n");
+	return `${pageHead(`REPL · ${view.label}`, appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root" data-repl-updates="${escape(updatesHref)}" data-repl-version="${escape(view.version ?? "")}">${sessionsHref ? `<nav><a href="${escape(sessionsHref)}">← REPL sessions</a></nav>` : ""}<h1>REPL · ${escape(view.label)}</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}${escape(view.sessionName)}</p><p class="notices">${escape(REPL_INTRO)}</p><p class="live-status repl-session-status" aria-live="polite">${replSessionStatusHtml(view, { sessionsHref })}</p><div class="repl-entries">${cards || '<p class="empty-text repl-empty">No submissions recorded yet.</p>'}</div><button type="button" class="repl-new-entries" hidden>New entries below</button></main></body></html>`;
+}
+
+/** The list of pi-repl's shared sessions. `sessionHref(name)` links a running one. */
+export function buildReplSessionsPage(list, { label = "", appearanceStyle = "", sessionHref = () => "" } = {}) {
+	const present = list.sessions.filter(session => session.state !== "absent");
+	const absent = list.sessions.filter(session => session.state === "absent").map(session => session.label);
+	const rows = present.map(session => {
+		const record = session.record === "v1" ? "" : session.record === "none" ? " · no shared record yet" : " · record version not supported";
+		const state = `${REPL_STATES[session.state] ?? session.state}${session.state === "unchecked" && session.reason ? `: ${session.reason}` : ""}${record}`;
+		const link = session.state === "unchecked" ? escape(session.label) : `<a href="${escape(sessionHref(session.sessionName))}">${escape(session.label)}</a>`;
+		return `<li class="repl-session"><span class="repl-session-name">${link}</span> <span class="repl-session-state">${escape(state)}</span> <code>${escape(session.sessionName)}</code></li>`;
+	}).join("");
+	return `${pageHead("REPL sessions", appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root"><h1>REPL sessions</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Checked ${escape(clockTime(list.checkedAt))}</p><p class="notices">pi-repl's shared sessions, which agents reach through pi-repl or agent-repl. Open one to follow its recent recorded submissions.</p>${rows ? `<ul class="repl-sessions">${rows}</ul>` : '<p class="empty-text">No shared REPL session is running.</p>'}${absent.length ? `<p class="notices">Not running: ${escape(absent.join(", "))}.</p>` : ""}</main></body></html>`;
 }
