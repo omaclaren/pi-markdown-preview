@@ -64,7 +64,7 @@
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeImage(); }
       // Keep the watcher's navigation keys out of the modal. Native Tab focus
       // containment, browser zoom and other ordinary browser keys are unchanged.
-      else if (e.altKey && (['ArrowLeft','ArrowRight'].includes(e.key) || (e.ctrlKey && ['KeyP','KeyW'].includes(e.code)))) { e.preventDefault(); e.stopPropagation(); }
+      else if (e.altKey && (['ArrowLeft','ArrowRight'].includes(e.key) || (e.ctrlKey && ['KeyP','KeyW','KeyR'].includes(e.code)))) { e.preventDefault(); e.stopPropagation(); }
      });
     }
     opener = button; caption.textContent = button.getAttribute('aria-label').replace(/\. Enlarge$/, '');

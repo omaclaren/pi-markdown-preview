@@ -348,7 +348,7 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	const plain = await createBrowserWatchServer(html, dir, {});
 	t.after(() => plain.close());
 	const plainPage = await (await fetch(plain.url)).text();
-	assert.doesNotMatch(plainPage, /data-watch-control="repl"/, "No REPL link without the option.");
+	assert.doesNotMatch(plainPage, /<a data-watch-control="repl"/, "No REPL link without the option.");
 	const s = source();
 	const asked = [];
 	const server = await createBrowserWatchServer(html, dir, { repl: s.live, replHighlight: async items => { asked.push(...items); return new Map(items.filter(item => item.code === "print(2)").map(item => [item.key, '<div class="sourceCode" id="x"><pre class="sourceCode python"><code class="sourceCode python">HIGHLIGHTED</code></pre></div>'])); } });
@@ -391,7 +391,14 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	assert.match(sessions, /aria-keyshortcuts="Alt\+ArrowLeft" aria-disabled="true"/, "No response history on the REPL pages.");
 	assert.match(sessions, /Back a page/);
 	assert.equal((await get(updatesHref.replace(/instance=[^&]+/, "instance=old"))).status, 409, "A link from an earlier run is refused.");
-	assert.equal((await get(`${replHref.split("?")[0]}pi-repl-julia?${replHref.split("?")[1]}`)).status, 404, "A session that isn't running.");
+	// A session that isn't running (such as one a tab was last on, since ended) goes to the list, which says so.
+	const notRunning = await get(`${replHref.split("?")[0]}pi-repl-julia?${replHref.split("?")[1]}`);
+	assert.equal(notRunning.status, 302);
+	assert.match(notRunning.headers.get("location"), /^\/__pi_markdown_preview_repl__\/\?identity=[0-9a-f]+&instance=[^&]+&missing=pi-repl-julia$/);
+	assert.match(await (await get(notRunning.headers.get("location"))).text(), /Julia \(pi-repl-julia\) isn&#39;t running now\./);
+	assert.doesNotMatch(await (await get(`${replHref}&missing=pi-repl-python`)).text(), /isn&#39;t running now/, "A running session is never called missing.");
+	assert.match(sessions, /data-watch-control="repl" href="[^"]+" aria-current="page" title="[^"]*\(Ctrl\+Alt\+R\)" aria-keyshortcuts="Control\+Alt\+R"/);
+	assert.match(sessions, /Preview \/ Working \/ REPL/);
 	// Copy link on a session's page hands out that session, for a browser without the cookie (R9).
 	const query = new URL(replHref, server.url).searchParams;
 	const share = path => get(`/__pi_markdown_preview_share__?${path}&identity=${query.get("identity")}`);
@@ -480,15 +487,16 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	assert.equal(cards[0].open, true, "The card is updated in place: still open.");
 	assert.match(cards[1].text, /print\('second'\)[^]*second/);
 	assert.match(await page.$eval(".repl-session-status", el => el.textContent), /Session checked .*record read/);
-	// Preview → sessions → session in this tab: Option/Alt+Left steps back through them.
-	await page.goto(server.url);
-	await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="repl"]')]);
-	await Promise.all([page.waitForNavigation(), page.click(".repl-session-name a")]);
-	await page.waitForSelector(".repl-entry");
-	await Promise.all([page.waitForNavigation(), page.keyboard.down("Alt").then(() => page.keyboard.press("ArrowLeft")).then(() => page.keyboard.up("Alt"))]);
-	assert.match(await page.$eval("h1", h => h.textContent), /REPL sessions/);
-	await Promise.all([page.waitForNavigation(), page.keyboard.down("Alt").then(() => page.keyboard.press("ArrowLeft")).then(() => page.keyboard.up("Alt"))]);
-	assert.match(await page.$eval("#preview-root", root => root.textContent), /Answer/);
+	// Preview → sessions → session in a new tab: Option/Alt+Left steps back through them.
+	const tab = await browser.newPage();
+	await tab.goto(server.url);
+	await Promise.all([tab.waitForNavigation(), tab.click('[data-watch-control="repl"]')]);
+	await Promise.all([tab.waitForNavigation(), tab.click(".repl-session-name a")]);
+	await tab.waitForSelector(".repl-entry");
+	await Promise.all([tab.waitForNavigation(), tab.keyboard.down("Alt").then(() => tab.keyboard.press("ArrowLeft")).then(() => tab.keyboard.up("Alt"))]);
+	assert.match(await tab.$eval("h1", h => h.textContent), /REPL sessions/);
+	await Promise.all([tab.waitForNavigation(), tab.keyboard.down("Alt").then(() => tab.keyboard.press("ArrowLeft")).then(() => tab.keyboard.up("Alt"))]);
+	assert.match(await tab.$eval("#preview-root", root => root.textContent), /Answer/);
 	// Opened directly, with no earlier page in the tab: back goes to the sessions list.
 	const sessionUrl = replHref.replace("/__pi_markdown_preview_repl__/?", "/__pi_markdown_preview_repl__/pi-repl-python?");
 	const fresh = await browser.newPage();
@@ -544,4 +552,47 @@ test("REPL page in a browser: notices stay, held numbers settle, Copy link and n
 	server.updateDocument(answer("Second answer"));
 	await page.waitForFunction(() => document.querySelector('[data-watch-control="count"]')?.textContent === "2/2", { timeout: 10_000 });
 	assert.deepEqual(await page.evaluate(() => [document.querySelector('[data-watch-control="new"]').hidden, document.querySelector('[data-watch-control="next"]').getAttribute("aria-disabled")]), [true, "true"]);
+});
+
+test("REPL page in a browser: the REPL link and Ctrl+Alt+R return to the REPL page this tab was last on", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "repl-page-browser-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const s = source();
+	const server = await createBrowserWatchServer("<!doctype html><html><head><title>R</title></head><body><main id='preview-root'><p>Answer</p></main></body></html>", dir, { repl: s.live });
+	t.after(() => server.close());
+	const { default: puppeteer } = await import("puppeteer-core");
+	const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+	t.after(() => browser.close());
+	const page = await browser.newPage();
+	const heading = () => page.$eval("h1", h => h.textContent);
+	const go = action => Promise.all([page.waitForNavigation(), action()]);
+	const keys = key => go(async () => { await page.keyboard.down("Control"); await page.keyboard.down("Alt"); await page.keyboard.press(key); await page.keyboard.up("Alt"); await page.keyboard.up("Control"); });
+	await page.goto(server.url);
+	await go(() => page.click('[data-watch-control="repl"]'));
+	await go(() => page.click(".repl-session-name a"));
+	assert.equal(await heading(), "REPL · Python");
+	// To Preview and back: the REPL link goes straight to the session.
+	await go(() => page.click('[data-watch-control="preview"]'));
+	assert.match(await page.$eval('[data-watch-control="repl"]', a => a.getAttribute("href")), /\/__pi_markdown_preview_repl__\/pi-repl-python\?/);
+	await go(() => page.click('[data-watch-control="repl"]'));
+	assert.equal(await heading(), "REPL · Python");
+	// And from the keyboard.
+	await keys("KeyP");
+	assert.match(await page.$eval("#preview-root", root => root.textContent), /Answer/);
+	await keys("KeyR");
+	assert.equal(await heading(), "REPL · Python");
+	// Left on the list, the tab returns to the list.
+	await go(() => page.click("main > nav a"));
+	assert.equal(await heading(), "REPL sessions");
+	await keys("KeyP");
+	await keys("KeyR");
+	assert.equal(await heading(), "REPL sessions");
+	// A session the tab was on that has since ended: the list, saying so.
+	await go(() => page.click(".repl-session-name a"));
+	await keys("KeyP");
+	s.end();
+	s.tick(5_100);
+	await keys("KeyR");
+	assert.equal(await heading(), "REPL sessions");
+	assert.match(await page.$eval("main", main => main.textContent), /Python \(pi-repl-python\) isn't running now\./);
 });

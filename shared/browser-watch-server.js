@@ -62,14 +62,14 @@ const shortcutKeys = (modifiers, keys) => {
 	return `<span class="pi-preview-keys" data-modifiers="${modifiers.join(" ")}" data-keys="${escapeBrowserWatchHtmlAttribute(keys.join(" "))}">${[...modifiers.map(kbd), keys.map(kbd).join(" / ")].join(" + ")}</span>`;
 };
 /** The list behind "?": modifiers, the keys that share them, and what they do. */
-function shortcutsList({ viewSwitch, followActivity, repl = false }) {
+function shortcutsList({ viewSwitch, followActivity, repl = false, replLink = false }) {
 	const rows = [
 		...(repl ? [[["Alt"], ["ArrowLeft"], "Back a page"]] : [
 			[["Alt"], ["ArrowLeft", "ArrowRight"], "Previous / next"],
 			[["Alt", "Shift"], ["ArrowLeft", "ArrowRight"], "Oldest / latest in this view"],
 		]),
 		[["Control", "Alt"], ["L"], "Latest in Preview, from any view"],
-		...(viewSwitch ? [[["Control", "Alt"], ["P", "W"], "Preview / Working"]] : []),
+		...(viewSwitch ? [[["Control", "Alt"], replLink ? ["P", "W", "R"] : ["P", "W"], replLink ? "Preview / Working / REPL" : "Preview / Working"]] : []),
 		...(followActivity ? [[["Control", "Alt"], ["A"], "Follow activity on / off"]] : []),
 		[[], ["Escape"], "Close a panel"],
 		[[], ["?"], "Show / hide this list"],
@@ -365,7 +365,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 		: "";
 	const watchNavigation = `<nav id="pi-markdown-preview-watch-nav" aria-label="Preview controls">
   <span id="pi-markdown-preview-watch-status" data-watch-control="status" role="status" hidden></span>
-  ${navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="${repl ? `/?identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}` : `/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}`}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P; the latest: Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working && !repl ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl && !repl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a>${navigation.replUrl ? `<a data-watch-control="repl" href="${escapeBrowserWatchHtmlAttribute(navigation.replUrl)}"${repl ? ' aria-current="page"' : ''} title="REPL: recent recorded submissions to the shared REPL sessions">REPL</a>` : ""}</span>` : ""}
+  ${navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl ? `<span class="pi-preview-view-switch" role="group" aria-label="Response view"><a data-watch-control="preview" href="${repl ? `/?identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}` : `/?revision=${revision}&amp;identity=${escapeBrowserWatchHtmlAttribute(navigation.identity || "")}&amp;instance=${escapeBrowserWatchHtmlAttribute(navigation.instance || "")}`}"${!working ? ' aria-current="page"' : ''} title="Preview (Ctrl+Alt+P; the latest: Ctrl+Alt+L)" aria-keyshortcuts="Control+Alt+P">Preview</a><a data-watch-control="turn-details" ${navigation.turnDetailsUrl ? `href="${escapeBrowserWatchHtmlAttribute(navigation.turnDetailsUrl)}"` : 'aria-disabled="true" tabindex="-1"'}${working && !repl ? ' aria-current="page"' : ''} title="Working (Ctrl+Alt+W)${navigation.liveUrl && !repl ? ". With Follow activity on, Working shows the current turn live" : ""}" aria-keyshortcuts="Control+Alt+W">Working</a>${navigation.replUrl ? `<a data-watch-control="repl" href="${escapeBrowserWatchHtmlAttribute(navigation.replUrl)}"${repl ? ' aria-current="page"' : ''} title="REPL: recent recorded submissions to the shared REPL sessions (Ctrl+Alt+R)" aria-keyshortcuts="Control+Alt+R">REPL</a>` : ""}</span>` : ""}
   ${navigation.liveUrl && !repl ? `<button data-watch-control="follow-activity" type="button" aria-pressed="false" hidden data-live-state="${escapeBrowserWatchHtmlAttribute(`${navigation.liveUrl}&format=json`)}" data-view="${live ? "live" : working ? "working" : "preview"}" data-latest="${isWaiting || revision === latestRevision ? "true" : "false"}"${navigation.liveAnchor ? ` data-anchor="${escapeBrowserWatchHtmlAttribute(navigation.liveAnchor)}"` : ""} title="Follow activity: switch to Live when a turn starts and back to its response when it finishes (Ctrl+Alt+A)" aria-keyshortcuts="Control+Alt+A">Follow activity: Off</button>` : ""}
   <button id="pi-markdown-preview-watch-toggle" data-watch-control="toggle" type="button" aria-expanded="false" aria-controls="pi-markdown-preview-watch-controls" aria-label="${isWaiting ? "Preview controls, waiting for a response" : `Preview controls, revision ${currentIndex + 1} of ${revisions.length}`}" title="Show preview controls">
     <span id="pi-markdown-preview-watch-count" data-watch-control="count" aria-live="polite">${isWaiting ? "Waiting" : `${currentIndex + 1}/${revisions.length}`}</span>
@@ -390,7 +390,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   </div>
   <div id="pi-markdown-preview-watch-shortcuts" data-watch-control="shortcuts-panel" role="dialog" aria-labelledby="pi-markdown-preview-watch-shortcuts-title" tabindex="-1" hidden>
     <div class="pi-preview-shortcuts-head"><span id="pi-markdown-preview-watch-shortcuts-title">Keyboard shortcuts</span><button data-watch-control="shortcuts-close" type="button">Close</button></div>
-    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl), followActivity: Boolean(navigation.liveUrl) && !repl, repl })}
+    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl), followActivity: Boolean(navigation.liveUrl) && !repl, repl, replLink: Boolean(navigation.replUrl) })}
   </div>
 </nav>`;
 
@@ -436,6 +436,18 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   window.addEventListener('load', updateNavigationHeight, { once: true });
   const previewLink = navigation?.querySelector('[data-watch-control="preview"]');
   const workingLink = navigation?.querySelector('[data-watch-control="turn-details"]');
+  const replLink = navigation?.querySelector('[data-watch-control="repl"]');
+  // The REPL link returns to the REPL page this tab was last on: a session (its current
+  // lifetime) or the list.
+  try {
+    const replPageKey = 'pi-markdown-preview:repl-page:' + identity;
+    if (repl) {
+      if (replSession) sessionStorage.setItem(replPageKey, replSession); else sessionStorage.removeItem(replPageKey);
+    } else if (replLink) {
+      const session = sessionStorage.getItem(replPageKey) || '';
+      if (/^pi-repl-[a-z]{1,16}$/.test(session)) { const target = new URL(replLink.href); target.pathname += session; replLink.href = target.href; }
+    }
+  } catch {}
   const previousLink = navigation?.querySelector('[data-watch-control="previous"]');
   const countLabel = navigation?.querySelector('[data-watch-control="count"]');
   const nextLink = navigation?.querySelector('[data-watch-control="next"]');
@@ -857,6 +869,12 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       if (event.shiftKey) return;
       const key = event.key.toLowerCase();
       if (event.code === 'KeyL' || key === 'l') { event.preventDefault(); showLatestPreview(); return; }
+      if (event.code === 'KeyR' || key === 'r') {
+        if (!replLink) return;
+        event.preventDefault();
+        if (replLink.getAttribute('aria-current') !== 'page') navigateTo(replLink.href, false, replLink, true);
+        return;
+      }
       const link = event.code === 'KeyP' || key === 'p' ? previewLink : event.code === 'KeyW' || key === 'w' ? workingLink : null;
       if (link) { event.preventDefault(); navigateView(link, true); }
       return;
@@ -1362,7 +1380,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				if (rest === "") {
 					const list = await options.repl.list();
 					if (closed || res.destroyed) return;
-					respondPage(buildReplSessionsPage(list, { label: options.sourceLabel, appearanceStyle, sessionHref: name => `${REPL_PREFIX}${name}?${query}` }));
+					const missing = requestUrl.searchParams.get("missing");
+					respondPage(buildReplSessionsPage(list, { label: options.sourceLabel, appearanceStyle, sessionHref: name => `${REPL_PREFIX}${name}?${query}`, missing }));
 					return;
 				}
 				if (match[1]) {
@@ -1370,6 +1389,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					if (closed || res.destroyed) return;
 					if (pinned.pinId) { res.writeHead(302, { ...NON_HTML_SECURITY_HEADERS, Location: `${REPL_PREFIX}pin/${pinned.pinId}?${query}` }); res.end(); return; }
 					if (pinned.error === "unchecked") respondRecovery(req, res, 503, "Couldn't check the session", `tmux didn't say whether ${match[1]} is running${pinned.reason ? ` (${pinned.reason})` : ""}. Try again shortly.`);
+					// Such as the session a tab was last on, since ended: the list says so.
+					else if (pinned.error === "absent") { res.writeHead(302, { ...NON_HTML_SECURITY_HEADERS, Location: `${REPL_PREFIX}?${query}&missing=${match[1]}` }); res.end(); }
 					else respondRecovery(req, res, 404, "Session not running", `${match[1]} isn't running now. Open the REPL sessions to see which are.`);
 					return;
 				}
