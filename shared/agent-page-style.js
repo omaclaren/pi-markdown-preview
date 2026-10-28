@@ -18,7 +18,8 @@ export function previewAppearanceStyle(html, { textSize = true } = {}) {
  const head = String(html).slice(0, 65536).split(/<\/head>/i)[0];
  const match = /<style>\s*:root\s*\{([^{}]*)\}\s*(?:@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root\s*\{([^{}]*)\}\s*\})?/.exec(head);
  if (!match) return "";
- const colors = new Set(['--bg','--card','--panel-2','--panel-border','--text','--muted','--accent','--warn','--error','--link']);
+ const colors = new Set(['--bg','--card','--panel-2','--panel-border','--text','--muted','--accent','--warn','--error','--link',
+  '--syntax-keyword','--syntax-function','--syntax-variable','--syntax-string','--syntax-number','--syntax-type','--syntax-comment','--syntax-operator','--syntax-punctuation','--syntax-error']);
  const block = source => String(source || '').split(';').flatMap(declaration => {
   const colon = declaration.indexOf(':');
   const key = declaration.slice(0, colon).trim(), value = declaration.slice(colon + 1).trim();

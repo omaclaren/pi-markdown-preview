@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, link, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord } from "../shared/repl-record-reader.js";
 import { createReplLiveSource, inspectReplSession, replWindow, REPL_FIELD_DISPLAY_CHARS } from "../shared/repl-live.js";
+import { createReplHighlighter } from "../shared/repl-highlight.js";
 import { buildReplSessionPage, renderReplEntryCard } from "../shared/turn-details-page.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const ID = "0123456789abcdef0123456789abcdef";
+const spawnPandoc = () => spawnSync(process.env.PANDOC_PATH || "pandoc", ["--version"], { stdio: "ignore" }).error ? "pandoc not installed" : false;
 const PIN = { sessionName: "pi-repl-python", tmuxSessionId: "$3", tmuxSessionCreatedAt: 1793150000 };
 const entry = (n, fields = {}) => ({ id: `e${n}`, requestId: "", createdAt: 1_700_000_000_000 + n, updatedAt: 1_700_000_000_000 + n, completedAt: null, sessionName: PIN.sessionName, runtime: "python",
 	origin: "pi-repl", label: "Claude Code", mode: "raw", prose: "", code: `print(${n})`, output: `${n}\n`, status: "captured", skippedChunks: 0, codeOmittedChars: 0, proseOmittedChars: 0, outputOmittedChars: 0, ...fields });
@@ -271,7 +273,7 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	const plainPage = await (await fetch(plain.url)).text();
 	assert.doesNotMatch(plainPage, /data-watch-control="repl"/, "No REPL link without the option.");
 	const s = source();
-	const server = await createBrowserWatchServer(html, dir, { repl: s.live });
+	const server = await createBrowserWatchServer(html, dir, { repl: s.live, replHighlight: async items => new Map(items.filter(item => item.code === "print(2)").map(item => [item.key, '<div class="sourceCode" id="x"><pre class="sourceCode python"><code class="sourceCode python">HIGHLIGHTED</code></pre></div>'])) });
 	t.after(() => server.close());
 	const first = await fetch(server.url);
 	const cookie = first.headers.get("set-cookie").split(";")[0];
@@ -297,11 +299,30 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	s.tick(1_100);
 	const changed = await (await get(`${updatesHref}&version=${encodeURIComponent(version)}`)).json();
 	assert.deepEqual(changed.ids, ["e1", "e2"]);
-	assert.match(changed.cards[1].html, /print\(2\)/);
+	assert.match(changed.cards[1].html, /<div class="repl-code"><div class="sourceCode" id="x">[^]*HIGHLIGHTED/, "Highlighted code replaces the plain block…");
+	assert.match(changed.cards[0].html, /<pre class="code-input"><code>print\(1\)<\/code><\/pre>/, "…and code that couldn't be highlighted stays plain.");
+	assert.match(sessions, /aria-keyshortcuts="Alt\+ArrowLeft" aria-disabled="true"/, "No response history on the REPL pages.");
+	assert.match(sessions, /Back a page/);
 	assert.equal((await get(updatesHref.replace(/instance=[^&]+/, "instance=old"))).status, 409, "A link from an earlier run is refused.");
 	assert.equal((await get(`${replHref.split("?")[0]}pi-repl-julia?${replHref.split("?")[1]}`)).status, 404, "A session that isn't running.");
 	const noRepl = await fetch(new URL(replHref, plain.url), { headers: { cookie: (await fetch(plain.url)).headers.get("set-cookie").split(";")[0] } });
 	assert.equal(noRepl.status, 404, "A watcher without the option has no REPL page.");
+});
+
+test("REPL highlighting: code goes to Pandoc as data, highlighted once and cached", { skip: spawnPandoc() }, async () => {
+	let runs = 0;
+	const highlight = createReplHighlighter({ run: async (args, input) => { runs++; return (await import("node:child_process")).execFileSync(process.env.PANDOC_PATH || "pandoc", args, { input, encoding: "utf8" }); } });
+	const code = 'x = "```"\n# not a heading\n<div id="h1"></div>';
+	const first = await highlight([{ key: "a", code }, { key: "b", code: "print(1)" }, { key: "c", code: "" }], "python");
+	assert.deepEqual([...first.keys()], ["a", "b"]);
+	assert.match(first.get("a"), /^<div class="sourceCode" id="repl-[0-9a-f]+"><pre class="sourceCode python">/);
+	assert.doesNotMatch(first.get("a"), /<div id="h1">|<h1/, "Code text is never markup.");
+	const before = runs;
+	await highlight([{ key: "again", code }], "python");
+	assert.equal(runs, before, "A block already highlighted needs no Pandoc run.");
+	assert.equal((await highlight([{ key: "z", code: "1" }], "fortran")).size, 0, "An unknown runtime stays plain.");
+	const failing = createReplHighlighter({ run: async () => { throw new Error("no pandoc"); } });
+	assert.equal((await failing([{ key: "a", code: "1" }], "python")).size, 0, "Without Pandoc, code stays plain.");
 });
 
 test("REPL page in a browser: new entries arrive, and a changed entry updates in place", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
@@ -332,4 +353,20 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	assert.equal(cards[0].open, true, "The card is updated in place: still open.");
 	assert.match(cards[1].text, /print\('second'\)[^]*second/);
 	assert.match(await page.$eval(".repl-session-status", el => el.textContent), /Session checked .*record read/);
+	// Preview → sessions → session in this tab: Option/Alt+Left steps back through them.
+	await page.goto(server.url);
+	await Promise.all([page.waitForNavigation(), page.click('[data-watch-control="repl"]')]);
+	await Promise.all([page.waitForNavigation(), page.click(".repl-session-name a")]);
+	await page.waitForSelector(".repl-entry");
+	await Promise.all([page.waitForNavigation(), page.keyboard.down("Alt").then(() => page.keyboard.press("ArrowLeft")).then(() => page.keyboard.up("Alt"))]);
+	assert.match(await page.$eval("h1", h => h.textContent), /REPL sessions/);
+	await Promise.all([page.waitForNavigation(), page.keyboard.down("Alt").then(() => page.keyboard.press("ArrowLeft")).then(() => page.keyboard.up("Alt"))]);
+	assert.match(await page.$eval("#preview-root", root => root.textContent), /Answer/);
+	// Opened directly, with no earlier page in the tab: back goes to the sessions list.
+	const sessionUrl = replHref.replace("/__pi_markdown_preview_repl__/?", "/__pi_markdown_preview_repl__/pi-repl-python?");
+	const fresh = await browser.newPage();
+	await fresh.goto(sessionUrl);
+	await fresh.waitForSelector(".repl-entry");
+	await Promise.all([fresh.waitForNavigation(), fresh.keyboard.down("Alt").then(() => fresh.keyboard.press("ArrowLeft")).then(() => fresh.keyboard.up("Alt"))]);
+	assert.match(await fresh.$eval("h1", h => h.textContent), /REPL sessions/);
 });

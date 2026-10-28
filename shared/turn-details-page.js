@@ -252,6 +252,7 @@ const LIVE_STYLE = `.live-omitted { color:var(--muted); font-size:12px; margin:0
 .live-state { margin:0 0 18px } .live-state:empty { display:none } .live-pending { color:var(--muted); font-size:12px; font-weight:400 } .live-notice { color:var(--muted); display:block; margin-top:4px }
 .repl-sessions { list-style:none; padding:0; margin:0 0 14px } .repl-session { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; padding:10px 14px; margin:0 0 8px; border:1px solid var(--line); border-radius:10px; background:var(--panel) } .repl-session-name { font-weight:600 } .repl-session-state,.repl-session code { color:var(--muted); font-size:12px }
 .repl-status-error,.repl-status-timeout { color:var(--warning, var(--muted)) } details.repl-output > summary { padding:0; font:600 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--muted) }
+.pi-preview-repl code span.kw,.pi-preview-repl code span.cf,.pi-preview-repl code span.im { color:var(--syntax-keyword, var(--accent)) } .pi-preview-repl code span.dt { color:var(--syntax-type) } .pi-preview-repl code span.fu,.pi-preview-repl code span.bu { color:var(--syntax-function) } .pi-preview-repl code span.va,.pi-preview-repl code span.ot { color:var(--syntax-variable) } .pi-preview-repl code span.st,.pi-preview-repl code span.ss,.pi-preview-repl code span.sc,.pi-preview-repl code span.ch { color:var(--syntax-string, var(--ok, inherit)) } .pi-preview-repl code span.dv,.pi-preview-repl code span.bn,.pi-preview-repl code span.fl { color:var(--syntax-number) } .pi-preview-repl code span.co { color:var(--syntax-comment, var(--muted)); font-style:italic } .pi-preview-repl code span.op { color:var(--syntax-operator) } .pi-preview-repl code span.pp,.pi-preview-repl code span.pu { color:var(--syntax-punctuation) } .pi-preview-repl code span.er,.pi-preview-repl code span.al { color:var(--syntax-error, var(--error, inherit)) } .repl-code > .sourceCode > pre { padding:2px 0 0; margin:0 }
 .repl-new-entries { position:sticky; bottom:12px; display:block; margin:8px auto 0; padding:6px 12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; cursor:pointer } .repl-new-entries[hidden] { display:none }
 .live-newer { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50; min-height:32px; padding:6px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; box-shadow:0 2px 8px #0002; cursor:pointer } .live-newer[hidden] { display:none } .live-newer:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 @media(pointer:coarse) { .live-newer { min-height:44px } } @media print { .live-newer { display:none } }`;
@@ -384,14 +385,17 @@ const REPL_LONG_OUTPUT_LINES = 40;
 const clockTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
 const omittedNote = (what, chars) => chars > 0 ? `<p class="empty-text">${escape(`${chars.toLocaleString("en")} more characters of ${what} not shown`)}</p>` : "";
 
-/** One recorded submission. `number` is its place in the shown window; `runtimeLabel` names the session's runtime. */
-export function renderReplEntryCard(entry, number, runtimeLabel) {
+/**
+ * One recorded submission. `number` is its place in the shown window; `runtimeLabel` names the
+ * session's runtime; `highlighted` is Pandoc's HTML for its code (repl-highlight.js), if any.
+ */
+export function renderReplEntryCard(entry, number, runtimeLabel, highlighted) {
 	const status = REPL_STATUSES[entry.status] ?? entry.status;
 	const who = entry.origin === "pi-studio" && !/studio/i.test(entry.label) ? `${entry.label} (Pi Studio)` : entry.label;
 	const timeout = entry.status === "timeout" ? ' title="The sender stopped waiting; the code may have kept running."' : "";
 	const head = `<span class="number">${number}</span> ${escape(who)} · <span class="repl-status repl-status-${escape(entry.status)}"${timeout}>${escape(status)}</span>${entry.mode === "literate" ? " · note" : ""} · <time>${escape(clockTime(entry.createdAt))}</time>`;
 	const prose = entry.prose ? `<div class="task-summary">${escape(entry.prose)}</div>${omittedNote("prose", (entry.displayOmitted?.prose ?? 0) + (entry.proseOmittedChars ?? 0))}` : "";
-	const source = entry.code ? `<div class="tool-path"><span class="field-label">${escape(`${runtimeLabel} REPL`)}</span>${code(entry.code, "code-input")}</div>${omittedNote("code", (entry.displayOmitted?.code ?? 0) + (entry.codeOmittedChars ?? 0))}` : "";
+	const source = entry.code ? `<div class="tool-path"><span class="field-label">${escape(`${runtimeLabel} REPL`)}</span>${highlighted ? `<div class="repl-code">${highlighted}</div>` : code(entry.code, "code-input")}</div>${omittedNote("code", (entry.displayOmitted?.code ?? 0) + (entry.codeOmittedChars ?? 0))}` : "";
 	const lines = entry.output ? entry.output.split("\n").length : 0;
 	const outputBody = entry.output.trim() ? literalPre(entry.output) : `<p class="empty-text">${entry.status === "sending" || entry.status === "sent" ? "No output recorded yet" : "No output"}</p>`;
 	const output = entry.status === "note" && !entry.output ? "" : `<div class="tool-fields"><section class="tool-field">${lines > REPL_LONG_OUTPUT_LINES
@@ -416,14 +420,14 @@ export function replSessionStatusHtml(view, { sessionsHref = "" } = {}) {
 	return parts.join(" ");
 }
 
-/** The cards for a view's window, numbered within it. */
-export const replEntryCards = view => (view.entries ?? []).map((entry, i) => ({ id: entry.id, version: entry.version, html: renderReplEntryCard(entry, i + 1, view.label) }));
+/** The cards for a view's window, numbered within it; `highlighted` maps entry IDs to highlighted code. */
+export const replEntryCards = (view, highlighted = new Map()) => (view.entries ?? []).map((entry, i) => ({ id: entry.id, version: entry.version, html: renderReplEntryCard(entry, i + 1, view.label, highlighted.get(entry.id)) }));
 
 const REPL_INTRO = "Recent recorded submissions to this shared session, from any agent, Pi Studio or project, updating as they arrive. Code typed directly into the terminal isn't recorded here.";
 
 /** One session's page. `updatesHref` is the page's same-origin polling address. */
-export function buildReplSessionPage(view, { label = "", appearanceStyle = "", updatesHref = "", sessionsHref = "" } = {}) {
-	const cards = replEntryCards(view).map(card => card.html).join("\n");
+export function buildReplSessionPage(view, { label = "", appearanceStyle = "", updatesHref = "", sessionsHref = "", highlighted } = {}) {
+	const cards = replEntryCards(view, highlighted).map(card => card.html).join("\n");
 	return `${pageHead(`REPL · ${view.label}`, appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root" data-repl-updates="${escape(updatesHref)}" data-repl-version="${escape(view.version ?? "")}">${sessionsHref ? `<nav><a href="${escape(sessionsHref)}">← REPL sessions</a></nav>` : ""}<h1>REPL · ${escape(view.label)}</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}${escape(view.sessionName)}</p><p class="notices">${escape(REPL_INTRO)}</p><p class="live-status repl-session-status" aria-live="polite">${replSessionStatusHtml(view, { sessionsHref })}</p><div class="repl-entries">${cards || '<p class="empty-text repl-empty">No submissions recorded yet.</p>'}</div><button type="button" class="repl-new-entries" hidden>New entries below</button></main></body></html>`;
 }
 
@@ -437,5 +441,5 @@ export function buildReplSessionsPage(list, { label = "", appearanceStyle = "", 
 		const link = session.state === "unchecked" ? escape(session.label) : `<a href="${escape(sessionHref(session.sessionName))}">${escape(session.label)}</a>`;
 		return `<li class="repl-session"><span class="repl-session-name">${link}</span> <span class="repl-session-state">${escape(state)}</span> <code>${escape(session.sessionName)}</code></li>`;
 	}).join("");
-	return `${pageHead("REPL sessions", appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root"><h1>REPL sessions</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Checked ${escape(clockTime(list.checkedAt))}</p><p class="notices">pi-repl's shared sessions, which agents reach through pi-repl or agent-repl. Open one to follow its recent recorded submissions.</p>${rows ? `<ul class="repl-sessions">${rows}</ul>` : '<p class="empty-text">No shared REPL session is running.</p>'}${absent.length ? `<p class="notices">Not running: ${escape(absent.join(", "))}.</p>` : ""}</main></body></html>`;
+	return `${pageHead("REPL sessions", appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root"><h1>REPL sessions</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}Checked ${escape(clockTime(list.checkedAt))}</p><p class="notices">pi-repl's shared sessions, which agents reach through pi-repl or agent-repl, and Pi Studio through its REPL pane. Open one to follow its recent recorded submissions.</p>${rows ? `<ul class="repl-sessions">${rows}</ul>` : '<p class="empty-text">No shared REPL session is running. Sessions appear here once an agent or you start one with pi-repl, agent-repl or Pi Studio; they run in tmux.</p>'}${absent.length ? `<p class="notices">Not running: ${escape(absent.join(", "))}.</p>` : ""}</main></body></html>`;
 }

@@ -13,6 +13,7 @@ import { buildLocalPathPage } from "./local-path-page.js";
 import { performNativePathAction } from "./native-path-action.js";
 import { buildTurnDetailsPage, buildLivePage, buildReplSessionPage, buildReplSessionsPage, liveCardVersion, liveStatusHtml, renderLiveCard, replEntryCards, replSessionStatusHtml } from "./turn-details-page.js";
 import { isReplResultLabel, replSendCalls } from "./repl-calls.js";
+import { createReplHighlighter } from "./repl-highlight.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 
@@ -61,10 +62,12 @@ const shortcutKeys = (modifiers, keys) => {
 	return `<span class="pi-preview-keys" data-modifiers="${modifiers.join(" ")}" data-keys="${escapeBrowserWatchHtmlAttribute(keys.join(" "))}">${[...modifiers.map(kbd), keys.map(kbd).join(" / ")].join(" + ")}</span>`;
 };
 /** The list behind "?": modifiers, the keys that share them, and what they do. */
-function shortcutsList({ viewSwitch, followActivity }) {
+function shortcutsList({ viewSwitch, followActivity, repl = false }) {
 	const rows = [
-		[["Alt"], ["ArrowLeft", "ArrowRight"], "Previous / next"],
-		[["Alt", "Shift"], ["ArrowLeft", "ArrowRight"], "Oldest / latest in this view"],
+		...(repl ? [[["Alt"], ["ArrowLeft"], "Back a page"]] : [
+			[["Alt"], ["ArrowLeft", "ArrowRight"], "Previous / next"],
+			[["Alt", "Shift"], ["ArrowLeft", "ArrowRight"], "Oldest / latest in this view"],
+		]),
 		[["Control", "Alt"], ["L"], "Latest in Preview, from any view"],
 		...(viewSwitch ? [[["Control", "Alt"], ["P", "W"], "Preview / Working"]] : []),
 		...(followActivity ? [[["Control", "Alt"], ["A"], "Follow activity on / off"]] : []),
@@ -348,7 +351,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	const revisionPath = target => working
 		? `${TURN_PREFIX}${encodeURIComponent(target)}?identity=${encodeURIComponent(navigation.identity || "")}&instance=${encodeURIComponent(navigation.instance || "")}`
 		: `/?revision=${encodeURIComponent(target)}`;
-	const linkAttributes = (targetRevision) => targetRevision === undefined
+	const linkAttributes = (targetRevision) => targetRevision === undefined || repl
 		? 'aria-disabled="true" tabindex="-1"'
 		: `href="${escapeBrowserWatchHtmlAttribute(revisionPath(targetRevision))}" aria-disabled="false" tabindex="0"`;
 
@@ -387,7 +390,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   </div>
   <div id="pi-markdown-preview-watch-shortcuts" data-watch-control="shortcuts-panel" role="dialog" aria-labelledby="pi-markdown-preview-watch-shortcuts-title" tabindex="-1" hidden>
     <div class="pi-preview-shortcuts-head"><span id="pi-markdown-preview-watch-shortcuts-title">Keyboard shortcuts</span><button data-watch-control="shortcuts-close" type="button">Close</button></div>
-    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl), followActivity: Boolean(navigation.liveUrl) })}
+    ${shortcutsList({ viewSwitch: Boolean(navigation.turnDetailsUrl || navigation.liveUrl || navigation.replUrl), followActivity: Boolean(navigation.liveUrl), repl })}
   </div>
 </nav>`;
 
@@ -667,7 +670,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const canonicalTarget = new URL(revisionUrl(revision), window.location.href);
   if (previewLink && workingLink) { canonicalTarget.searchParams.set('identity', identity); canonicalTarget.searchParams.set('instance', instance); }
   const canonicalUrl = canonicalTarget.pathname + canonicalTarget.search + window.location.hash;
-  if (!live && window.location.pathname + window.location.search + window.location.hash !== canonicalUrl) {
+  // Live and the REPL pages keep their own URLs; other views show their revision's.
+  if (!live && !repl && window.location.pathname + window.location.search + window.location.hash !== canonicalUrl) {
     history.replaceState(null, '', canonicalUrl);
   }
   const setLink = (link, target) => {
@@ -691,16 +695,17 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       setLink(nextLink, revisions[0]);
       if (countLabel) countLabel.textContent = 'Expired';
     } else {
-      setLink(previousLink, revisions[currentIndex - 1]);
-      setLink(nextLink, revisions[currentIndex + 1]);
+      // The REPL pages have no response history to step through.
+      setLink(previousLink, repl ? undefined : revisions[currentIndex - 1]);
+      setLink(nextLink, repl ? undefined : revisions[currentIndex + 1]);
       if (countLabel) countLabel.textContent = (currentIndex + 1) + '/' + revisions.length;
     }
     const hasNewRevision = hasNewResponse && revision !== latestRevision;
-    if (!live) announceLatest(revision === latestRevision);
+    if (!live && !repl) announceLatest(revision === latestRevision);
     if (newBadge) newBadge.hidden = !hasNewRevision;
     const position = currentIndex < 0 ? 'revision no longer retained' : 'revision ' + (currentIndex + 1) + ' of ' + revisions.length;
     controlsToggle?.setAttribute('aria-label', 'Preview controls, ' + position + (hasNewRevision ? ', new revision available' : ''));
-    setLink(latestLink, revision === latestRevision ? undefined : latestRevision);
+    setLink(latestLink, repl || revision === latestRevision ? undefined : latestRevision);
     if (latestLink) {
       latestLink.textContent = hasNewResponse && revision !== latestRevision ? 'Latest (new)' : 'Latest';
       latestLink.classList.toggle('pi-markdown-preview-watch-new', hasNewResponse && revision !== latestRevision);
@@ -848,6 +853,15 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       return;
     }
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    if (repl) {
+      // The REPL pages have no response history: Option/Alt+Left goes back a page, as on a
+      // linked document, or to the page above this one when the tab has no earlier page here.
+      if (event.key !== 'ArrowLeft' || event.shiftKey) return;
+      event.preventDefault();
+      if (window.navigation?.currentEntry?.index > 0) { history.back(); return; }
+      (document.querySelector('main > nav a[href]') ?? previewLink)?.click();
+      return;
+    }
     event.preventDefault();
     if (instanceExpired) return;
     if (event.shiftKey) {
@@ -1002,6 +1016,8 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	const instance = randomBytes(8).toString("hex");
 	// Deliberately new on each server start, unlike remembered watch credentials.
 	const nativeActionKey = randomBytes(32).toString("base64url");
+	// One highlighter per watcher, so a REPL page's code is highlighted once and cached.
+	const replHighlight = options.repl ? (options.replHighlight ?? createReplHighlighter()) : undefined;
 	const nativePathAction = options.nativePathAction ?? performNativePathAction;
 	let nativeActionBusy = false, nextNativeActionAt = 0;
 	const expiredHint = typeof options.expiredHint === "string" ? options.expiredHint.trim() : "Re-run /preview-browser --watch.";
@@ -1310,6 +1326,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			const latest = documents[documents.length - 1];
 			const latestWorking = documents.findLast(d => d.turnDetails);
 			const appearanceStyle = previewAppearanceStyle(latest.html);
+			const highlight = async view => view.entries?.length ? replHighlight(view.entries.map(entry => ({ key: entry.id, code: entry.code })), view.runtime).catch(() => new Map()) : new Map();
 			const respondPage = html => {
 				res.writeHead(200, turnSecurityHeaders(scriptNonce));
 				res.end(prepareBrowserWatchHtml(html, {
@@ -1342,15 +1359,17 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					else respondRecovery(req, res, 404, "REPL view expired", "This view of a REPL session is no longer kept. Open the REPL sessions to follow it again.");
 					return;
 				}
+				const highlighted = view.unchanged ? new Map() : await highlight(view);
+				if (closed || res.destroyed) return;
 				if (match[3]) {
 					respondJson(res, 200, {
 						version: view.version, unchanged: view.unchanged === true, resync: view.resync === true, ended: view.ended === true,
 						statusHtml: replSessionStatusHtml(view, { sessionsHref }),
-						...(view.unchanged ? {} : { ids: view.entries.map(entry => entry.id), cards: replEntryCards(view) }),
+						...(view.unchanged ? {} : { ids: view.entries.map(entry => entry.id), cards: replEntryCards(view, highlighted) }),
 					});
 					return;
 				}
-				respondPage(buildReplSessionPage(view, { label: options.sourceLabel, appearanceStyle, updatesHref: `${REPL_PREFIX}pin/${match[2]}/updates?${query}`, sessionsHref }));
+				respondPage(buildReplSessionPage(view, { label: options.sourceLabel, appearanceStyle, updatesHref: `${REPL_PREFIX}pin/${match[2]}/updates?${query}`, sessionsHref, highlighted }));
 			} catch {
 				if (!closed && !res.destroyed) {
 					if (match?.[3]) respondJson(res, 503, { error: "unavailable" });

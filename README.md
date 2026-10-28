@@ -63,7 +63,7 @@ Working shows recorded prompts and tool output to anyone with the tab's link. Fo
 | `/preview --pick --browser` | Choose a response and open it in the browser |
 | `/preview-browser --live` | Browser tab that follows the session, with Working and [Live](#live-and-working) |
 | `/preview-browser --working` | The same without Live |
-| `/preview-browser --repl` | Add the [REPL page](#repl-page): the shared REPL sessions' recent recorded submissions |
+| `/preview-browser --repl` | Add the [REPL page](#shared-repl-sessions-optional): the shared REPL sessions' recent recorded submissions |
 | `/preview-browser --watch` (`-w`) | Browser tab that updates after each response, without Working |
 | `/preview-browser --watch <path>` | Browser tab that follows a file |
 | `/preview-browser --watch --history 5` | Start with up to 5 earlier responses (default 10, 0–20) |
@@ -91,9 +91,11 @@ With `--live` and **Follow activity** on, the page moves to Working when a turn 
 
 Some content may be shortened or left out; [details](docs/details.md#working) lists what Working reads and its limits.
 
-### REPL page
+### Shared REPL sessions (optional)
 
-`/preview-browser --repl` adds a **REPL** page, beside Preview and Working, for working alongside agents in a shared [pi-repl](https://github.com/omaclaren/pi-repl) or agent-repl session. It lists pi-repl's shared sessions (`pi-repl-python`, `pi-repl-julia`, …). Open one to follow its recent recorded submissions as they arrive: who sent each one (the agent's name, Pi or Pi Studio), its status and time, the code and the output. It updates without waiting for a response. Code typed directly into the terminal isn't in the record, so it doesn't appear here.
+This is optional and off unless you ask for it. It works with [pi-repl](https://github.com/omaclaren/pi-repl), agent-repl and Pi Studio, whose shared REPL sessions run in tmux; without them, leave it off.
+
+`/preview-browser --repl` adds a **REPL** page, beside Preview and Working, for working alongside agents in a shared [pi-repl](https://github.com/omaclaren/pi-repl) or agent-repl session. It lists pi-repl's shared sessions (`pi-repl-python`, `pi-repl-julia`, …). Open one to follow its recent recorded submissions as they arrive: who sent each one (the agent's name, Pi or Pi Studio), its status and time, the code (highlighted) and the output. **Option/Alt+Left** goes back a page. It updates without waiting for a response. Code typed directly into the terminal isn't in the record, so it doesn't appear here.
 
 The page only reads: it never runs or sends code, and inspects tmux without changing anything. It shows one session's lifetime; if the session ends or a new one starts with the same name, it says so and doesn't follow the new one.
 
