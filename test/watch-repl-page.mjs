@@ -492,7 +492,7 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	}
 	assert.match(JSON.parse(heavy).noticesHtml, /older entr(y isn|ies aren)&#39;t shown here/);
 	assert.match(sessions, /aria-keyshortcuts="Alt\+ArrowLeft" aria-disabled="true"/, "No response history on the REPL pages.");
-	assert.match(sessions, /Back a page/);
+	assert.match(sessions, /Up: REPL sessions, then Preview/);
 	assert.equal((await get(updatesHref.replace(/instance=[^&]+/, "instance=old"))).status, 409, "A link from an earlier run is refused.");
 	// A session that isn't running (such as one a tab was last on, since ended) goes to the list, which says so.
 	const notRunning = await get(`${replHref.split("?")[0]}pi-repl-julia?${replHref.split("?")[1]}`);
@@ -673,22 +673,31 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	assert.equal(cards[0].open, true, "The card is updated in place: still open.");
 	assert.match(cards[1].text, /print\('second'\)[^]*second/);
 	assert.match(await page.$eval(".repl-session-status", el => el.textContent), /Session checked .*record read/);
-	// Preview → sessions → session in a new tab: Option/Alt+Left steps back through them.
+	// Option/Alt+Left goes up: from a session to the sessions, then to Preview.
+	const altLeft = target => Promise.all([target.waitForNavigation(), target.keyboard.down("Alt").then(() => target.keyboard.press("ArrowLeft")).then(() => target.keyboard.up("Alt"))]);
 	const tab = await browser.newPage();
 	await tab.goto(server.url);
 	await Promise.all([tab.waitForNavigation(), tab.click('[data-watch-control="repl"]')]);
 	await Promise.all([tab.waitForNavigation(), tab.click(".repl-session-name a")]);
 	await tab.waitForSelector(".repl-entry");
-	await Promise.all([tab.waitForNavigation(), tab.keyboard.down("Alt").then(() => tab.keyboard.press("ArrowLeft")).then(() => tab.keyboard.up("Alt"))]);
+	await altLeft(tab);
 	assert.match(await tab.$eval("h1", h => h.textContent), /REPL sessions/);
-	await Promise.all([tab.waitForNavigation(), tab.keyboard.down("Alt").then(() => tab.keyboard.press("ArrowLeft")).then(() => tab.keyboard.up("Alt"))]);
+	await altLeft(tab);
 	assert.match(await tab.$eval("#preview-root", root => root.textContent), /Answer/);
-	// Opened directly, with no earlier page in the tab: back goes to the sessions list.
+	// Whatever path the tab took: here Preview is the page before the session, but up is still the sessions.
+	await Promise.all([tab.waitForNavigation(), tab.click('[data-watch-control="repl"]')]);
+	await Promise.all([tab.waitForNavigation(), tab.click(".repl-session-name a")]);
+	await Promise.all([tab.waitForNavigation(), tab.click('[data-watch-control="preview"]')]);
+	await Promise.all([tab.waitForNavigation(), tab.click('[data-watch-control="repl"]')]);
+	assert.match(await tab.$eval("h1", h => h.textContent), /REPL · Python/);
+	await altLeft(tab);
+	assert.match(await tab.$eval("h1", h => h.textContent), /REPL sessions/);
+	// Opened directly, with no earlier page in the tab: up is the sessions too.
 	const sessionUrl = replHref.replace("/__pi_markdown_preview_repl__/?", "/__pi_markdown_preview_repl__/pi-repl-python?");
 	const fresh = await browser.newPage();
 	await fresh.goto(sessionUrl);
 	await fresh.waitForSelector(".repl-entry");
-	await Promise.all([fresh.waitForNavigation(), fresh.keyboard.down("Alt").then(() => fresh.keyboard.press("ArrowLeft")).then(() => fresh.keyboard.up("Alt"))]);
+	await altLeft(fresh);
 	assert.match(await fresh.$eval("h1", h => h.textContent), /REPL sessions/);
 });
 

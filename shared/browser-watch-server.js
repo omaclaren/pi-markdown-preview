@@ -64,7 +64,7 @@ const shortcutKeys = (modifiers, keys) => {
 /** The list behind "?": modifiers, the keys that share them, and what they do. */
 function shortcutsList({ viewSwitch, followActivity, repl = false, replLink = false }) {
 	const rows = [
-		...(repl ? [[["Alt"], ["ArrowLeft"], "Back a page"]] : [
+		...(repl ? [[["Alt"], ["ArrowLeft"], "Up: REPL sessions, then Preview"]] : [
 			[["Alt"], ["ArrowLeft", "ArrowRight"], "Previous / next"],
 			[["Alt", "Shift"], ["ArrowLeft", "ArrowRight"], "Oldest / latest in this view"],
 		]),
@@ -881,11 +881,10 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     }
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     if (repl) {
-      // The REPL pages have no response history: Option/Alt+Left goes back a page, as on a
-      // linked document, or to the page above this one when the tab has no earlier page here.
+      // The REPL pages have no response history: Option/Alt+Left goes up, from a session to the
+      // sessions and from there to Preview, whatever path the tab took (Back is the browser's).
       if (event.key !== 'ArrowLeft' || event.shiftKey) return;
       event.preventDefault();
-      if (window.navigation?.currentEntry?.index > 0) { history.back(); return; }
       (document.querySelector('main > nav a[href]') ?? previewLink)?.click();
       return;
     }
