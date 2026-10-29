@@ -427,7 +427,8 @@ test("REPL page: record text stays inert, and the page says what it shows", () =
 	assert.match(card, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 	assert.match(card, /title="The sender stopped waiting; the code may have kept running\."/);
 	assert.match(renderReplEntryCard({ ...entry(1, { status: "sending", output: "" }), version: "v" }, 1, "Python"),
-		/<span class="repl-status repl-status-sending" title="Written before the code was sent; not proof that it&#39;s still running or that its sender is still waiting\.">sending<\/span>/, "A pending entry says what it can't promise.");
+		/<span class="repl-status repl-status-sending" title="Written before the code was sent; not proof that it&#39;s still running or that its sender is still waiting\.">pending<\/span>/, "A pending entry says what it can't promise.");
+	assert.match(renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python"), /<span class="repl-status repl-status-captured">done<\/span>/, "A captured entry is shown as done.");
 	const long = renderReplEntryCard({ ...entry(1, { output: Array(60).fill("line").join("\n") }), version: "v" }, 1, "Python");
 	assert.match(long, /<details class="repl-output"><summary>Output · 60 lines<\/summary>/);
 	assert.match(long, /<label class="output-wrap"><input type="checkbox" aria-label="Wrap output lines">Wrap lines<\/label>/);
@@ -677,7 +678,7 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	await page.waitForFunction(() => document.querySelectorAll(".repl-entry").length === 2, { timeout: 10_000 });
 	const cards = await page.$$eval(".repl-entry", list => list.map(card => ({ id: card.dataset.entryId, open: card.open, text: card.textContent, marker: card.querySelector("summary")?.dataset.marker ?? null })));
 	assert.deepEqual(cards.map(card => card.id), ["e1", "e2"]);
-	assert.match(cards[0].text, /captured/);
+	assert.match(cards[0].text, /· done ·/);
 	assert.doesNotMatch(cards[0].text, /No output recorded yet/);
 	assert.equal(cards[0].open, true, "The card is updated in place: still open.");
 	assert.match(cards[1].text, /print\('second'\)[^]*second/);

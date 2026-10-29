@@ -389,7 +389,9 @@ const REPL_STATES = {
 	unchecked: "Couldn't check the session",
 	absent: "Not running",
 };
-const REPL_STATUSES = { sending: "sending", sent: "sent", captured: "captured", timeout: "timed out", error: "error", note: "note" };
+// The record's statuses are pi-repl's; these are the words shown for them. `sending` lasts until the code is done
+// (pi-repl 0.11.2's settle), and `captured` means it finished and its output was recorded.
+const REPL_STATUSES = { sending: "pending", sent: "sent", captured: "done", timeout: "timed out", error: "error", note: "note" };
 // What a status doesn't say, as its tooltip. A send waiting for its code (pi-repl 0.11.2's settle) stays `sending` until it's done.
 const REPL_STATUS_TITLES = {
 	sending: "Written before the code was sent; not proof that it's still running or that its sender is still waiting.",
