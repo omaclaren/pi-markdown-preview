@@ -405,6 +405,21 @@ const REPL_ENVELOPE_BYTES = 16_384;
 const clockTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
 const omittedNote = (what, chars) => chars > 0 ? `<p class="empty-text">${escape(`${chars.toLocaleString("en")} more characters of ${what} not shown`)}</p>` : "";
 
+// A person's request-ID prefixes, with the origin each belongs to and how the person sent it.
+const REPL_PERSON_ROUTES = [["pi:send:", "pi-repl", "Pi"], ["pi:env:", "pi-repl", "Pi"], ["cli:send:", "pi-repl", "terminal"], ["cli:env:", "pi-repl", "terminal"],
+	["studio:send:", "pi-studio", "Pi Studio"], ["studio:note:", "pi-studio", "Pi Studio"]];
+/**
+ * Who sent an entry (design-person-sends.md, P3). An agent's entry, by its label. A person's,
+ * by the name in its label when a person's prefix vouches for it, with how they sent it.
+ * Otherwise `User`: older labels name a command (`/repl send`) or describe a selection, not a person.
+ */
+function replEntryWho(entry) {
+	if (entry.mode === "agent") return entry.origin === "pi-studio" && !/studio/i.test(entry.label) ? `${entry.label} (Pi Studio)` : entry.label;
+	const route = REPL_PERSON_ROUTES.find(([prefix, origin]) => entry.origin === origin && entry.requestId?.startsWith(prefix));
+	if (route) return `${entry.label} · via ${route[2]}`;
+	return entry.origin === "pi-studio" ? "User · via Pi Studio" : "User";
+}
+
 function replCode(code, highlighted) {
 	const lines = code.split("\n");
 	// Pandoc's line spans have IDs ending -1, -2, …; code text can't contain `<span id="`, as Pandoc escapes `<`.
@@ -418,7 +433,7 @@ function replCode(code, highlighted) {
  */
 export function renderReplEntryCard(entry, number, runtimeLabel, highlighted) {
 	const status = REPL_STATUSES[entry.status] ?? entry.status;
-	const who = entry.origin === "pi-studio" && !/studio/i.test(entry.label) ? `${entry.label} (Pi Studio)` : entry.label;
+	const who = replEntryWho(entry);
 	const title = REPL_STATUS_TITLES[entry.status] ? ` title="${escape(REPL_STATUS_TITLES[entry.status])}"` : "";
 	const head = `<span class="number">${number}</span> ${escape(who)} · <span class="repl-status repl-status-${escape(entry.status)}"${title}>${escape(status)}</span>${entry.mode === "literate" ? " · note" : ""} · <time>${escape(clockTime(entry.createdAt))}</time>`;
 	const prose = entry.prose ? `<div class="task-summary">${escape(entry.prose)}</div>${omittedNote("prose", (entry.displayOmitted?.prose ?? 0) + (entry.proseOmittedChars ?? 0))}` : "";

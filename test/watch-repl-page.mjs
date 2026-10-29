@@ -444,6 +444,22 @@ test("REPL page: record text stays inert, and the page says what it shows", () =
 	assert.match(page, /No submissions recorded yet\./);
 });
 
+test("REPL page: who sent each entry, an agent by its label and a person by a name a prefix vouches for", () => {
+	const who = fields => renderReplEntryCard({ ...entry(1, fields), version: "v" }, 1, "Python").match(/<span class="number">1<\/span> (.*?) · <span class="repl-status/)[1];
+	assert.equal(who({ mode: "agent", label: "Claude Code", requestId: "tool:mcp-1" }), "Claude Code");
+	assert.equal(who({ mode: "agent", origin: "pi-studio", label: "Pi", requestId: "tool:1" }), "Pi (Pi Studio)", "Agents keep their labels, as before.");
+	assert.equal(who({ mode: "raw", label: "/repl send", requestId: "command:send:1" }), "User", "An older person's entry names a command, not a person.");
+	assert.equal(who({ mode: "raw", origin: "pi-studio", label: "selection", requestId: "r1" }), "User · via Pi Studio", "Studio's older labels describe the selection.");
+	assert.equal(who({ mode: "raw", label: "Sam", requestId: "pi:send:1" }), "Sam · via Pi");
+	assert.equal(who({ mode: "raw", label: "Sam", requestId: "cli:env:1" }), "Sam · via terminal");
+	assert.equal(who({ mode: "literate", origin: "pi-studio", label: "Ana", requestId: "studio:note:1" }), "Ana · via Pi Studio");
+	assert.equal(who({ mode: "raw", origin: "pi-studio", label: "Ana", requestId: "studio:send:1" }), "Ana · via Pi Studio");
+	assert.equal(who({ mode: "raw", label: "Ana", requestId: "studio:send:1" }), "User", "A prefix from another client's route vouches for nothing.");
+	assert.equal(who({ mode: "raw", label: "Sam" }), "User");
+	assert.equal(who({ mode: "raw", label: "<b>Sam</b>", requestId: "cli:send:1" }), "&lt;b&gt;Sam&lt;/b&gt; · via terminal");
+	assert.notEqual(replEntryVersion({ ...entry(1), requestId: "command:send:1" }), replEntryVersion({ ...entry(1), requestId: "cli:send:1" }), "A change of route changes the card.");
+});
+
 test("REPL page in the watcher: only with the option, behind the cookie, linked from Preview", async t => {
 	const dir = await mkdtemp(join(tmpdir(), "repl-page-server-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));

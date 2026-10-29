@@ -163,7 +163,7 @@ export function validateReplRecord(record, recordId, pin) {
 
 /** A version of everything an entry's card shows: its update time alone can stay put while status and output change. */
 export function replEntryVersion(entry) {
-	const shown = [entry.id, entry.status, entry.origin, entry.label, entry.mode, entry.runtime ?? "", entry.createdAt, entry.completedAt ?? "",
+	const shown = [entry.id, entry.status, entry.origin, entry.label, entry.mode, entry.requestId ?? "", entry.runtime ?? "", entry.createdAt, entry.completedAt ?? "",
 		entry.code, entry.output, entry.prose ?? "", entry.codeOmittedChars ?? 0, entry.outputOmittedChars ?? 0, entry.proseOmittedChars ?? 0, entry.skippedChunks ?? 0];
 	return createHash("sha256").update(JSON.stringify(shown)).digest("hex").slice(0, 16);
 }
