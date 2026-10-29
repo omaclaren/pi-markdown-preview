@@ -33,13 +33,16 @@
     for (let i = 0; i < selection.rangeCount; i++) if (selection.getRangeAt(i).intersectsNode(card)) return true;
     return false;
    };
-   // Replace content inside the existing card: its open state, and its output fold's, stay.
+   // Replace content inside the existing card: its open state, its output fold's and its wrap state stay.
    const replaceContent = (card, fresh, next) => {
     const fold = card.querySelector('details.repl-output')?.open;
+    const wrap = card.querySelector('.output-wrap input')?.checked;
     card.replaceChildren(...Array.from(fresh.childNodes));
     card.setAttribute('data-entry-version', next);
     const freshFold = card.querySelector('details.repl-output');
     if (freshFold && fold !== undefined) freshFold.open = fold;
+    const input = card.querySelector('.output-wrap input');
+    if (input && wrap !== undefined) input.checked = wrap;
    };
    const renumber = () => {
     const position = new Map(order.map((id, i) => [id, String(i + 1)]));

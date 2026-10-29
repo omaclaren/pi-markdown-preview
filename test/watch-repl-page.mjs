@@ -428,6 +428,8 @@ test("REPL page: record text stays inert, and the page says what it shows", () =
 	assert.match(card, /title="The sender stopped waiting; the code may have kept running\."/);
 	const long = renderReplEntryCard({ ...entry(1, { output: Array(60).fill("line").join("\n") }), version: "v" }, 1, "Python");
 	assert.match(long, /<details class="repl-output"><summary>Output · 60 lines<\/summary>/);
+	assert.match(long, /<label class="output-wrap"><input type="checkbox" aria-label="Wrap output lines">Wrap lines<\/label>/);
+	assert.doesNotMatch(renderReplEntryCard({ ...entry(1, { status: "sending", output: "" }), version: "v" }, 1, "Python"), /output-wrap/, "Nothing to wrap, no Wrap lines.");
 	const page = buildReplSessionPage({ sessionName: "pi-repl-python", label: "Python", state: "running", record: "v1", checkedAt: 1, readAt: 1, now: 2, version: "g:1", entries: [] }, { updatesHref: "/u", sessionsHref: "/s" });
 	assert.match(page, /Recent recorded submissions/);
 	assert.match(page, /Code typed directly into the terminal isn&#39;t recorded here\./);
@@ -673,6 +675,21 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	assert.equal(cards[0].open, true, "The card is updated in place: still open.");
 	assert.match(cards[1].text, /print\('second'\)[^]*second/);
 	assert.match(await page.$eval(".repl-session-status", el => el.textContent), /Session checked .*record read/);
+	// Code wraps; output is terminal text, wrapped only with Wrap lines, which an update keeps.
+	const words = Array.from({ length: 80 }, (_, i) => `word${i}`).join(" ");
+	s.set(record([entry(1), entry(2, { code: `print("${words}")`, output: `${words}\n` })]));
+	s.tick(1_100);
+	await page.waitForFunction(() => /word79/.test(document.querySelector('.repl-entry[data-entry-id="e2"]')?.textContent ?? ""), { timeout: 10_000 });
+	const overflows = () => page.$eval('.repl-entry[data-entry-id="e2"]', card => ["tool-path", "tool-field"].map(part => { const pre = card.querySelector(`.${part} pre`); return pre.scrollWidth > pre.clientWidth; }));
+	assert.deepEqual(await overflows(), [false, true], "The code wraps; the output scrolls.");
+	await page.click('.repl-entry[data-entry-id="e2"] .output-wrap input');
+	assert.deepEqual(await overflows(), [false, false], "With Wrap lines, the output wraps too.");
+	await page.$eval('.repl-entry[data-entry-id="e2"] .output-wrap input', input => input.blur());
+	s.set(record([entry(1), entry(2, { code: `print("${words}")`, output: `${words} again\n` })]));
+	s.tick(1_100);
+	await page.waitForFunction(() => /again/.test(document.querySelector('.repl-entry[data-entry-id="e2"]')?.textContent ?? ""), { timeout: 10_000 });
+	assert.equal(await page.$eval('.repl-entry[data-entry-id="e2"] .output-wrap input', input => input.checked), true, "An update keeps Wrap lines.");
+	assert.deepEqual(await overflows(), [false, false]);
 	// Option/Alt+Left goes up: from a session to the sessions, then to Preview.
 	const altLeft = target => Promise.all([target.waitForNavigation(), target.keyboard.down("Alt").then(() => target.keyboard.press("ArrowLeft")).then(() => target.keyboard.up("Alt"))]);
 	const tab = await browser.newPage();
