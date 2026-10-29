@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 
 // pi-repl runtimes to Pandoc's (skylighting's) language names.
-const LANGUAGES = { python: "python", ipython: "python", julia: "julia", r: "r", ghci: "haskell", clojure: "clojure", ruby: "ruby", java: "java", octave: "octave", matlab: "matlab", gnuplot: "gnuplot", cpp: "cpp" };
+const LANGUAGES = { python: "python", ipython: "python", julia: "julia", r: "r", ghci: "haskell", clojure: "clojure", ruby: "ruby", java: "java", octave: "octave", matlab: "matlab", gnuplot: "gnuplot", cpp: "cpp", lfortran: "fortranfree" };
 const CACHE_ENTRIES = 400, CACHE_CHARS = 8_000_000, QUEUE_RUNS = 4, QUEUE_CHARS = 2_000_000, WAITING = 32, TIMEOUT_MS = 5_000;
 
 // Killed at TIMEOUT_MS: SIGKILL, since a process can ignore the default SIGTERM and hold the queue.

@@ -9,7 +9,7 @@ import { readReplRecord, replEntryVersion, ReplRecordError, statReplRecord, repl
 /** pi-repl's shared sessions, one per runtime (Python and IPython share one). */
 export const REPL_SESSIONS = Object.freeze([
 	["python", "Python"], ["julia", "Julia"], ["r", "R"], ["ghci", "Haskell"], ["clojure", "Clojure"], ["ruby", "Ruby"],
-	["java", "Java"], ["octave", "Octave"], ["matlab", "MATLAB"], ["gnuplot", "gnuplot"], ["cpp", "C++"],
+	["java", "Java"], ["octave", "Octave"], ["matlab", "MATLAB"], ["gnuplot", "gnuplot"], ["cpp", "C++"], ["lfortran", "LFortran"],
 ].map(([runtime, label]) => Object.freeze({ runtime, label, sessionName: `pi-repl-${runtime}` })));
 
 const SESSION_BY_NAME = new Map(REPL_SESSIONS.map(session => [session.sessionName, session]));

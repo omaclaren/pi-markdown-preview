@@ -390,11 +390,12 @@ const REPL_STATES = {
 	absent: "Not running",
 };
 // The record's statuses are pi-repl's; these are the words shown for them. `sending` lasts until the code is done
-// (pi-repl 0.11.2's settle), and `captured` means it finished and its output was recorded.
-const REPL_STATUSES = { sending: "pending", sent: "sent", captured: "done", timeout: "timed out", error: "error", note: "note" };
+// (pi-repl 0.11.2's settle), as `sent` does for LFortran and Pi Studio; `captured` means it finished and its output was recorded.
+const REPL_STATUSES = { sending: "pending", sent: "pending", captured: "done", timeout: "timed out", error: "error", note: "note" };
 // What a status doesn't say, as its tooltip. A send waiting for its code (pi-repl 0.11.2's settle) stays `sending` until it's done.
 const REPL_STATUS_TITLES = {
 	sending: "Written before the code was sent; not proof that it's still running or that its sender is still waiting.",
+	sent: "Sent, with no result recorded yet; not proof that it's still running or that its sender is still waiting.",
 	timeout: "The sender stopped waiting; the code may have kept running.",
 };
 const REPL_LONG_OUTPUT_LINES = 40;

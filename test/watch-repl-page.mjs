@@ -180,7 +180,8 @@ function source(overrides = {}) {
 test("REPL source: lists the shared sessions, pins one lifetime, and sends its window only when it changed", async () => {
 	const s = source();
 	const list = await s.live.list();
-	assert.equal(list.sessions.length, 11);
+	assert.equal(list.sessions.length, 12);
+	assert.deepEqual(list.sessions.at(-1), { sessionName: "pi-repl-lfortran", runtime: "lfortran", label: "LFortran", state: "absent", reason: undefined, record: "none" }, "LFortran's shared session is listed too.");
 	assert.deepEqual(list.sessions.filter(x => x.state !== "absent").map(x => [x.sessionName, x.state, x.record]), [["pi-repl-python", "running", "v1"]]);
 	assert.equal((await s.live.pinSession("pi-repl-julia")).error, "absent");
 	assert.equal((await s.live.pinSession("not-a-session")).error, "unknown");
@@ -429,6 +430,8 @@ test("REPL page: record text stays inert, and the page says what it shows", () =
 	assert.match(renderReplEntryCard({ ...entry(1, { status: "sending", output: "" }), version: "v" }, 1, "Python"),
 		/<span class="repl-status repl-status-sending" title="Written before the code was sent; not proof that it&#39;s still running or that its sender is still waiting\.">pending<\/span>/, "A pending entry says what it can't promise.");
 	assert.match(renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python"), /<span class="repl-status repl-status-captured">done<\/span>/, "A captured entry is shown as done.");
+	assert.match(renderReplEntryCard({ ...entry(1, { status: "sent", output: "" }), version: "v" }, 1, "LFortran"),
+		/<span class="repl-status repl-status-sent" title="Sent, with no result recorded yet; not proof that it&#39;s still running or that its sender is still waiting\.">pending<\/span>[^]*No output recorded yet/, "LFortran's and Studio's sent is pending too.");
 	const long = renderReplEntryCard({ ...entry(1, { output: Array(60).fill("line").join("\n") }), version: "v" }, 1, "Python");
 	assert.match(long, /<details class="repl-output"><summary>Output · 60 lines<\/summary>/);
 	assert.match(long, /<label class="output-wrap"><input type="checkbox" aria-label="Wrap output lines">Wrap lines<\/label>/);
@@ -566,6 +569,7 @@ test("REPL highlighting: code goes to Pandoc as data, highlighted once and cache
 	await highlight([{ key: "again", code }], "python");
 	assert.equal(runs, before, "A block already highlighted needs no Pandoc run.");
 	assert.equal((await highlight([{ key: "z", code: "1" }], "fortran")).size, 0, "An unknown runtime stays plain.");
+	assert.match((await highlight([{ key: "f", code: "print *, 'hi'" }], "lfortran")).get("f"), /<pre class="sourceCode fortranfree">/, "LFortran's code is free-form Fortran.");
 	const failing = createReplHighlighter({ run: async () => { throw new Error("no pandoc"); } });
 	assert.equal((await failing([{ key: "a", code: "1" }], "python")).size, 0, "Without Pandoc, code stays plain.");
 });
