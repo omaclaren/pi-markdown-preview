@@ -146,7 +146,7 @@ flowchart LR
 | `o` | Open in the browser |
 | `Esc` | Close |
 
-Code blocks start unwrapped so diagrams and aligned columns keep their layout. In the browser, **Wrap all code** (or **Wrap** in the counter menu) sets every block, and each block has its own **Wrap** and **Copy** buttons. PDF and PNG exports always use the unwrapped layout.
+Code blocks start unwrapped so diagrams and aligned columns keep their layout. In the browser, **Wrap all code** (or **Wrap** in the counter menu) sets every block, and each block has its own **Wrap** and **Copy** buttons. A wrapped line continues 4 columns past its own indent, so it doesn't look like a line of its own. PDF and PNG exports always use the unwrapped layout.
 
 ### File export with `preview_export`
 

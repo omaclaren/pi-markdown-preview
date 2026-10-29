@@ -103,10 +103,11 @@ test("REPL results: output is split only when the recorded text is exactly pi-re
 test("Working: a REPL call shows its runtime and code; its result shows only the output", () => {
  const details = claudeTurn([
   { input: { code: "print('<b>hi</b>')", target: "python", echoMode: "off" }, result: sent("print('<b>hi</b>')", "<b>hi</b>\n", pane("typed directly")) },
-  { input: { code: "2 + 2", target: "julia" }, result: "Session not running", error: true },
+  { input: { code: "for i in 1:3\n    println(i)\nend", target: "julia" }, result: "Session not running", error: true },
  ]);
  const page = buildTurnDetailsPage({ ...details, sourceAgent: "claude" }, "/");
- assert.match(page, /<div class="tool-path"><span class="field-label">Python REPL<\/span><pre class="code-input"><code>print\(&#39;&lt;b&gt;hi&lt;\/b&gt;&#39;\)<\/code><\/pre><\/div>/, "The code sits under its label, as a file path does.");
+ assert.match(page, /<div class="tool-path"><span class="field-label">Python REPL<\/span><pre class="code-input"><code><span>print\(&#39;&lt;b&gt;hi&lt;\/b&gt;&#39;\)<\/span><\/code><\/pre><\/div>/, "The code sits under its label, as a file path does.");
+ assert.match(page, /<code><span>for i in 1:3<\/span>\n<span style="--indent:4ch">    println\(i\)<\/span>\n<span>end<\/span><\/code>/, "Each line carries its indent, so a wrapped line continues past it.");
  assert.match(page, /<dt>echoMode<\/dt><dd><pre>off<\/pre><\/dd>/);
  assert.doesNotMatch(page, /<dt>target<\/dt>/, "A recognised target is the heading, not an option.");
  assert.match(page, /<div class="repl-activity"><p>Pane text since this agent last saw this pane[^<]*\):<\/p><pre><span>typed directly<\/span><\/pre><\/div><section class="tool-field"><h3>Output · for 2<\/h3><pre><span>&lt;b&gt;hi&lt;\/b&gt;\n<\/span><\/pre><\/section>/, "Pane text is terminal text under the report's heading; the output names its call's card.");

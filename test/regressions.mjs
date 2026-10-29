@@ -449,8 +449,8 @@ assert.match(
 );
 assert.match(
 	src,
-	/await renderMermaid\(\);\s*applyPreviewAnnotationPlaceholders\(root\);\s*decorateDiffCodeBlocks\(root\);\s*await renderAnnotationMarkerMath\(root\);\s*await renderMathFallback\(root\);/s,
-	"Browser preview should apply preview placeholders, decorate diffs, render annotation math, then run general math fallback.",
+	/await renderMermaid\(\);\s*applyPreviewAnnotationPlaceholders\(root\);\s*decorateDiffCodeBlocks\(root\);\s*decorateCodeLineIndents\(root\);\s*await renderAnnotationMarkerMath\(root\);\s*await renderMathFallback\(root\);/s,
+	"Browser preview should apply preview placeholders, decorate diffs, mark code lines' indents, render annotation math, then run general math fallback.",
 );
 
 const annotationFixture = await readFile(new URL("./annotation-markdownish.md", import.meta.url), "utf8");
@@ -1477,7 +1477,7 @@ async function assertBrowserWatchSymlinkResourceRoot() {
 await assertBrowserWatchServer();
 await assertBrowserWatchSymlinkResourceRoot();
 
-assert.match(src, /const RENDER_VERSION = "v37";/, "Framed \\boxed math should invalidate older preview caches.");
+assert.match(src, /const RENDER_VERSION = "v38";/, "Wrapped code lines' hanging indent should invalidate older preview caches.");
 assert.match(src, /const MERMAID_BROWSER_VERSION = "11\.16\.0";/, "Browser Mermaid version should match the CLI validator.");
 assert.match(src, /const PDFJS_BROWSER_VERSION = "6\.3\.289";/, "Browser PDF rendering should pin an exact PDF.js release.");
 assert.ok(

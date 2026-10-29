@@ -39,7 +39,7 @@ try {
 	const fixture = [
 		"Prose with a long token: " + "G".repeat(180) + " and more prose.", "",
 		"```", "export fence line 1", "    export fence line 2 with spaces", "\texport fence line 3 with a tab",
-		"export fence line 4 " + "H".repeat(120), "```", "",
+		"export fence line 4 " + "H".repeat(120), "    export fence line 5 " + "L".repeat(120), "```", "",
 		"```ts", 'const exportHighlighted = "' + "I".repeat(120) + '";', "```", "",
 		"```diff", "- export removed " + "J".repeat(120), "+ export added " + "K".repeat(120), "```", "",
 		"```text", "+----------------------+     +----------------------+",
@@ -47,7 +47,7 @@ try {
 		"+----------------------+     +----------------------+", "```",
 	].join("\n");
 	const expectedText = [
-		"export fence line 1\n    export fence line 2 with spaces\n    export fence line 3 with a tab\nexport fence line 4 " + "H".repeat(120),
+		"export fence line 1\n    export fence line 2 with spaces\n    export fence line 3 with a tab\nexport fence line 4 " + "H".repeat(120) + "\n    export fence line 5 " + "L".repeat(120),
 		'const exportHighlighted = "' + "I".repeat(120) + '";',
 		"- export removed " + "J".repeat(120) + "\n+ export added " + "K".repeat(120),
 		"+----------------------+     +----------------------+\n|       Producer       | --> |       Consumer       |\n+----------------------+     +----------------------+",
@@ -94,6 +94,23 @@ try {
 		assert.ok(value.blocks.every(block => block.buttons === 0), "Controls must stay outside the copyable code text.");
 		assert.ok(value.documentWidth <= value.viewportWidth + 1, "Code overflow must remain inside its own scroll container.");
 	}
+	// Wrapped, a line continues 4 columns past its own indent (a diff line's counted after its marker):
+	// [block, line, columns from the line's first character], or null when the line doesn't wrap.
+	const hanging = [[0, 3, 4], [0, 4, 8], [1, 0, 4], [2, 0, 6], [2, 1, 6]];
+	const continuations = () => page.evaluate(lines => lines.map(([block, index]) => {
+		const line = document.querySelectorAll("#preview-root pre")[block].querySelectorAll(":scope > code > .code-line")[index];
+		const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+		let text = walker.nextNode();
+		while (text && !text.data) text = walker.nextNode();
+		const range = document.createRange();
+		range.setStart(text, 0);
+		range.setEnd(text, 1);
+		const first = range.getBoundingClientRect();
+		range.selectNodeContents(line);
+		const later = [...range.getClientRects()].filter(rect => rect.width > 0 && rect.top > first.top + 1);
+		return later.length ? (Math.min(...later.map(rect => rect.left)) - first.left) / first.width : null;
+	}), hanging);
+	const lineIndents = () => page.$$eval("#preview-root pre", blocks => blocks.map(pre => [...pre.querySelectorAll(":scope > code > .code-line")].some(line => getComputedStyle(line).textIndent !== "0px")));
 	const controlOpacities = (target = page) => target.$$eval(".preview-code-block-controls", controls => controls.map(control => getComputedStyle(control).opacity));
 	const clickBlock = async (index) => {
 		const selector = `[data-code-wrap-block="${index}"]`;
@@ -152,6 +169,7 @@ try {
 		assert.equal(value.globalState, "false", "Every fresh one-shot document should start unwrapped.");
 		assert.ok(value.blocks.every(block => block.whiteSpace === "pre"));
 		assert.ok(value.blocks[0].scrollWidth > value.blocks[0].clientWidth);
+		assert.deepEqual(await lineIndents(), [false, false, false, false], "Unwrapped code keeps its layout: no hanging indent.");
 		assert.equal(await page.$$eval("[data-code-wrap-block]", buttons => buttons.length), 4);
 		assert.equal(await page.$$eval("[data-code-copy-block]", buttons => buttons.length), 4);
 		assert.equal(await page.$$eval("#preview-root > .preview-code-toolbar [data-code-wrap-all]", buttons => buttons.length), 1, "One-shot previews retain a standalone global control.");
@@ -172,12 +190,18 @@ try {
 		assert.equal(value.globalState, "true");
 		assert.ok(value.blocks.every(block => block.whiteSpace === "pre-wrap" && block.overflowWrap === "anywhere"));
 		assert.ok(value.blocks.every(block => block.scrollWidth <= block.clientWidth + 1));
+		const columns = await continuations();
+		hanging.forEach(([block, line, expected], i) => {
+			if (columns[i] === null && width > 320) return;
+			assert.ok(Math.abs(columns[i] - expected) < 0.15, `Block ${block + 1}, line ${line + 1} at ${width}px continues ${columns[i]} columns in, not ${expected}.`);
+		});
 
 		await clickBlock(3);
 		value = await metrics();
 		checkText(value);
 		assert.equal(value.globalState, "mixed");
 		assert.equal(value.blocks[3].whiteSpace, "pre", "A diagram can be unwrapped without editing its source.");
+		assert.deepEqual(await lineIndents(), [true, true, true, false], "A block unwrapped on its own has no hanging indent.");
 		assert.ok(value.blocks.slice(0, 3).every(block => block.whiteSpace === "pre-wrap"));
 		await page.click("[data-code-wrap-all]");
 		value = await metrics();

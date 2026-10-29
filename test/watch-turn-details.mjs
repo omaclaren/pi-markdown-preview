@@ -575,7 +575,7 @@ test("Turn details browser view preserves normal links/Back, keyboard controls a
  const prompt = '\n  \r\n\t<pasted_content id="example">\nA harmless prompt\n</pasted_content id="example">';
  const command = ["printf '%s\\n' 'a && b'",  "cat <<'EOF'", '<script>window.bad=true</script>', 'EOF'].join('\n');
  const args = JSON.stringify({ command, description: 'Read <literal> text', timeout: 20, cwd: '/example', dangerouslyDisableSandbox: false, extra: { nested: '<img src=x>' } });
- const source = 'window.bad = true;\nconst literal = "<img src=x>";\nreturn literal;';
+ const source = 'window.bad = true;\nconst literal = "<img src=x>";\nif (literal) {\n  return "' + 'long words '.repeat(40) + '";\n}\nreturn literal;';
  const path = '/example/<img src=x> & file.txt';
  const edits = [{ oldText: '\r\nbefore\r\n<em>literal</em>\r\n', newText: '\nafter\n  indented\n', replace_all: true }, { old_string: 'remove', new_string: '' }];
  const toolArgs = [{ code: source, timeout_ms: 5000 }, { path, offset: 3, limit: 10 }, { path, edits, dryRun: true }].map(a => JSON.stringify(a));
@@ -604,6 +604,13 @@ test("Turn details browser view preserves normal links/Back, keyboard controls a
   assert.equal(await page.$eval('.tool:has(.shell-command) .recorded-arguments pre', e => e.textContent), args);
   for (const selector of ['.code-input', '.file-path', '.edit-replacement']) await page.$eval(`.event:has(${selector})`, e => e.open = true);
   assert.equal(await page.$eval('.code-input code', e => e.textContent), source);
+  assert.equal(await page.$eval('.code-input code', code => {
+   const line = code.children[3], text = line.firstChild, range = document.createRange();
+   range.setStart(text, 0); range.setEnd(text, 1);
+   const first = range.getBoundingClientRect();
+   range.selectNodeContents(line);
+   return Math.round((Math.min(...[...range.getClientRects()].filter(r => r.top > first.top + 1).map(r => r.left)) - first.left) / first.width);
+  }), 6, 'A wrapped line continues 4 columns past its own indent of 2.');
   assert.equal(await page.$eval('.file-path code', e => e.textContent), path);
   assert.deepEqual(await page.$$eval('.edit-before code', es => es.map(e => e.textContent)), edits.map(e => e.oldText ?? e.old_string));
   assert.deepEqual(await page.$$eval('.edit-after code', es => es.map(e => e.textContent)), edits.map(e => e.newText ?? e.new_string));

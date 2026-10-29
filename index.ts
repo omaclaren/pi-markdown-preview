@@ -92,7 +92,7 @@ const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-contr
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
 const PANDOC_DETAILS_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-details.lua", import.meta.url));
 const PANDOC_SAFE_HTML_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-safe-html.lua", import.meta.url));
-const RENDER_VERSION = "v37";
+const RENDER_VERSION = "v38";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
 const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
@@ -3906,6 +3906,18 @@ body {
   white-space: pre;
   overflow-wrap: normal;
 }
+/* Wrapped, a line continues 4 columns past its own indent (decorateCodeLineIndents). */
+#preview-root[data-wrap-code="true"] pre:not([data-wrap-code="false"]) > code > .code-line,
+#preview-root pre[data-wrap-code="true"] > code > .code-line {
+  display: inline-block;
+  padding-left: calc(var(--indent, 0ch) + 4ch);
+  text-indent: calc(-4ch - var(--indent, 0ch));
+}
+#preview-root[data-wrap-code="true"] pre:not([data-wrap-code="false"]) > code > .code-line.diff-line,
+#preview-root pre[data-wrap-code="true"] > code > .code-line.diff-line {
+  display: block;
+  padding-left: calc(4px + var(--indent, 0ch) + 4ch);
+}
 #preview-root .preview-code-toolbar,
 #preview-root .preview-code-block-controls {
   display: flex;
@@ -4365,6 +4377,38 @@ ${codeWrapControlsScript}
       });
     };
 
+    // A wrapped line of code continues 4 columns past its own indent (CSS), so it can't pass for a
+    // line of its own. Each line becomes a .code-line span with --indent: its leading columns (Pandoc
+    // has expanded tabs), at most 32; a diff line's are counted after its +, - or space.
+    const decorateCodeLineIndents = (root) => {
+      if (!root) return;
+      root.querySelectorAll('pre:not(.mermaid) > code').forEach((code) => {
+        const diff = code.parentElement.classList.contains('diff');
+        let lines = Array.from(code.children);
+        // Pandoc's highlighted lines are already spans, one per line; plain code is split here, unless
+        // an element in it spans lines.
+        if (!code.classList.contains('sourceCode') || lines.some((line) => line.tagName !== 'SPAN')) {
+          if (lines.some((child) => child.textContent.includes('\\n'))) return;
+          lines = [document.createElement('span')];
+          for (const node of Array.from(code.childNodes)) {
+            if (node.nodeType !== Node.TEXT_NODE) { lines[lines.length - 1].append(node); continue; }
+            node.data.split('\\n').forEach((part, i) => {
+              if (i > 0) lines.push(document.createElement('span'));
+              if (part) lines[lines.length - 1].append(part);
+            });
+          }
+          code.replaceChildren(...lines.flatMap((line, i) => (i > 0 ? ['\\n', line] : [line])));
+        }
+        lines.forEach((line) => {
+          const text = line.textContent || '';
+          let columns = diff && /^[-+ ]/.test(text) ? 1 : 0;
+          while (text[columns] === ' ') columns++;
+          line.classList.add('code-line');
+          if (columns > 0) line.style.setProperty('--indent', Math.min(columns, 32) + 'ch');
+        });
+      });
+    };
+
     const MATHJAX_CDN_URL = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js';
 
     const waitForFonts = async () => {
@@ -4608,6 +4652,7 @@ ${buildMermaidBrowserModule(mermaidConfigJson, mermaidIconPacksJson)}
       await renderMermaid();
       applyPreviewAnnotationPlaceholders(root);
       decorateDiffCodeBlocks(root);
+      decorateCodeLineIndents(root);
       await renderAnnotationMarkerMath(root);
       await renderMathFallback(root);
       await renderPdfFigures(root);
