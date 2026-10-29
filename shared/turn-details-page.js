@@ -390,6 +390,11 @@ const REPL_STATES = {
 	absent: "Not running",
 };
 const REPL_STATUSES = { sending: "sending", sent: "sent", captured: "captured", timeout: "timed out", error: "error", note: "note" };
+// What a status doesn't say, as its tooltip. A send waiting for its code (pi-repl 0.11.2's settle) stays `sending` until it's done.
+const REPL_STATUS_TITLES = {
+	sending: "Written before the code was sent; not proof that it's still running or that its sender is still waiting.",
+	timeout: "The sender stopped waiting; the code may have kept running.",
+};
 const REPL_LONG_OUTPUT_LINES = 40;
 /** The most one REPL update takes, as sent. A page is the same cards plus its fixed shell. */
 export const REPL_RESPONSE_BYTES = 2_000_000;
@@ -412,8 +417,8 @@ function replCode(code, highlighted) {
 export function renderReplEntryCard(entry, number, runtimeLabel, highlighted) {
 	const status = REPL_STATUSES[entry.status] ?? entry.status;
 	const who = entry.origin === "pi-studio" && !/studio/i.test(entry.label) ? `${entry.label} (Pi Studio)` : entry.label;
-	const timeout = entry.status === "timeout" ? ' title="The sender stopped waiting; the code may have kept running."' : "";
-	const head = `<span class="number">${number}</span> ${escape(who)} · <span class="repl-status repl-status-${escape(entry.status)}"${timeout}>${escape(status)}</span>${entry.mode === "literate" ? " · note" : ""} · <time>${escape(clockTime(entry.createdAt))}</time>`;
+	const title = REPL_STATUS_TITLES[entry.status] ? ` title="${escape(REPL_STATUS_TITLES[entry.status])}"` : "";
+	const head = `<span class="number">${number}</span> ${escape(who)} · <span class="repl-status repl-status-${escape(entry.status)}"${title}>${escape(status)}</span>${entry.mode === "literate" ? " · note" : ""} · <time>${escape(clockTime(entry.createdAt))}</time>`;
 	const prose = entry.prose ? `<div class="task-summary">${escape(entry.prose)}</div>${omittedNote("prose", (entry.displayOmitted?.prose ?? 0) + (entry.proseOmittedChars ?? 0))}` : "";
 	const source = entry.code ? `<div class="tool-path"><span class="field-label">${escape(`${runtimeLabel} REPL`)}</span>${replCode(entry.code, highlighted)}</div>${omittedNote("code", (entry.displayOmitted?.code ?? 0) + (entry.codeOmittedChars ?? 0))}` : "";
 	const lines = entry.output ? entry.output.split("\n").length : 0;

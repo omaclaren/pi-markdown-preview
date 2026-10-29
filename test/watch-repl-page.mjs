@@ -426,6 +426,8 @@ test("REPL page: record text stays inert, and the page says what it shows", () =
 	assert.doesNotMatch(card, /<script>|<b>bold|<Code>/);
 	assert.match(card, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 	assert.match(card, /title="The sender stopped waiting; the code may have kept running\."/);
+	assert.match(renderReplEntryCard({ ...entry(1, { status: "sending", output: "" }), version: "v" }, 1, "Python"),
+		/<span class="repl-status repl-status-sending" title="Written before the code was sent; not proof that it&#39;s still running or that its sender is still waiting\.">sending<\/span>/, "A pending entry says what it can't promise.");
 	const long = renderReplEntryCard({ ...entry(1, { output: Array(60).fill("line").join("\n") }), version: "v" }, 1, "Python");
 	assert.match(long, /<details class="repl-output"><summary>Output · 60 lines<\/summary>/);
 	assert.match(long, /<label class="output-wrap"><input type="checkbox" aria-label="Wrap output lines">Wrap lines<\/label>/);
