@@ -110,6 +110,11 @@ try {
 		const later = [...range.getClientRects()].filter(rect => rect.width > 0 && rect.top > first.top + 1);
 		return later.length ? (Math.min(...later.map(rect => rect.left)) - first.left) / first.width : null;
 	}), hanging);
+	// The space between the diff block's two lines: none, not a blank line.
+	const diffGap = () => page.$eval("#preview-root pre.diff", pre => {
+		const [removed, added] = pre.querySelectorAll(":scope > code > .diff-line");
+		return added.getBoundingClientRect().top - removed.getBoundingClientRect().bottom;
+	});
 	const lineIndents = () => page.$$eval("#preview-root pre", blocks => blocks.map(pre => [...pre.querySelectorAll(":scope > code > .code-line")].some(line => getComputedStyle(line).textIndent !== "0px")));
 	const controlOpacities = (target = page) => target.$$eval(".preview-code-block-controls", controls => controls.map(control => getComputedStyle(control).opacity));
 	const clickBlock = async (index) => {
@@ -170,6 +175,7 @@ try {
 		assert.ok(value.blocks.every(block => block.whiteSpace === "pre"));
 		assert.ok(value.blocks[0].scrollWidth > value.blocks[0].clientWidth);
 		assert.deepEqual(await lineIndents(), [false, false, false, false], "Unwrapped code keeps its layout: no hanging indent.");
+		assert.ok(Math.abs(await diffGap()) < 1, "No blank line between diff lines.");
 		assert.equal(await page.$$eval("[data-code-wrap-block]", buttons => buttons.length), 4);
 		assert.equal(await page.$$eval("[data-code-copy-block]", buttons => buttons.length), 4);
 		assert.equal(await page.$$eval("#preview-root > .preview-code-toolbar [data-code-wrap-all]", buttons => buttons.length), 1, "One-shot previews retain a standalone global control.");
@@ -195,6 +201,7 @@ try {
 			if (columns[i] === null && width > 320) return;
 			assert.ok(Math.abs(columns[i] - expected) < 0.15, `Block ${block + 1}, line ${line + 1} at ${width}px continues ${columns[i]} columns in, not ${expected}.`);
 		});
+		assert.ok(Math.abs(await diffGap()) < 1, "No blank line between wrapped diff lines.");
 
 		await clickBlock(3);
 		value = await metrics();

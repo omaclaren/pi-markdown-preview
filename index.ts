@@ -92,7 +92,7 @@ const CODE_WRAP_CONTROLS_SOURCE = readFileSync(new URL("./client/code-wrap-contr
 const PANDOC_FIGURE_CROSSREF_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-figure-crossrefs.lua", import.meta.url));
 const PANDOC_DETAILS_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-details.lua", import.meta.url));
 const PANDOC_SAFE_HTML_FILTER_PATH = fileURLToPath(new URL("./shared/pandoc-safe-html.lua", import.meta.url));
-const RENDER_VERSION = "v38";
+const RENDER_VERSION = "v39";
 const MERMAID_BROWSER_VERSION = "11.16.0";
 const PDFJS_BROWSER_VERSION = "6.3.289";
 const PDFJS_BROWSER_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_BROWSER_VERSION}/`;
@@ -3915,7 +3915,6 @@ body {
 }
 #preview-root[data-wrap-code="true"] pre:not([data-wrap-code="false"]) > code > .code-line.diff-line,
 #preview-root pre[data-wrap-code="true"] > code > .code-line.diff-line {
-  display: block;
   padding-left: calc(4px + var(--indent, 0ch) + 4ch);
 }
 #preview-root .preview-code-toolbar,
@@ -4022,8 +4021,15 @@ body {
 #preview-root .annotation-marker mjx-container {
   margin: 0;
 }
-#preview-root pre.sourceCode.diff code > .diff-line {
+/* Each line an inline block at least as wide as the code, not a block: a block would leave the
+   newline after it on a line of its own, a blank line between diff lines. The code is a block, so its
+   lines are as tall as the code's and their backgrounds meet. */
+#preview-root pre.sourceCode.diff > code {
   display: block;
+}
+#preview-root pre.sourceCode.diff code > .diff-line {
+  display: inline-block;
+  min-width: calc(100% + 8px);
   margin: 0 -4px;
   padding: 0 4px;
   border-radius: 4px;
