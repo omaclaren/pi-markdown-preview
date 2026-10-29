@@ -418,7 +418,7 @@ test("REPL cards: the newest that fit in 2 MB as sent, numbered from the first s
 	// A card too big highlighted is shown plain rather than not at all.
 	const one = replEntryCards({ entries: [{ ...entry(1), version: "v", displayOmitted: {} }], label: "Python" }, new Map([["e1", "<b>" + "x".repeat(REPL_RESPONSE_BYTES) + "</b>"]]));
 	assert.equal(one.cards.length, 1);
-	assert.match(one.cards[0].html, /<pre class="code-input"><code>print\(1\)<\/code><\/pre>/);
+	assert.match(one.cards[0].html, /<pre class="code-input"><code><span>print\(1\)<\/span><\/code><\/pre>/);
 });
 
 test("REPL page: record text stays inert, and the page says what it shows", () => {
@@ -430,6 +430,11 @@ test("REPL page: record text stays inert, and the page says what it shows", () =
 	assert.match(long, /<details class="repl-output"><summary>Output · 60 lines<\/summary>/);
 	assert.match(long, /<label class="output-wrap"><input type="checkbox" aria-label="Wrap output lines">Wrap lines<\/label>/);
 	assert.doesNotMatch(renderReplEntryCard({ ...entry(1, { status: "sending", output: "" }), version: "v" }, 1, "Python"), /output-wrap/, "Nothing to wrap, no Wrap lines.");
+	// Each line of code carries its own indent, plain or highlighted, for wrapping.
+	const indented = { ...entry(1, { code: `def f():\n\tif x:\n        pass\n${" ".repeat(100)}y` }), version: "v" };
+	assert.match(renderReplEntryCard(indented, 1, "Python"), /<code><span>def f\(\):<\/span>\n<span style="--indent:4ch">\tif x:<\/span>\n<span style="--indent:8ch"> {8}pass<\/span>\n<span style="--indent:32ch"> {100}y<\/span><\/code>/);
+	const pandoc = '<div class="sourceCode" id="r"><pre class="sourceCode python"><code class="sourceCode python"><span id="r-1"><a href="#r-1"></a>def f():</span>\n<span id="r-2"><a href="#r-2"></a>\tif x:</span>\n<span id="r-3"><a href="#r-3"></a>        pass</span></code></pre></div>';
+	assert.match(renderReplEntryCard(indented, 1, "Python", pandoc), /<div class="repl-code"><div class="sourceCode" id="r"><pre class="sourceCode python"><code class="sourceCode python"><span id="r-1"><a href="#r-1"><\/a>def f\(\):<\/span>\n<span id="r-2" style="--indent:4ch"><a href="#r-2"><\/a>\tif x:<\/span>\n<span id="r-3" style="--indent:8ch"><a/);
 	const page = buildReplSessionPage({ sessionName: "pi-repl-python", label: "Python", state: "running", record: "v1", checkedAt: 1, readAt: 1, now: 2, version: "g:1", entries: [] }, { updatesHref: "/u", sessionsHref: "/s" });
 	assert.match(page, /Recent recorded submissions/);
 	assert.match(page, /Code typed directly into the terminal isn&#39;t recorded here\./);
@@ -474,7 +479,7 @@ test("REPL page in the watcher: only with the option, behind the cookie, linked 
 	const changed = await (await get(`${updatesHref}&version=${encodeURIComponent(version)}`)).json();
 	assert.deepEqual(changed.ids, ["e1", "e2"]);
 	assert.match(changed.cards[1].html, /<div class="repl-code"><div class="sourceCode" id="x">[^]*HIGHLIGHTED/, "Highlighted code replaces the plain block…");
-	assert.match(changed.cards[0].html, /<pre class="code-input"><code>print\(1\)<\/code><\/pre>/, "…and code that couldn't be highlighted stays plain.");
+	assert.match(changed.cards[0].html, /<pre class="code-input"><code><span>print\(1\)<\/span><\/code><\/pre>/, "…and code that couldn't be highlighted stays plain.");
 	assert.equal(changed.noticesHtml, "", "A changed window brings its notices, here none.");
 	const ids = [...new Set(asked.map(item => item.id))];
 	assert.ok(ids.length === 2 && ids.every(id => /^repl-entry-[0-9a-f]{16}$/.test(id)), "Highlighted code gets each entry's own IDs, of fixed width (R14, R22)…");
@@ -677,15 +682,36 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	assert.match(await page.$eval(".repl-session-status", el => el.textContent), /Session checked .*record read/);
 	// Code wraps; output is terminal text, wrapped only with Wrap lines, which an update keeps.
 	const words = Array.from({ length: 80 }, (_, i) => `word${i}`).join(" ");
-	s.set(record([entry(1), entry(2, { code: `print("${words}")`, output: `${words}\n` })]));
+	s.set(record([entry(1), entry(2, { code: `def f():\n\n    print("${words}")`, output: `${words}\n` })]));
 	s.tick(1_100);
 	await page.waitForFunction(() => /word79/.test(document.querySelector('.repl-entry[data-entry-id="e2"]')?.textContent ?? ""), { timeout: 10_000 });
 	const overflows = () => page.$eval('.repl-entry[data-entry-id="e2"]', card => ["tool-path", "tool-field"].map(part => { const pre = card.querySelector(`.${part} pre`); return pre.scrollWidth > pre.clientWidth; }));
 	assert.deepEqual(await overflows(), [false, true], "The code wraps; the output scrolls.");
+	// A wrapped line continues 4 columns past its own indent, and a blank line keeps its height.
+	const wrapped = await page.$eval('.repl-entry[data-entry-id="e2"] .tool-path pre code', code => {
+		const [first, , line] = code.children;
+		const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+		let node;
+		while ((node = walker.nextNode()) && !node.data.includes("print"));
+		const range = document.createRange();
+		range.setStart(node, node.data.indexOf("print"));
+		range.setEnd(node, node.data.indexOf("print") + 1);
+		const p = range.getBoundingClientRect();
+		range.selectNodeContents(line);
+		const rects = [...range.getClientRects()].filter(r => r.width > 0);
+		const continued = Math.min(...rects.filter(r => r.top > p.top + 1).map(r => r.left));
+		return { lines: new Set(rects.map(r => Math.round(r.top))).size, columns: (continued - p.left) / p.width,
+			gap: (line.getBoundingClientRect().top - first.getBoundingClientRect().top) / parseFloat(getComputedStyle(code).lineHeight) };
+	});
+	assert.ok(wrapped.lines > 2, "The long line wraps.");
+	assert.ok(Math.abs(wrapped.columns - 4) < 0.1, `Continued 4 columns past its indent, not ${wrapped.columns}.`);
+	assert.ok(Math.abs(wrapped.gap - 2) < 0.1, `Two lines down, the blank one included, not ${wrapped.gap}.`);
+	const copied = await page.$eval('.repl-entry[data-entry-id="e2"] .tool-path pre code', code => { const selection = getSelection(); selection.selectAllChildren(code); const text = selection.toString(); selection.removeAllRanges(); return text; });
+	assert.equal(copied, `def f():\n\n    print("${words}")`, "Copying gives the code as sent.");
 	await page.click('.repl-entry[data-entry-id="e2"] .output-wrap input');
 	assert.deepEqual(await overflows(), [false, false], "With Wrap lines, the output wraps too.");
 	await page.$eval('.repl-entry[data-entry-id="e2"] .output-wrap input', input => input.blur());
-	s.set(record([entry(1), entry(2, { code: `print("${words}")`, output: `${words} again\n` })]));
+	s.set(record([entry(1), entry(2, { code: `def f():\n\n    print("${words}")`, output: `${words} again\n` })]));
 	s.tick(1_100);
 	await page.waitForFunction(() => /again/.test(document.querySelector('.repl-entry[data-entry-id="e2"]')?.textContent ?? ""), { timeout: 10_000 });
 	assert.equal(await page.$eval('.repl-entry[data-entry-id="e2"] .output-wrap input', input => input.checked), true, "An update keeps Wrap lines.");

@@ -252,7 +252,7 @@ const LIVE_STYLE = `.live-omitted { color:var(--muted); font-size:12px; margin:0
 .live-state { margin:0 0 18px } .live-state:empty { display:none } .live-pending { color:var(--muted); font-size:12px; font-weight:400 } .live-notice { color:var(--muted); display:block; margin-top:4px }
 .repl-sessions { list-style:none; padding:0; margin:0 0 14px } .repl-session { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; padding:10px 14px; margin:0 0 8px; border:1px solid var(--line); border-radius:10px; background:var(--panel) } .repl-session-name { font-weight:600 } .repl-session-state,.repl-session code { color:var(--muted); font-size:12px }
 .repl-status-error,.repl-status-timeout { color:var(--warning, var(--muted)) } details.repl-output > summary { padding:0; font:600 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--muted) }
-.pi-preview-repl code span.kw,.pi-preview-repl code span.cf,.pi-preview-repl code span.im { color:var(--syntax-keyword, var(--accent)) } .pi-preview-repl code span.dt { color:var(--syntax-type) } .pi-preview-repl code span.fu,.pi-preview-repl code span.bu { color:var(--syntax-function) } .pi-preview-repl code span.va,.pi-preview-repl code span.ot { color:var(--syntax-variable) } .pi-preview-repl code span.st,.pi-preview-repl code span.ss,.pi-preview-repl code span.sc,.pi-preview-repl code span.ch { color:var(--syntax-string, var(--ok, inherit)) } .pi-preview-repl code span.dv,.pi-preview-repl code span.bn,.pi-preview-repl code span.fl { color:var(--syntax-number) } .pi-preview-repl code span.co { color:var(--syntax-comment, var(--muted)); font-style:italic } .pi-preview-repl code span.op { color:var(--syntax-operator) } .pi-preview-repl code span.pp,.pi-preview-repl code span.pu { color:var(--syntax-punctuation) } .pi-preview-repl code span.er,.pi-preview-repl code span.al { color:var(--syntax-error, var(--error, inherit)) } .repl-code > .sourceCode > pre { padding:2px 0 0; margin:0 } .repl-entry .tool-path pre { white-space:pre-wrap; overflow-wrap:anywhere }
+.pi-preview-repl code span.kw,.pi-preview-repl code span.cf,.pi-preview-repl code span.im { color:var(--syntax-keyword, var(--accent)) } .pi-preview-repl code span.dt { color:var(--syntax-type) } .pi-preview-repl code span.fu,.pi-preview-repl code span.bu { color:var(--syntax-function) } .pi-preview-repl code span.va,.pi-preview-repl code span.ot { color:var(--syntax-variable) } .pi-preview-repl code span.st,.pi-preview-repl code span.ss,.pi-preview-repl code span.sc,.pi-preview-repl code span.ch { color:var(--syntax-string, var(--ok, inherit)) } .pi-preview-repl code span.dv,.pi-preview-repl code span.bn,.pi-preview-repl code span.fl { color:var(--syntax-number) } .pi-preview-repl code span.co { color:var(--syntax-comment, var(--muted)); font-style:italic } .pi-preview-repl code span.op { color:var(--syntax-operator) } .pi-preview-repl code span.pp,.pi-preview-repl code span.pu { color:var(--syntax-punctuation) } .pi-preview-repl code span.er,.pi-preview-repl code span.al { color:var(--syntax-error, var(--error, inherit)) } .repl-code > .sourceCode > pre { padding:2px 0 0; margin:0 } .repl-entry .tool-path pre { white-space:pre-wrap; overflow-wrap:anywhere } .repl-entry .tool-path pre code > span { display:inline-block; padding-left:calc(var(--indent, 0ch) + 4ch); text-indent:calc(-4ch - var(--indent, 0ch)) }
 .repl-new-entries { position:sticky; bottom:12px; display:block; margin:8px auto 0; padding:6px 12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; cursor:pointer } .repl-new-entries[hidden] { display:none }
 .live-newer { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50; min-height:32px; padding:6px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; box-shadow:0 2px 8px #0002; cursor:pointer } .live-newer[hidden] { display:none } .live-newer:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 @media(pointer:coarse) { .live-newer { min-height:44px } } @media print { .live-newer { display:none } }`;
@@ -389,6 +389,20 @@ const REPL_ENVELOPE_BYTES = 16_384;
 const clockTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
 const omittedNote = (what, chars) => chars > 0 ? `<p class="empty-text">${escape(`${chars.toLocaleString("en")} more characters of ${what} not shown`)}</p>` : "";
 
+// A wrapped line of code continues 4 columns past its own indent (CSS), so it can't pass for a line of
+// its own. Each line is a span with --indent: its leading columns, tabs at 4 as in `pre`, at most 32.
+function replIndent(line) {
+	let columns = 0;
+	for (const char of line) { if (char === " ") columns++; else if (char === "\t") columns += 4 - columns % 4; else break; }
+	return columns ? ` style="--indent:${Math.min(columns, 32)}ch"` : "";
+}
+function replCode(code, highlighted) {
+	const lines = code.split("\n");
+	// Pandoc's line spans have IDs ending -1, -2, …; code text can't contain `<span id="`, as Pandoc escapes `<`.
+	if (highlighted) return `<div class="repl-code">${highlighted.replace(/<span id="[^"]*-(\d+)">/g, (span, n) => `${span.slice(0, -1)}${replIndent(lines[n - 1] ?? "")}>`)}</div>`;
+	return `<pre class="code-input"><code>${lines.map(line => `<span${replIndent(line)}>${escape(line)}</span>`).join("\n")}</code></pre>`;
+}
+
 /**
  * One recorded submission. `number` is its place in the shown window; `runtimeLabel` names the
  * session's runtime; `highlighted` is Pandoc's HTML for its code (repl-highlight.js), if any.
@@ -399,9 +413,9 @@ export function renderReplEntryCard(entry, number, runtimeLabel, highlighted) {
 	const timeout = entry.status === "timeout" ? ' title="The sender stopped waiting; the code may have kept running."' : "";
 	const head = `<span class="number">${number}</span> ${escape(who)} · <span class="repl-status repl-status-${escape(entry.status)}"${timeout}>${escape(status)}</span>${entry.mode === "literate" ? " · note" : ""} · <time>${escape(clockTime(entry.createdAt))}</time>`;
 	const prose = entry.prose ? `<div class="task-summary">${escape(entry.prose)}</div>${omittedNote("prose", (entry.displayOmitted?.prose ?? 0) + (entry.proseOmittedChars ?? 0))}` : "";
-	const source = entry.code ? `<div class="tool-path"><span class="field-label">${escape(`${runtimeLabel} REPL`)}</span>${highlighted ? `<div class="repl-code">${highlighted}</div>` : code(entry.code, "code-input")}</div>${omittedNote("code", (entry.displayOmitted?.code ?? 0) + (entry.codeOmittedChars ?? 0))}` : "";
+	const source = entry.code ? `<div class="tool-path"><span class="field-label">${escape(`${runtimeLabel} REPL`)}</span>${replCode(entry.code, highlighted)}</div>${omittedNote("code", (entry.displayOmitted?.code ?? 0) + (entry.codeOmittedChars ?? 0))}` : "";
 	const lines = entry.output ? entry.output.split("\n").length : 0;
-	// Code wraps, as in Working's call cards; output is terminal text, wrapped only with Wrap lines, as in Working's results.
+	// Code wraps (see replIndent); output is terminal text, wrapped only with Wrap lines, as in Working's results.
 	const wrap = entry.output.trim() ? '<label class="output-wrap"><input type="checkbox" aria-label="Wrap output lines">Wrap lines</label>' : "";
 	const outputBody = entry.output.trim() ? literalPre(entry.output) : `<p class="empty-text">${entry.status === "sending" || entry.status === "sent" ? "No output recorded yet" : "No output"}</p>`;
 	const output = entry.status === "note" && !entry.output ? "" : `<div class="tool-fields"><section class="tool-field">${lines > REPL_LONG_OUTPUT_LINES
