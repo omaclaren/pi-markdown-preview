@@ -488,8 +488,8 @@ test("REPL files: image and PDF paths an entry names, resolved against the sessi
 	assert.equal(many.get("e").length, REPL_FILES_PER_ENTRY, "A bounded number per entry.");
 	const card = renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python", undefined, [
 		{ written: "out/<fit>.png", url: "/__pi_markdown_preview_absolute_image__/abc?v=1", image: true }, { written: "reports/2026/q3.pdf", url: "/r", image: false }]);
-	assert.match(card, /<h3>Files<\/h3><div class="repl-files"><a class="repl-file" href="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" target="_blank" rel="noopener noreferrer" title="out\/&lt;fit&gt;.png"><img src="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" alt="out\/&lt;fit&gt;.png" loading="lazy"><span>&lt;fit&gt;.png<\/span><\/a><a class="repl-file repl-file-link" href="\/r" target="_blank" rel="noopener noreferrer" title="reports\/2026\/q3.pdf">q3.pdf<\/a><\/div>/,
-		"Each file is labelled with its name; the path as written is its tooltip.");
+	assert.match(card, /<h3>Files<\/h3><div class="repl-files"><a class="repl-file" href="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" target="_blank" rel="noopener noreferrer" title="out\/&lt;fit&gt;.png"><img src="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" alt="out\/&lt;fit&gt;.png" loading="lazy"><span>&lt;fit&gt;.png<\/span><\/a><\/div><div class="repl-file-links"><a class="repl-file-link" href="\/r" target="_blank" rel="noopener noreferrer" title="reports\/2026\/q3.pdf">q3.pdf<\/a><\/div>/,
+		"Images as thumbnails, then PDFs below as links; each labelled with its name, the path as written its tooltip.");
 	assert.doesNotMatch(renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python"), /repl-files/, "No files, no section.");
 	const cards = replEntryCards({ label: "Python", entries: [{ ...entry(1), version: "v1" }] }, new Map(), undefined, new Map([["e1", { items: [{ written: "a.png", url: "/a", image: true }], signature: "s1" }]]));
 	assert.equal(cards.cards[0].version, "v1.s1", "A card's version covers its files.");
