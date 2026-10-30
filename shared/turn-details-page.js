@@ -448,9 +448,11 @@ export function renderReplEntryCard(entry, number, runtimeLabel, highlighted, fi
 		? `<details class="repl-output"><summary>Output · ${lines} lines</summary>${outputBody}</details>`
 		: `<h3>Output</h3>${outputBody}`}${omittedNote("output", (entry.displayOmitted?.output ?? 0) + (entry.outputOmittedChars ?? 0))}</section></div>`;
 	// Image and PDF files the entry names (repl-files.js), such as a saved plot; each opens in a new tab.
+	// Each is labelled with its file name, and the path as written shows on hover.
+	const name = written => written.split(/[\\/]/).pop();
 	const saved = files?.length ? `<div class="tool-fields"><section class="tool-field"><h3>Files</h3><div class="repl-files">${files.map(file => file.image
-		? `<a class="repl-file" href="${escape(file.url)}" target="_blank" rel="noopener noreferrer"><img src="${escape(file.url)}" alt="${escape(file.written)}" loading="lazy"><span>${escape(file.written)}</span></a>`
-		: `<a class="repl-file repl-file-link" href="${escape(file.url)}" target="_blank" rel="noopener noreferrer">${escape(file.written)}</a>`).join("")}</div></section></div>` : "";
+		? `<a class="repl-file" href="${escape(file.url)}" target="_blank" rel="noopener noreferrer" title="${escape(file.written)}"><img src="${escape(file.url)}" alt="${escape(file.written)}" loading="lazy"><span>${escape(name(file.written))}</span></a>`
+		: `<a class="repl-file repl-file-link" href="${escape(file.url)}" target="_blank" rel="noopener noreferrer" title="${escape(file.written)}">${escape(name(file.written))}</a>`).join("")}</div></section></div>` : "";
 	return `<details class="event result repl-entry" open data-entry-id="${escape(entry.id)}" data-entry-version="${escape(entry.version)}"><summary>${head}</summary><div class="event-content">${wrap}${prose}${source}${output}${saved}</div></details>`;
 }
 
