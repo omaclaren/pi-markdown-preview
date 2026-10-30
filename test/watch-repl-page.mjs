@@ -4,10 +4,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, link, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord } from "../shared/repl-record-reader.js";
+import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord, replRecordRootKey, replRootKeyOf } from "../shared/repl-record-reader.js";
 import { createReplLiveSource, inspectReplSession, replWindow, REPL_FIELD_DISPLAY_CHARS } from "../shared/repl-live.js";
 import { createReplHighlighter } from "../shared/repl-highlight.js";
-import { buildReplSessionPage, renderReplEntryCard, replEntryCards, REPL_RESPONSE_BYTES } from "../shared/turn-details-page.js";
+import { buildReplSessionPage, renderReplEntryCard, replEntryCards, replSessionStatusHtml, REPL_RESPONSE_BYTES } from "../shared/turn-details-page.js";
 import { replFilePaths, resolveReplFiles, REPL_FILES_PER_ENTRY } from "../shared/repl-files.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
@@ -154,10 +154,10 @@ test("REPL sessions: read from tmux as pi-repl does, and only tmux's own message
 	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": { code: 1, stderr: "permission denied" }, "has-session": { code: 1, stderr: "permission denied" } }).run)).state, "unchecked");
 	// The first pane by window and pane index, whatever order tmux lists them in.
 	const seen = await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "1", "0", "%9", "0", ID, "1"], ["$3", "1793150000", "0", "1", "%5", "1", ID, "1"], ["$3", "1793150000", "0", "0", "%2", "0", ID, "1"]]) }).run);
-	assert.deepEqual(seen, { state: "running", tmuxSessionId: "$3", tmuxSessionCreatedAt: 1793150000, paneId: "%2", cwd: undefined, recordId: ID, recordVersion: "1" });
+	assert.deepEqual(seen, { state: "running", tmuxSessionId: "$3", tmuxSessionCreatedAt: 1793150000, paneId: "%2", cwd: undefined, recordId: ID, recordVersion: "1", rootKey: undefined });
 	// The working directory comes last, whole, even with a "|" in it; only an absolute one counts.
-	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", ID, "1", "/work/a|b"]]) }).run)).cwd, "/work/a|b");
-	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", ID, "1", "relative"]]) }).run)).cwd, undefined);
+	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", ID, "1", "", "/work/a|b"]]) }).run)).cwd, "/work/a|b");
+	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", ID, "1", "", "relative"]]) }).run)).cwd, undefined);
 	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "1", "", ""]]) }).run)).state, "runtime-ended");
 	const { run, calls } = tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", "", ""]]) });
 	assert.equal((await inspectReplSession("pi-repl-python", run)).recordId, undefined);
@@ -166,12 +166,12 @@ test("REPL sessions: read from tmux as pi-repl does, and only tmux's own message
 
 // A source over a scripted tmux and an in-memory record, with a settable clock.
 function source(overrides = {}) {
-	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true, recordId = overrides.noRecord ? "" : ID, recordVersion = overrides.recordVersion ?? "1", cwd;
+	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true, recordId = overrides.noRecord ? "" : ID, recordVersion = overrides.recordVersion ?? "1", cwd, sessionKey = "";
 	const reads = [], stats = [];
 	const run = async args => {
 		if (args[0] === "list-panes") {
 			if (!alive || args[3] !== "=pi-repl-python") return { code: 1, stdout: "", stderr: `can't find window: ${args[3].slice(1)}` };
-			return panes([[...identity, "0", "0", "%1", "0", recordId, recordId ? recordVersion : "", ...(cwd ? [cwd] : [])]]);
+			return panes([[...identity, "0", "0", "%1", "0", recordId, recordId ? recordVersion : "", sessionKey, ...(cwd ? [cwd] : [])]]);
 		}
 		return { code: 1, stdout: "", stderr: `can't find session: ${args[2].slice(1)}` };
 	};
@@ -179,7 +179,7 @@ function source(overrides = {}) {
 	const live = createReplLiveSource({ run, now: () => clock, root: "/unused",
 		statRecord: async () => { stats.push(clock); return `stamp-${JSON.stringify(current).length}-${current.revision}`; },
 		readRecord: async (id, pin) => { reads.push(clock); return { record: validateReplRecord(structuredClone(current), id, pin), stamp: `stamp-${JSON.stringify(current).length}-${current.revision}` }; }, ...rest });
-	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; }, record: () => { recordId = ID; }, version: value => { recordVersion = value; }, cwd: value => { cwd = value; } };
+	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; }, record: () => { recordId = ID; }, version: value => { recordVersion = value; }, cwd: value => { cwd = value; }, rootKey: value => { sessionKey = value; } };
 }
 
 test("REPL source: lists the shared sessions, pins one lifetime, and sends its window only when it changed", async () => {
@@ -359,6 +359,55 @@ test("REPL source: an unreadable record version resets what browsers show, and a
 	const late = await slow;
 	assert.deepEqual([late.record, late.readError], ["unsupported", undefined]);
 	u.release("pi-repl-python");
+});
+
+test("REPL record directory (P0): keys as pi-repl derives them, read without creating anything", async t => {
+	// pi-repl's vectors, computed independently: exact integers, so a u64 device and a 2^63+5 inode too.
+	assert.equal(replRootKeyOf(0n, 0n), "v1:ac72368a586a18c19088393573ce0307");
+	assert.equal(replRootKeyOf(16777232n, 1234567n), "v1:1e42c564492d3e74e2ef33a98ea2fc21");
+	assert.equal(replRootKeyOf(18446744073709551615n, 9223372036854775813n), "v1:eb75db16e5ba9caa199d69d116a8ac77");
+	const base = await mkdtemp(join(tmpdir(), "repl-root-key-"));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	const root = join(base, "records");
+	assert.equal(await replRecordRootKey(root), undefined, "No directory here: no key, and none is made.");
+	assert.deepEqual(await readdir(base), []);
+	await mkdir(root, { mode: 0o700 });
+	await chmod(root, 0o700);
+	const info = await stat(root, { bigint: true });
+	assert.equal(await replRecordRootKey(root), replRootKeyOf(info.dev, info.ino));
+	await chmod(root, 0o755);
+	assert.equal(await replRecordRootKey(root), undefined, "Not private: not a usable record directory.");
+	await chmod(root, 0o700);
+	await symlink(root, join(base, "link"));
+	assert.equal(await replRecordRootKey(join(base, "link")), undefined, "A symlink isn't the directory.");
+});
+
+test("REPL source: a session's record-directory key (P0), quiet when there is none", async () => {
+	const OWN = replRootKeyOf(1n, 2n), OTHER = replRootKeyOf(1n, 3n);
+	const s = source({ rootKey: async () => OWN });
+	const pinId = (await s.live.pinSession("pi-repl-python")).pinId;
+	let view = await s.live.view(pinId, "");
+	assert.deepEqual([view.directory, view.entries.length], ["unverified", 1], "No key yet: the record is read and shown, as before.");
+	assert.doesNotMatch(replSessionStatusHtml(view), /record directory|record-directory key/, "…without a notice, until clients set keys.");
+	s.rootKey(OWN);
+	s.tick(5_100);
+	view = await s.live.view(pinId, "");
+	assert.deepEqual([view.directory, view.entries.length], ["same", 1]);
+	s.rootKey(OTHER);
+	s.tick(5_100);
+	view = await s.live.view(pinId, view.version);
+	assert.deepEqual([view.directory, view.entries.length, view.unchanged], ["different", 0, undefined], "Another directory: what was shown goes, and browsers are told.");
+	assert.match(replSessionStatusHtml(view), /pi-repl-python&#39;s shared record is in a different or replaced record directory, not this preview&#39;s, so it isn&#39;t shown\./);
+	s.rootKey("v2:abc");
+	s.tick(5_100);
+	view = await s.live.view(pinId, "");
+	assert.deepEqual([view.directory, view.entries.length], ["malformed", 0]);
+	assert.match(replSessionStatusHtml(view), /record-directory key isn&#39;t one this page reads/);
+	// A valid key with no usable directory here can't be this record's: refused from the first view.
+	const away = source({ rootKey: async () => undefined });
+	away.rootKey(OWN);
+	view = await away.live.view((await away.live.pinSession("pi-repl-python")).pinId, "");
+	assert.deepEqual([view.directory, view.entries.length], ["different", 0]);
 });
 
 test("REPL source: a stuck read holds at most one slot, and its session starts no second one (R19)", async () => {

@@ -28,6 +28,25 @@ export function replRecordRoot({ dir = tmpdir(), uid = typeof process.getuid ===
 	return join(dir, `pi-repl-session-records-${uid == null ? "user" : uid}`);
 }
 
+/** A session's record-directory key as pi-repl writes it (P0): anything else, read as a key, is malformed. */
+export const REPL_ROOT_KEY = /^v1:[a-f0-9]{32}$/;
+
+/** The record-directory key for a directory's device and inode, exact integers: `v1:` and 32 hex characters of SHA-256 of `<dev>:<ino>`. */
+export function replRootKeyOf(dev, ino) {
+	return `v1:${createHash("sha256").update(`${BigInt(dev)}:${BigInt(ino)}`).digest("hex").slice(0, 32)}`;
+}
+
+/**
+ * This process's own record directory's key, to compare with a session's: undefined when there's no
+ * usable directory here (missing, a symlink, not a directory, another user's, or not mode 0700).
+ * Read-only: it never creates the directory.
+ */
+export async function replRecordRootKey(root = replRecordRoot(), uid = typeof process.getuid === "function" ? process.getuid() : null) {
+	const info = await lstat(root, { bigint: true }).catch(() => undefined);
+	if (!info?.isDirectory() || (uid != null && info.uid !== BigInt(uid)) || (info.mode & 0o777n) !== 0o700n) return undefined;
+	return replRootKeyOf(info.dev, info.ino);
+}
+
 const recordIdOk = value => typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
 const integer = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= min && value <= max;
 const timestamp = value => integer(value, 0, MAX_TIMESTAMP);

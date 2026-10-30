@@ -4,7 +4,7 @@
 // driven by viewers' requests, bounded, and shared between them.
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readReplRecord, replEntryVersion, ReplRecordError, statReplRecord, replRecordRoot } from "./repl-record-reader.js";
+import { readReplRecord, replEntryVersion, ReplRecordError, statReplRecord, replRecordRoot, replRecordRootKey, REPL_ROOT_KEY } from "./repl-record-reader.js";
 
 /** pi-repl's shared sessions, one per runtime (Python and IPython share one). */
 export const REPL_SESSIONS = Object.freeze([
@@ -15,7 +15,7 @@ export const REPL_SESSIONS = Object.freeze([
 const SESSION_BY_NAME = new Map(REPL_SESSIONS.map(session => [session.sessionName, session]));
 // "|" can't occur in any of these fields, and tmux keeps it whether or not it was started with -u.
 // The working directory comes last, since a path can contain "|".
-const PANE_FORMAT = "#{session_id}|#{session_created}|#{window_index}|#{pane_index}|#{pane_id}|#{pane_dead}|#{@pi_repl_record_id}|#{@pi_repl_record_version}|#{pane_current_path}";
+const PANE_FORMAT = "#{session_id}|#{session_created}|#{window_index}|#{pane_index}|#{pane_id}|#{pane_dead}|#{@pi_repl_record_id}|#{@pi_repl_record_version}|#{@pi_repl_record_root_key}|#{pane_current_path}";
 // As pi-repl reads tmux: only these mean the session isn't there.
 const ABSENT = /no server running|can't find session:|(?:error connecting|failed to connect).*?(?:No such file|Connection refused)/i;
 const IDENTITY_MS = 5_000, STAT_MS = 1_000, REREAD_MS = 30_000, IDLE_MS = 60_000, READ_MS = 2_000;
@@ -47,15 +47,17 @@ export async function inspectReplSession(sessionName, run = runTmux) {
 		.filter(([id, created, window, pane]) => /^\$\d+$/.test(id ?? "") && /^\d+$/.test(created ?? "") && /^\d+$/.test(window ?? "") && /^\d+$/.test(pane ?? ""))
 		.sort((a, b) => Number(a[2]) - Number(b[2]) || Number(a[3]) - Number(b[3]));
 	if (!panes.length) return { state: "unchecked", reason: "tmux listed no panes" };
-	const [tmuxSessionId, created, , , paneId, dead, recordId, recordVersion] = panes[0];
+	const [tmuxSessionId, created, , , paneId, dead, recordId, recordVersion, rootKey] = panes[0];
 	// The pane's working directory (its foreground process's), for paths an entry names relatively.
-	const cwd = panes[0].slice(8).join("|");
+	const cwd = panes[0].slice(9).join("|");
 	return {
 		state: dead === "1" ? "runtime-ended" : "running",
 		tmuxSessionId, tmuxSessionCreatedAt: Number(created), paneId,
 		cwd: cwd.startsWith("/") && cwd.length <= 4096 ? cwd : undefined,
 		recordId: /^[a-f0-9]{32}$/.test(recordId ?? "") ? recordId : undefined,
 		recordVersion: recordVersion || undefined,
+		// tmux formats an unset option as empty, so an empty key is no key.
+		rootKey: rootKey || undefined,
 	};
 }
 
@@ -83,7 +85,7 @@ export function replWindow(record) {
  * version)` gives one session lifetime's window, pinned on first view. Injected
  * `run`, `root`, `now`, `readRecord`, `statRecord` and `readTimeout` are for tests.
  */
-export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), now = Date.now, readRecord = readReplRecord, statRecord = statReplRecord, readTimeout = READ_MS } = {}) {
+export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), now = Date.now, readRecord = readReplRecord, statRecord = statReplRecord, readTimeout = READ_MS, rootKey = () => replRecordRootKey(root) } = {}) {
 	const generation = randomBytes(6).toString("hex");
 	const pins = new Map(); // pinId -> pin state
 	let inspections = new Map(); // sessionName -> { at, promise }
@@ -134,6 +136,11 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		return true;
 	};
 
+	// P0: whether a session's record is in this process's record directory. With no key (clients don't
+	// set one yet) there's nothing to check, quietly; a different directory, or no usable one here, or a
+	// key this page doesn't read, means its record isn't read or shown.
+	const directoryOf = async key => !key ? "unverified" : !REPL_ROOT_KEY.test(key) ? "malformed" : key === await rootKey() ? "same" : "different";
+
 	// Refreshes a pin's identity, then its record when the file changed (or every 30 s).
 	async function refresh(pin) {
 		if (pin.ended) return;
@@ -143,6 +150,12 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 			if (seen.state === "unchecked") { pin.state = "unchecked"; pin.reason = seen.reason; return; }
 			if (seen.tmuxSessionId !== pin.tmuxSessionId || seen.tmuxSessionCreatedAt !== pin.tmuxSessionCreatedAt || !sameRecord(pin, seen)) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
 			pin.state = seen.state; pin.reason = undefined; pin.checkedAt = now(); pin.cwd = seen.cwd;
+			pin.directory = await directoryOf(seen.rootKey);
+		}
+		if (pin.directory === "different" || pin.directory === "malformed") {
+			// What was shown from it goes, and browsers are told.
+			if (pin.record) { pin.record = undefined; pin.window = undefined; pin.shown = undefined; pin.sequence++; }
+			return;
 		}
 		if (!pin.recordId || pin.recordVersion !== "1") return;
 		if (pin.record && now() - pin.statAt < STAT_MS) return;
@@ -205,7 +218,7 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		}
 		const pinId = randomBytes(9).toString("base64url");
 		pins.set(pinId, { ...session, tmuxSessionId: seen.tmuxSessionId, tmuxSessionCreatedAt: seen.tmuxSessionCreatedAt, recordId: seen.recordId, recordVersion: seen.recordVersion,
-			cwd: seen.cwd, state: seen.state, checkedAt: now(), statAt: 0, readAt: 0, sequence: 0, epoch: 0, seenAt: now() });
+			cwd: seen.cwd, directory: await directoryOf(seen.rootKey), state: seen.state, checkedAt: now(), statAt: 0, readAt: 0, sequence: 0, epoch: 0, seenAt: now() });
 		sweep();
 		return { pinId };
 	}
@@ -219,7 +232,7 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		sweep();
 		const current = `${generation}:${pin.sequence}`;
 		const base = {
-			sessionName: pin.sessionName, runtime: pin.runtime, label: pin.label, state: pin.state, reason: pin.reason, cwd: pin.cwd,
+			sessionName: pin.sessionName, runtime: pin.runtime, label: pin.label, state: pin.state, reason: pin.reason, cwd: pin.cwd, directory: pin.directory,
 			record: !pin.recordId ? "none" : pin.recordVersion === "1" ? "v1" : "unsupported",
 			checkedAt: pin.checkedAt, readAt: pin.readAt || null, readError: pin.readError, version: current, now: now(), ended: pin.ended === true,
 		};

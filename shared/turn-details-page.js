@@ -469,6 +469,9 @@ export function replSessionStatusHtml(view, { sessionsHref = "" } = {}) {
 	else if (view.record === "unsupported") parts.push("Its shared record uses a version this page doesn't read.");
 	parts.push(`<span class="repl-ages" data-repl-now="${Number(view.now) || 0}" data-repl-checked="${Number(view.checkedAt) || 0}" data-repl-read="${Number(view.readAt) || 0}">Session checked <span data-repl-age="checked"></span>${view.readAt ? `; record read <span data-repl-age="read"></span>` : ""}.</span>`);
 	if (view.readError) parts.push(`<span class="live-notice">${escape(`The record couldn't be read just now: ${view.readError}`)}</span>`);
+	// P0 (repl-live.js): a session without a record-directory key stays quiet until clients set one.
+	if (view.directory === "different") parts.push(`<span class="live-notice">${escape(`${view.sessionName}'s shared record is in a different or replaced record directory, not this preview's, so it isn't shown.`)}</span>`);
+	else if (view.directory === "malformed") parts.push(`<span class="live-notice">${escape(`${view.sessionName}'s record-directory key isn't one this page reads, so its record isn't shown.`)}</span>`);
 	return parts.join(" ");
 }
 
