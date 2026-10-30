@@ -14,7 +14,8 @@ export const REPL_SESSIONS = Object.freeze([
 
 const SESSION_BY_NAME = new Map(REPL_SESSIONS.map(session => [session.sessionName, session]));
 // "|" can't occur in any of these fields, and tmux keeps it whether or not it was started with -u.
-const PANE_FORMAT = "#{session_id}|#{session_created}|#{window_index}|#{pane_index}|#{pane_id}|#{pane_dead}|#{@pi_repl_record_id}|#{@pi_repl_record_version}";
+// The working directory comes last, since a path can contain "|".
+const PANE_FORMAT = "#{session_id}|#{session_created}|#{window_index}|#{pane_index}|#{pane_id}|#{pane_dead}|#{@pi_repl_record_id}|#{@pi_repl_record_version}|#{pane_current_path}";
 // As pi-repl reads tmux: only these mean the session isn't there.
 const ABSENT = /no server running|can't find session:|(?:error connecting|failed to connect).*?(?:No such file|Connection refused)/i;
 const IDENTITY_MS = 5_000, STAT_MS = 1_000, REREAD_MS = 30_000, IDLE_MS = 60_000, READ_MS = 2_000;
@@ -47,9 +48,12 @@ export async function inspectReplSession(sessionName, run = runTmux) {
 		.sort((a, b) => Number(a[2]) - Number(b[2]) || Number(a[3]) - Number(b[3]));
 	if (!panes.length) return { state: "unchecked", reason: "tmux listed no panes" };
 	const [tmuxSessionId, created, , , paneId, dead, recordId, recordVersion] = panes[0];
+	// The pane's working directory (its foreground process's), for paths an entry names relatively.
+	const cwd = panes[0].slice(8).join("|");
 	return {
 		state: dead === "1" ? "runtime-ended" : "running",
 		tmuxSessionId, tmuxSessionCreatedAt: Number(created), paneId,
+		cwd: cwd.startsWith("/") && cwd.length <= 4096 ? cwd : undefined,
 		recordId: /^[a-f0-9]{32}$/.test(recordId ?? "") ? recordId : undefined,
 		recordVersion: recordVersion || undefined,
 	};
@@ -138,7 +142,7 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 			if (seen.state === "absent") { pin.state = "ended"; pin.ended = true; pin.checkedAt = now(); return; }
 			if (seen.state === "unchecked") { pin.state = "unchecked"; pin.reason = seen.reason; return; }
 			if (seen.tmuxSessionId !== pin.tmuxSessionId || seen.tmuxSessionCreatedAt !== pin.tmuxSessionCreatedAt || !sameRecord(pin, seen)) { pin.state = "replaced"; pin.ended = true; pin.checkedAt = now(); return; }
-			pin.state = seen.state; pin.reason = undefined; pin.checkedAt = now();
+			pin.state = seen.state; pin.reason = undefined; pin.checkedAt = now(); pin.cwd = seen.cwd;
 		}
 		if (!pin.recordId || pin.recordVersion !== "1") return;
 		if (pin.record && now() - pin.statAt < STAT_MS) return;
@@ -201,7 +205,7 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		}
 		const pinId = randomBytes(9).toString("base64url");
 		pins.set(pinId, { ...session, tmuxSessionId: seen.tmuxSessionId, tmuxSessionCreatedAt: seen.tmuxSessionCreatedAt, recordId: seen.recordId, recordVersion: seen.recordVersion,
-			state: seen.state, checkedAt: now(), statAt: 0, readAt: 0, sequence: 0, epoch: 0, seenAt: now() });
+			cwd: seen.cwd, state: seen.state, checkedAt: now(), statAt: 0, readAt: 0, sequence: 0, epoch: 0, seenAt: now() });
 		sweep();
 		return { pinId };
 	}
@@ -215,7 +219,7 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		sweep();
 		const current = `${generation}:${pin.sequence}`;
 		const base = {
-			sessionName: pin.sessionName, runtime: pin.runtime, label: pin.label, state: pin.state, reason: pin.reason,
+			sessionName: pin.sessionName, runtime: pin.runtime, label: pin.label, state: pin.state, reason: pin.reason, cwd: pin.cwd,
 			record: !pin.recordId ? "none" : pin.recordVersion === "1" ? "v1" : "unsupported",
 			checkedAt: pin.checkedAt, readAt: pin.readAt || null, readError: pin.readError, version: current, now: now(), ended: pin.ended === true,
 		};

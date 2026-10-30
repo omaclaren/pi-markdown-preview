@@ -14,6 +14,7 @@ import { performNativePathAction } from "./native-path-action.js";
 import { buildTurnDetailsPage, buildLivePage, buildReplSessionPage, buildReplSessionsPage, liveCardVersion, liveStatusHtml, renderLiveCard, replEntryCards, replSessionStatusHtml, replWindowNoticesHtml } from "./turn-details-page.js";
 import { isReplResultLabel, replSendCalls } from "./repl-calls.js";
 import { createReplHighlighter } from "./repl-highlight.js";
+import { resolveReplFiles } from "./repl-files.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 
@@ -279,11 +280,13 @@ const NON_HTML_SECURITY_HEADERS = {
 	"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
 };
 
-const turnSecurityHeaders = nonce => ({
+// REPL pages also load same-origin images: the files an entry names, through their retained routes.
+const turnSecurityHeaders = (nonce, images = "data:") => ({
 	...COMMON_SECURITY_HEADERS,
 	"Content-Type": "text/html; charset=utf-8",
-	"Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+	"Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self'; img-src ${images}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
 });
+const REPL_IMAGES = "'self' data:";
 
 /** @param {string} scriptNonce */
 function getHtmlSecurityHeaders(scriptNonce, frameOrigin) {
@@ -1044,6 +1047,25 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	const nativeActionKey = randomBytes(32).toString("base64url");
 	// One highlighter per watcher, so a REPL page's code is highlighted once and cached.
 	const replHighlight = options.repl ? (options.replHighlight ?? createReplHighlighter()) : undefined;
+	// Routes for the files REPL entries name, as for a document's absolute images: an opaque ID per
+	// path, served only once a card has shown it. The most recent REPL_FILE_ROUTES are kept.
+	const replFileRoutes = new Map();
+	const REPL_FILE_ROUTES = 500;
+	const replFiles = async view => {
+		const found = await resolveReplFiles(view.entries ?? [], view.cwd);
+		const shown = new Map();
+		for (const [entryId, files] of found) {
+			const items = files.map(file => {
+				const imageId = createHmac("sha256", token).update("absolute-image\0").update(file.path).digest("hex");
+				replFileRoutes.delete(imageId);
+				replFileRoutes.set(imageId, { path: file.path, contentType: file.contentType });
+				return { written: file.written, url: `${ABSOLUTE_IMAGE_PREFIX}${imageId}?v=${file.mtimeMs}`, image: file.contentType !== "application/pdf" };
+			});
+			shown.set(entryId, { items, signature: createHash("sha256").update(items.map(item => item.url).join("\n")).digest("hex").slice(0, 12) });
+		}
+		while (replFileRoutes.size > REPL_FILE_ROUTES) replFileRoutes.delete(replFileRoutes.keys().next().value);
+		return shown;
+	};
 	const nativePathAction = options.nativePathAction ?? performNativePathAction;
 	let nativeActionBusy = false, nextNativeActionAt = 0;
 	const expiredHint = typeof options.expiredHint === "string" ? options.expiredHint.trim() : "Re-run /preview-browser --watch.";
@@ -1357,7 +1379,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			if (rest !== "" && !match) { respondText(res, 404, "Unknown REPL view."); return; }
 			const scriptNonce = randomBytes(18).toString("base64url");
 			// HEAD never inspects tmux or reads a record.
-			if (method === "HEAD") { res.writeHead(200, match?.[3] ? { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" } : turnSecurityHeaders(scriptNonce)); res.end(); return; }
+			if (method === "HEAD") { res.writeHead(200, match?.[3] ? { ...NON_HTML_SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" } : turnSecurityHeaders(scriptNonce, REPL_IMAGES)); res.end(); return; }
 			const query = `identity=${identity}&instance=${instance}`;
 			const sessionsHref = `${REPL_PREFIX}?${query}`;
 			const latest = documents[documents.length - 1];
@@ -1370,7 +1392,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 			// line IDs (Pandoc adds "-1", "-2", …) can't be another entry's.
 			const highlight = async view => view.entries?.length ? replHighlight(view.entries.map(entry => ({ key: entry.id, code: entry.code, id: `repl-entry-${createHash("sha256").update(entry.id).digest("hex").slice(0, 16)}` })), view.runtime, { signal: controller.signal }).catch(() => new Map()) : new Map();
 			const respondPage = (html, replSession) => {
-				res.writeHead(200, turnSecurityHeaders(scriptNonce));
+				res.writeHead(200, turnSecurityHeaders(scriptNonce, REPL_IMAGES));
 				res.end(prepareBrowserWatchHtml(html, {
 					view: "repl", replSession, revision: latest.revision, revisions: documents.map(d => d.revision),
 					turnDetailsUrl: latestWorking ? `${TURN_PREFIX}${latestWorking.revision}?${query}` : undefined,
@@ -1405,10 +1427,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					return;
 				}
 				const highlighted = view.unchanged ? new Map() : await highlight(view);
+				const files = view.unchanged ? new Map() : await replFiles(view);
 				if (closed || res.destroyed) return;
 				if (match[3]) {
 					// The window's notices go with its cards; an unchanged update leaves the page's as they are.
-					const shown = view.unchanged ? undefined : replEntryCards(view, highlighted);
+					const shown = view.unchanged ? undefined : replEntryCards(view, highlighted, undefined, files);
 					respondJson(res, 200, {
 						version: view.version, unchanged: view.unchanged === true, resync: view.resync === true, ended: view.ended === true,
 						statusHtml: replSessionStatusHtml(view, { sessionsHref }),
@@ -1416,7 +1439,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					});
 					return;
 				}
-				respondPage(buildReplSessionPage(view, { label: options.sourceLabel, appearanceStyle, updatesHref: `${REPL_PREFIX}pin/${match[2]}/updates?${query}`, sessionsHref, highlighted }), view.sessionName);
+				respondPage(buildReplSessionPage(view, { label: options.sourceLabel, appearanceStyle, updatesHref: `${REPL_PREFIX}pin/${match[2]}/updates?${query}`, sessionsHref, highlighted, files }), view.sessionName);
 			} catch {
 				if (!closed && !res.destroyed) {
 					if (match?.[3]) respondJson(res, 503, { error: "unavailable" });
@@ -1769,6 +1792,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					allowedImage = retained[index].absoluteImages.get(imageId);
 					if (allowedImage) break;
 				}
+				allowedImage ??= replFileRoutes.get(imageId);
 			}
 			resourcePath = allowedImage ? await realpath(allowedImage.path).catch(() => undefined) : undefined;
 			contentType = allowedImage?.contentType;

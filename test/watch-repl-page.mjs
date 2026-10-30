@@ -8,9 +8,11 @@ import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord }
 import { createReplLiveSource, inspectReplSession, replWindow, REPL_FIELD_DISPLAY_CHARS } from "../shared/repl-live.js";
 import { createReplHighlighter } from "../shared/repl-highlight.js";
 import { buildReplSessionPage, renderReplEntryCard, replEntryCards, REPL_RESPONSE_BYTES } from "../shared/turn-details-page.js";
+import { replFilePaths, resolveReplFiles, REPL_FILES_PER_ENTRY } from "../shared/repl-files.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const ID = "0123456789abcdef0123456789abcdef";
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const spawnPandoc = () => spawnSync(process.env.PANDOC_PATH || "pandoc", ["--version"], { stdio: "ignore" }).error ? "pandoc not installed" : false;
 const PIN = { sessionName: "pi-repl-python", tmuxSessionId: "$3", tmuxSessionCreatedAt: 1793150000 };
 const entry = (n, fields = {}) => ({ id: `e${n}`, requestId: "", createdAt: 1_700_000_000_000 + n, updatedAt: 1_700_000_000_000 + n, completedAt: null, sessionName: PIN.sessionName, runtime: "python",
@@ -152,7 +154,10 @@ test("REPL sessions: read from tmux as pi-repl does, and only tmux's own message
 	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": { code: 1, stderr: "permission denied" }, "has-session": { code: 1, stderr: "permission denied" } }).run)).state, "unchecked");
 	// The first pane by window and pane index, whatever order tmux lists them in.
 	const seen = await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "1", "0", "%9", "0", ID, "1"], ["$3", "1793150000", "0", "1", "%5", "1", ID, "1"], ["$3", "1793150000", "0", "0", "%2", "0", ID, "1"]]) }).run);
-	assert.deepEqual(seen, { state: "running", tmuxSessionId: "$3", tmuxSessionCreatedAt: 1793150000, paneId: "%2", recordId: ID, recordVersion: "1" });
+	assert.deepEqual(seen, { state: "running", tmuxSessionId: "$3", tmuxSessionCreatedAt: 1793150000, paneId: "%2", cwd: undefined, recordId: ID, recordVersion: "1" });
+	// The working directory comes last, whole, even with a "|" in it; only an absolute one counts.
+	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", ID, "1", "/work/a|b"]]) }).run)).cwd, "/work/a|b");
+	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", ID, "1", "relative"]]) }).run)).cwd, undefined);
 	assert.equal((await inspectReplSession("pi-repl-python", tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "1", "", ""]]) }).run)).state, "runtime-ended");
 	const { run, calls } = tmux({ "list-panes": panes([["$3", "1793150000", "0", "0", "%2", "0", "", ""]]) });
 	assert.equal((await inspectReplSession("pi-repl-python", run)).recordId, undefined);
@@ -161,12 +166,12 @@ test("REPL sessions: read from tmux as pi-repl does, and only tmux's own message
 
 // A source over a scripted tmux and an in-memory record, with a settable clock.
 function source(overrides = {}) {
-	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true, recordId = overrides.noRecord ? "" : ID, recordVersion = overrides.recordVersion ?? "1";
+	let clock = 1_000_000, current = record([entry(1)]), identity = ["$3", String(PIN.tmuxSessionCreatedAt)], alive = true, recordId = overrides.noRecord ? "" : ID, recordVersion = overrides.recordVersion ?? "1", cwd;
 	const reads = [], stats = [];
 	const run = async args => {
 		if (args[0] === "list-panes") {
 			if (!alive || args[3] !== "=pi-repl-python") return { code: 1, stdout: "", stderr: `can't find window: ${args[3].slice(1)}` };
-			return panes([[...identity, "0", "0", "%1", "0", recordId, recordId ? recordVersion : ""]]);
+			return panes([[...identity, "0", "0", "%1", "0", recordId, recordId ? recordVersion : "", ...(cwd ? [cwd] : [])]]);
 		}
 		return { code: 1, stdout: "", stderr: `can't find session: ${args[2].slice(1)}` };
 	};
@@ -174,7 +179,7 @@ function source(overrides = {}) {
 	const live = createReplLiveSource({ run, now: () => clock, root: "/unused",
 		statRecord: async () => { stats.push(clock); return `stamp-${JSON.stringify(current).length}-${current.revision}`; },
 		readRecord: async (id, pin) => { reads.push(clock); return { record: validateReplRecord(structuredClone(current), id, pin), stamp: `stamp-${JSON.stringify(current).length}-${current.revision}` }; }, ...rest });
-	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; }, record: () => { recordId = ID; }, version: value => { recordVersion = value; } };
+	return { live, reads, stats, tick: ms => { clock += ms; }, set: value => { current = value; }, replace: () => { identity = ["$8", "1793159999"]; }, end: () => { alive = false; }, record: () => { recordId = ID; }, version: value => { recordVersion = value; }, cwd: value => { cwd = value; } };
 }
 
 test("REPL source: lists the shared sessions, pins one lifetime, and sends its window only when it changed", async () => {
@@ -461,6 +466,33 @@ test("REPL page: who sent each entry, an agent by its label and a person by a na
 	assert.equal(who({ mode: "raw", label: "Sam" }), "User");
 	assert.equal(who({ mode: "raw", label: "<b>Sam</b>", requestId: "cli:send:1" }), "&lt;b&gt;Sam&lt;/b&gt; · via terminal");
 	assert.notEqual(replEntryVersion({ ...entry(1), requestId: "command:send:1" }), replEntryVersion({ ...entry(1), requestId: "cli:send:1" }), "A change of route changes the card.");
+});
+
+test("REPL files: image and PDF paths an entry names, resolved against the session's directory, only if they're files", async t => {
+	assert.deepEqual(replFilePaths({ code: `plt.savefig("out/fit.png")\npng('plot.PNG'); x = "notes.txt"`, output: "Saved to /tmp/ab/c.png and ~/figs/d.pdf.\nalso out/fit.png" }),
+		["/tmp/ab/c.png", "~/figs/d.pdf", "out/fit.png", "plot.PNG"], "Output first; quoted and bare; a full stop isn't part of a path; repeats once; other files never.");
+	assert.deepEqual(replFilePaths({ code: `f = "a.png.bak"; g = 'x.svg'`, output: "" }), ["x.svg"]);
+	const dir = await mkdtemp(join(tmpdir(), "repl-files-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	await mkdir(join(dir, "out"));
+	await writeFile(join(dir, "out", "fit.png"), PNG);
+	await mkdir(join(dir, "folder.png"));
+	const entries = [{ id: "e1", code: `savefig("out/fit.png"); savefig("missing.png"); savefig("folder.png"); savefig("${join(dir, "out", "fit.png")}")`, output: "" }, { id: "e2", code: "x = 1", output: "" }];
+	const found = await resolveReplFiles(entries, dir);
+	assert.deepEqual([...found.keys()], ["e1"]);
+	assert.deepEqual(found.get("e1").map(file => [file.written, file.path, file.contentType]), [["out/fit.png", join(dir, "out", "fit.png"), "image/png"]],
+		"Only regular files that exist, each path once, however it was written.");
+	assert.equal((await resolveReplFiles(entries, undefined)).get("e1")?.length, 1, "Without a directory, only absolute paths resolve.");
+	const many = await resolveReplFiles([{ id: "e", code: Array.from({ length: 10 }, (_, i) => `savefig("out/fit.png?${i}")`).join("\n"), output: Array.from({ length: 10 }, (_, i) => `/f${i}.png`).join("\n") }], dir,
+		{ statFile: async () => ({ isFile: () => true, mtimeMs: 1 }) });
+	assert.equal(many.get("e").length, REPL_FILES_PER_ENTRY, "A bounded number per entry.");
+	const card = renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python", undefined, [
+		{ written: "out/<fit>.png", url: "/__pi_markdown_preview_absolute_image__/abc?v=1", image: true }, { written: "report.pdf", url: "/r", image: false }]);
+	assert.match(card, /<h3>Files<\/h3><div class="repl-files"><a class="repl-file" href="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" target="_blank" rel="noopener noreferrer"><img src="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" alt="out\/&lt;fit&gt;.png" loading="lazy"><span>out\/&lt;fit&gt;.png<\/span><\/a><a class="repl-file repl-file-link" href="\/r" target="_blank" rel="noopener noreferrer">report.pdf<\/a><\/div>/);
+	assert.doesNotMatch(renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python"), /repl-files/, "No files, no section.");
+	const cards = replEntryCards({ label: "Python", entries: [{ ...entry(1), version: "v1" }] }, new Map(), undefined, new Map([["e1", { items: [{ written: "a.png", url: "/a", image: true }], signature: "s1" }]]));
+	assert.equal(cards.cards[0].version, "v1.s1", "A card's version covers its files.");
+	assert.match(cards.cards[0].html, /data-entry-version="v1\.s1"/);
 });
 
 test("REPL page in the watcher: only with the option, behind the cookie, linked from Preview", async t => {
@@ -765,6 +797,33 @@ test("REPL page in a browser: new entries arrive, and a changed entry updates in
 	await fresh.waitForSelector(".repl-entry");
 	await altLeft(fresh);
 	assert.match(await fresh.$eval("h1", h => h.textContent), /REPL sessions/);
+});
+
+test("REPL page in a browser: a file an entry saves shows as a thumbnail, through a route only a card has shown", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "repl-page-files-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	await writeFile(join(dir, "fit.png"), PNG);
+	const s = source();
+	s.cwd(dir);
+	s.set(record([entry(1, { code: 'plt.savefig("fit.png")\nprint("and missing.png")', output: "and missing.png\n" })]));
+	const server = await createBrowserWatchServer("<!doctype html><html><head><title>R</title></head><body><main id='preview-root'><p>Answer</p></main></body></html>", dir, { repl: s.live });
+	t.after(() => server.close());
+	const { default: puppeteer } = await import("puppeteer-core");
+	const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+	t.after(() => browser.close());
+	const page = await browser.newPage();
+	await page.goto(server.url);
+	const replHref = await page.$eval('[data-watch-control="repl"]', a => a.href);
+	await page.goto(replHref.replace("/__pi_markdown_preview_repl__/?", "/__pi_markdown_preview_repl__/pi-repl-python?"));
+	await page.waitForSelector(".repl-file img");
+	await page.waitForFunction(() => document.querySelector(".repl-file img").complete);
+	const shown = await page.$$eval(".repl-file", links => links.map(a => ({ text: a.textContent, target: a.target, width: a.querySelector("img")?.naturalWidth ?? 0, href: a.getAttribute("href") })));
+	assert.deepEqual(shown.map(file => [file.text, file.target, file.width]), [["fit.png", "_blank", 1]], "The saved file shows, loaded under the page's policy; a missing one doesn't.");
+	// Fetched as the page does, with its cookie: without one, the route refuses anything.
+	const fetched = href => page.evaluate(url => fetch(url).then(response => [response.status, response.headers.get("content-type")]), href);
+	assert.deepEqual(await fetched(shown[0].href), [200, "image/png"]);
+	assert.equal((await fetched(`/__pi_markdown_preview_absolute_image__/${"0".repeat(64)}`))[0], 404, "Only a route a card has shown is served.");
+	assert.equal((await fetch(new URL(shown[0].href, server.url))).status, 403, "Not without the preview's cookie.");
 });
 
 test("REPL page in a browser: notices stay, held numbers settle, Copy link and newer responses (R9, R13, R17)", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {

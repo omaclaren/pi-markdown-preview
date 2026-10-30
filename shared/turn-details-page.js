@@ -262,6 +262,7 @@ const LIVE_STYLE = `.live-omitted { color:var(--muted); font-size:12px; margin:0
 .repl-sessions { list-style:none; padding:0; margin:0 0 14px } .repl-session { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; padding:10px 14px; margin:0 0 8px; border:1px solid var(--line); border-radius:10px; background:var(--panel) } .repl-session-name { font-weight:600 } .repl-session-state,.repl-session code { color:var(--muted); font-size:12px }
 .repl-status-error,.repl-status-timeout { color:var(--warning, var(--muted)) } details.repl-output > summary { padding:0; font:600 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--muted) }
 .pi-preview-repl code span.kw,.pi-preview-repl code span.cf,.pi-preview-repl code span.im { color:var(--syntax-keyword, var(--accent)) } .pi-preview-repl code span.dt { color:var(--syntax-type) } .pi-preview-repl code span.fu,.pi-preview-repl code span.bu { color:var(--syntax-function) } .pi-preview-repl code span.va,.pi-preview-repl code span.ot { color:var(--syntax-variable) } .pi-preview-repl code span.st,.pi-preview-repl code span.ss,.pi-preview-repl code span.sc,.pi-preview-repl code span.ch { color:var(--syntax-string, var(--ok, inherit)) } .pi-preview-repl code span.dv,.pi-preview-repl code span.bn,.pi-preview-repl code span.fl { color:var(--syntax-number) } .pi-preview-repl code span.co { color:var(--syntax-comment, var(--muted)); font-style:italic } .pi-preview-repl code span.op { color:var(--syntax-operator) } .pi-preview-repl code span.pp,.pi-preview-repl code span.pu { color:var(--syntax-punctuation) } .pi-preview-repl code span.er,.pi-preview-repl code span.al { color:var(--syntax-error, var(--error, inherit)) } .repl-code > .sourceCode > pre { padding:2px 0 0; margin:0 } .repl-entry .tool-path pre { white-space:pre-wrap; overflow-wrap:anywhere }
+.repl-files { display:flex; flex-wrap:wrap; gap:12px; margin:4px 0 0 } .repl-file { display:flex; flex-direction:column; gap:4px; max-width:min(100%, 360px); color:var(--muted); font-size:12px; text-decoration:none; overflow-wrap:anywhere } .repl-file img { display:block; max-width:100%; max-height:240px; object-fit:contain; border:1px solid var(--line); border-radius:6px; background:#fff } .repl-file:focus-visible { outline:2px solid var(--accent); outline-offset:2px } .repl-file-link { color:var(--accent); text-decoration:underline; font-size:13px }
 .repl-new-entries { position:sticky; bottom:12px; display:block; margin:8px auto 0; padding:6px 12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; cursor:pointer } .repl-new-entries[hidden] { display:none }
 .live-newer { position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50; min-height:32px; padding:6px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:inherit; font:600 12px/1.2 system-ui; box-shadow:0 2px 8px #0002; cursor:pointer } .live-newer[hidden] { display:none } .live-newer:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 @media(pointer:coarse) { .live-newer { min-height:44px } } @media print { .live-newer { display:none } }`;
@@ -432,7 +433,7 @@ function replCode(code, highlighted) {
  * One recorded submission. `number` is its place in the shown window; `runtimeLabel` names the
  * session's runtime; `highlighted` is Pandoc's HTML for its code (repl-highlight.js), if any.
  */
-export function renderReplEntryCard(entry, number, runtimeLabel, highlighted) {
+export function renderReplEntryCard(entry, number, runtimeLabel, highlighted, files) {
 	const status = REPL_STATUSES[entry.status] ?? entry.status;
 	const who = replEntryWho(entry);
 	const title = REPL_STATUS_TITLES[entry.status] ? ` title="${escape(REPL_STATUS_TITLES[entry.status])}"` : "";
@@ -446,7 +447,11 @@ export function renderReplEntryCard(entry, number, runtimeLabel, highlighted) {
 	const output = entry.status === "note" && !entry.output ? "" : `<div class="tool-fields"><section class="tool-field">${lines > REPL_LONG_OUTPUT_LINES
 		? `<details class="repl-output"><summary>Output · ${lines} lines</summary>${outputBody}</details>`
 		: `<h3>Output</h3>${outputBody}`}${omittedNote("output", (entry.displayOmitted?.output ?? 0) + (entry.outputOmittedChars ?? 0))}</section></div>`;
-	return `<details class="event result repl-entry" open data-entry-id="${escape(entry.id)}" data-entry-version="${escape(entry.version)}"><summary>${head}</summary><div class="event-content">${wrap}${prose}${source}${output}</div></details>`;
+	// Image and PDF files the entry names (repl-files.js), such as a saved plot; each opens in a new tab.
+	const saved = files?.length ? `<div class="tool-fields"><section class="tool-field"><h3>Files</h3><div class="repl-files">${files.map(file => file.image
+		? `<a class="repl-file" href="${escape(file.url)}" target="_blank" rel="noopener noreferrer"><img src="${escape(file.url)}" alt="${escape(file.written)}" loading="lazy"><span>${escape(file.written)}</span></a>`
+		: `<a class="repl-file repl-file-link" href="${escape(file.url)}" target="_blank" rel="noopener noreferrer">${escape(file.written)}</a>`).join("")}</div></section></div>` : "";
+	return `<details class="event result repl-entry" open data-entry-id="${escape(entry.id)}" data-entry-version="${escape(entry.version)}"><summary>${head}</summary><div class="event-content">${wrap}${prose}${source}${output}${saved}</div></details>`;
 }
 
 /** The session view's state line, from `view` (createReplLiveSource): sent with every update. */
@@ -477,10 +482,11 @@ export function replWindowNoticesHtml(view) {
  * leaving room for the rest of the update; a card too big highlighted is tried plain. `highlighted`
  * maps entry IDs to highlighted code. Returns the cards and how many older entries aren't shown.
  */
-export function replEntryCards(view, highlighted = new Map(), budget = REPL_RESPONSE_BYTES) {
-	const entries = view.entries ?? [];
+export function replEntryCards(view, highlighted = new Map(), budget = REPL_RESPONSE_BYTES, files = new Map()) {
+	// A card's version covers the files it shows too (their routes and modification times), so it updates with them.
+	const entries = (view.entries ?? []).map(entry => files.has(entry.id) ? { ...entry, version: `${entry.version}.${files.get(entry.id).signature}` } : entry);
 	budget -= REPL_ENVELOPE_BYTES;
-	const render = (entry, number, plain) => renderReplEntryCard(entry, number, view.label, plain ? undefined : highlighted.get(entry.id));
+	const render = (entry, number, plain) => renderReplEntryCard(entry, number, view.label, plain ? undefined : highlighted.get(entry.id), files.get(entry.id)?.items);
 	// As sent: the card's HTML, its ID and version, and its ID again in `ids`.
 	const size = (entry, html) => Buffer.byteLength(JSON.stringify({ id: entry.id, version: entry.version, html })) + Buffer.byteLength(JSON.stringify(entry.id)) + 2;
 	const plain = new Set(), html = [];
@@ -500,8 +506,8 @@ export function replEntryCards(view, highlighted = new Map(), budget = REPL_RESP
 const REPL_INTRO = "Recent recorded submissions to this shared session, from any agent, Pi Studio or project, updating as they arrive. Code typed directly into the terminal isn't recorded here.";
 
 /** One session's page. `updatesHref` is the page's same-origin polling address. */
-export function buildReplSessionPage(view, { label = "", appearanceStyle = "", updatesHref = "", sessionsHref = "", highlighted } = {}) {
-	const shown = replEntryCards(view, highlighted);
+export function buildReplSessionPage(view, { label = "", appearanceStyle = "", updatesHref = "", sessionsHref = "", highlighted, files } = {}) {
+	const shown = replEntryCards(view, highlighted, undefined, files);
 	const cards = shown.cards.map(card => card.html).join("\n");
 	const notices = replWindowNoticesHtml({ ...view, notShown: shown.notShown });
 	return `${pageHead(`REPL · ${view.label}`, appearanceStyle)}<body class="pi-preview-working pi-preview-repl"><main id="preview-root" data-repl-updates="${escape(updatesHref)}" data-repl-version="${escape(view.version ?? "")}">${sessionsHref ? `<nav><a href="${escape(sessionsHref)}" title="All REPL sessions (Option/Alt+Left)" aria-keyshortcuts="Alt+ArrowLeft">← REPL sessions</a></nav>` : ""}<h1>REPL · ${escape(view.label)}</h1><p class="subtitle">${escape(label)}${label ? " · " : ""}${escape(view.sessionName)}</p><p class="notices">${escape(REPL_INTRO)}</p><p class="live-status repl-session-status" aria-live="polite">${replSessionStatusHtml(view, { sessionsHref })}</p><p class="live-status repl-window-notices"${notices ? "" : " hidden"}>${notices}</p><div class="repl-entries">${cards || '<p class="empty-text repl-empty">No submissions recorded yet.</p>'}</div><button type="button" class="repl-new-entries" hidden>New entries below</button></main></body></html>`;
