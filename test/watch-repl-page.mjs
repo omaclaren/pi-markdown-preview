@@ -487,9 +487,9 @@ test("REPL files: image and PDF paths an entry names, resolved against the sessi
 		{ statFile: async () => ({ isFile: () => true, mtimeMs: 1 }) });
 	assert.equal(many.get("e").length, REPL_FILES_PER_ENTRY, "A bounded number per entry.");
 	const card = renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python", undefined, [
-		{ written: "out/<fit>.png", url: "/__pi_markdown_preview_absolute_image__/abc?v=1", image: true }, { written: "reports/2026/q3.pdf", url: "/r", image: false }]);
-	assert.match(card, /<h3>Files<\/h3><div class="repl-files"><a class="repl-file" href="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" target="_blank" rel="noopener noreferrer" title="out\/&lt;fit&gt;.png"><img src="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" alt="out\/&lt;fit&gt;.png" loading="lazy"><span>&lt;fit&gt;.png<\/span><\/a><\/div><div class="repl-file-links"><a class="repl-file-link" href="\/r" target="_blank" rel="noopener noreferrer" title="reports\/2026\/q3.pdf">q3.pdf<\/a><\/div>/,
-		"Images as thumbnails, then PDFs below as links; each labelled with its name, the path as written its tooltip.");
+		{ written: "out/<fit>.png", url: "/__pi_markdown_preview_absolute_image__/abc?v=1", image: true }, { written: "/tmp/<fit>.pdf", url: "/p", image: false }, { written: "reports/2026/q3.pdf", url: "/r", image: false }]);
+	assert.match(card, /<h3>Files<\/h3><div class="repl-files"><figure class="repl-file"><a class="repl-file-image" href="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" target="_blank" rel="noopener noreferrer" title="out\/&lt;fit&gt;.png"><img src="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" alt="out\/&lt;fit&gt;.png" loading="lazy"><\/a><figcaption><span title="out\/&lt;fit&gt;.png">&lt;fit&gt;.png<\/span> · <a class="repl-file-alt" href="\/p" target="_blank" rel="noopener noreferrer" title="\/tmp\/&lt;fit&gt;.pdf">PDF<\/a><\/figcaption><\/figure><\/div><div class="repl-file-links"><a class="repl-file-link" href="\/r" target="_blank" rel="noopener noreferrer" title="reports\/2026\/q3.pdf"><span class="repl-file-format">PDF<\/span><span>q3.pdf<\/span><\/a><\/div>/,
+		"One figure in two formats is one thumbnail captioned with the other format; a PDF of its own follows, tagged; each labelled with its name, the path as written its tooltip.");
 	assert.doesNotMatch(renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python"), /repl-files/, "No files, no section.");
 	const cards = replEntryCards({ label: "Python", entries: [{ ...entry(1), version: "v1" }] }, new Map(), undefined, new Map([["e1", { items: [{ written: "a.png", url: "/a", image: true }], signature: "s1" }]]));
 	assert.equal(cards.cards[0].version, "v1.s1", "A card's version covers its files.");
@@ -818,7 +818,7 @@ test("REPL page in a browser: a file an entry saves shows as a thumbnail, throug
 	await page.goto(replHref.replace("/__pi_markdown_preview_repl__/?", "/__pi_markdown_preview_repl__/pi-repl-python?"));
 	await page.waitForSelector(".repl-file img");
 	await page.waitForFunction(() => document.querySelector(".repl-file img").complete);
-	const shown = await page.$$eval(".repl-file", links => links.map(a => ({ text: a.textContent, target: a.target, width: a.querySelector("img")?.naturalWidth ?? 0, href: a.getAttribute("href") })));
+	const shown = await page.$$eval(".repl-file", figures => figures.map(figure => ({ text: figure.querySelector("figcaption").textContent, target: figure.querySelector("a").target, width: figure.querySelector("img")?.naturalWidth ?? 0, href: figure.querySelector("a").getAttribute("href") })));
 	assert.deepEqual(shown.map(file => [file.text, file.target, file.width]), [["fit.png", "_blank", 1]], "The saved file shows, loaded under the page's policy; a missing one doesn't.");
 	// Fetched as the page does, with its cookie: without one, the route refuses anything.
 	const fetched = href => page.evaluate(url => fetch(url).then(response => [response.status, response.headers.get("content-type")]), href);
