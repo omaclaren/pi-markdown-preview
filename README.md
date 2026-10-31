@@ -1,5 +1,7 @@
 # pi-markdown-preview
 
+[![omp status](https://omppackages.com/badge/pi-markdown-preview.svg)](https://omppackages.com/packages/pi-markdown-preview)
+
 Preview assistant responses and local Markdown, LaTeX, code and diff files from [pi](https://pi.dev) in the terminal, in the browser or as PDF, with math, syntax highlighting, Mermaid diagrams and colours from your Pi theme. A browser preview can also follow each turn live, showing prompts, tool calls and results as Pi records them.
 
 ## Screenshots
