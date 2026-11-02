@@ -382,17 +382,24 @@ test("REPL record directory (P0): keys as pi-repl derives them, read without cre
 	assert.equal(await replRecordRootKey(join(base, "link")), undefined, "A symlink isn't the directory.");
 });
 
-test("REPL source: a session's record-directory key (P0), quiet when there is none", async () => {
+test("REPL source: a session's record-directory key (P0), unverified when there is none", async () => {
 	const OWN = replRootKeyOf(1n, 2n), OTHER = replRootKeyOf(1n, 3n);
+	const UNVERIFIED = /pi-repl-python&#39;s record directory isn&#39;t verified yet; it will be once a current pi-repl, agent-repl or Pi Studio sends to it\./;
 	const s = source({ rootKey: async () => OWN });
 	const pinId = (await s.live.pinSession("pi-repl-python")).pinId;
 	let view = await s.live.view(pinId, "");
-	assert.deepEqual([view.directory, view.entries.length], ["unverified", 1], "No key yet: the record is read and shown, as before.");
-	assert.doesNotMatch(replSessionStatusHtml(view), /record directory|record-directory key/, "…without a notice, until clients set keys.");
+	assert.deepEqual([view.directory, view.entries.length], ["unverified", 1], "No key: only older clients have written, and the record is read and shown…");
+	assert.match(replSessionStatusHtml(view), UNVERIFIED, "…as unverified.");
+	assert.match(replSessionStatusHtml(await s.live.view(pinId, view.version)), UNVERIFIED, "Still said when nothing changed.");
+	const empty = source({ rootKey: async () => OWN, noRecord: true });
+	const fresh = await empty.live.view((await empty.live.pinSession("pi-repl-python")).pinId, "");
+	assert.deepEqual([fresh.directory, fresh.record], ["unverified", "none"]);
+	assert.doesNotMatch(replSessionStatusHtml(fresh), /record directory/, "Nothing recorded yet: nothing to verify.");
 	s.rootKey(OWN);
 	s.tick(5_100);
 	view = await s.live.view(pinId, "");
 	assert.deepEqual([view.directory, view.entries.length], ["same", 1]);
+	assert.doesNotMatch(replSessionStatusHtml(view), /record directory/, "This preview's directory: no notice.");
 	s.rootKey(OTHER);
 	s.tick(5_100);
 	view = await s.live.view(pinId, view.version);

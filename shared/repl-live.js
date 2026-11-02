@@ -136,9 +136,10 @@ export function createReplLiveSource({ run = runTmux, root = replRecordRoot(), n
 		return true;
 	};
 
-	// P0: whether a session's record is in this process's record directory. With no key (clients don't
-	// set one yet) there's nothing to check, quietly; a different directory, or no usable one here, or a
-	// key this page doesn't read, means its record isn't read or shown.
+	// P0: whether a session's record is in this process's record directory. With no key (only older
+	// clients have written to it) there's nothing to check, and its record is shown as unverified; a
+	// different directory, or no usable one here, or a key this page doesn't read, means its record
+	// isn't read or shown.
 	const directoryOf = async key => !key ? "unverified" : !REPL_ROOT_KEY.test(key) ? "malformed" : key === await rootKey() ? "same" : "different";
 
 	// Refreshes a pin's identity, then its record when the file changed (or every 30 s).
