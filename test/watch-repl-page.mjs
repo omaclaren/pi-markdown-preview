@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, link, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord, replRecordRootKey, replRootKeyOf } from "../shared/repl-record-reader.js";
@@ -12,6 +12,8 @@ import { replFilePaths, resolveReplFiles, REPL_FILES_PER_ENTRY } from "../shared
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const ID = "0123456789abcdef0123456789abcdef";
+// A file written while entry(n) ran (n < 500).
+const writtenBy = (path, n = 1) => utimes(path, (1_700_000_000_500 + n) / 1000, (1_700_000_000_500 + n) / 1000);
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const spawnPandoc = () => spawnSync(process.env.PANDOC_PATH || "pandoc", ["--version"], { stdio: "ignore" }).error ? "pandoc not installed" : false;
 const PIN = { sessionName: "pi-repl-python", tmuxSessionId: "$3", tmuxSessionCreatedAt: 1793150000 };
@@ -541,18 +543,31 @@ test("REPL files: image and PDF paths an entry names, resolved against the sessi
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	await mkdir(join(dir, "out"));
 	await writeFile(join(dir, "out", "fit.png"), PNG);
+	await writtenBy(join(dir, "out", "fit.png"));
 	await mkdir(join(dir, "folder.png"));
-	const entries = [{ id: "e1", code: `savefig("out/fit.png"); savefig("missing.png"); savefig("folder.png"); savefig("${join(dir, "out", "fit.png")}")`, output: "" }, { id: "e2", code: "x = 1", output: "" }];
+	const entries = [{ ...entry(1), output: "", code: `savefig("out/fit.png"); savefig("missing.png"); savefig("folder.png"); savefig("${join(dir, "out", "fit.png")}")` }, { ...entry(2), code: "x = 1", output: "" }];
 	const found = await resolveReplFiles(entries, dir);
 	assert.deepEqual([...found.keys()], ["e1"]);
 	assert.deepEqual(found.get("e1").map(file => [file.written, file.path, file.contentType]), [["out/fit.png", join(dir, "out", "fit.png"), "image/png"]],
 		"Only regular files that exist, each path once, however it was written.");
 	assert.equal((await resolveReplFiles(entries, undefined)).get("e1")?.length, 1, "Without a directory, only absolute paths resolve.");
 	await writeFile(join(dir, "2.png"), PNG);
-	assert.equal((await resolveReplFiles([{ id: "e", code: `savefig("fit 2.png")`, output: "" }], dir)).size, 0, "An unrelated 2.png beside it isn't shown for fit 2.png.");
-	const many = await resolveReplFiles([{ id: "e", code: Array.from({ length: 10 }, (_, i) => `savefig("out/fit.png?${i}")`).join("\n"), output: Array.from({ length: 10 }, (_, i) => `/f${i}.png`).join("\n") }], dir,
-		{ statFile: async () => ({ isFile: () => true, mtimeMs: 1 }) });
-	assert.equal(many.get("e").length, REPL_FILES_PER_ENTRY, "A bounded number per entry.");
+	await writtenBy(join(dir, "2.png"));
+	assert.equal((await resolveReplFiles([{ ...entry(1), code: `savefig("fit 2.png")`, output: "" }], dir)).size, 0, "An unrelated 2.png beside it isn't shown for fit 2.png.");
+	await writeFile(join(dir, "natural-tail.svg"), "<svg/>");
+	await utimes(join(dir, "natural-tail.svg"), 1_699_999_990, 1_699_999_990);
+	const misread = { ...entry(1), output: `It's saved as "O'Brien natural-tail.svg"`, code: "" };
+	assert.deepEqual(replFilePaths(misread), ["natural-tail.svg"], "Misread: the apostrophe in It's pairs with O'Brien's…");
+	assert.equal((await resolveReplFiles([misread], dir)).size, 0, "…but that file was already there, so it isn't shown.");
+	// Only a file written while the entry ran: from when it was recorded to 2 s after it was done.
+	const T = 1_700_000_000_000, ran = { ...entry(1, { createdAt: T, updatedAt: T + 5_000, code: `savefig("fit.png")`, output: "" }) };
+	const shownAt = async (mtimeMs, fields = {}, now = T + 60_000) => (await resolveReplFiles([{ ...ran, ...fields }], dir, { statFile: async () => ({ isFile: () => true, mtimeMs }), now: () => now })).size === 1;
+	assert.deepEqual(await Promise.all([T - 1, T, T + 7_000, T + 7_001].map(m => shownAt(m))), [false, true, true, false], "Not one already there, nor one written after.");
+	assert.deepEqual([await shownAt(T + 3_500, { completedAt: T + 1_000 }), await shownAt(T + 2_500, { completedAt: T + 1_000 })], [false, true], "Done when it completed, if it says.");
+	assert.deepEqual([await shownAt(T + 30_000, { status: "sent" }, T + 29_000), await shownAt(T + 30_000, { status: "sending" }, T + 27_000)], [true, false], "Pending: up to now.");
+	const many = await resolveReplFiles([{ ...entry(1), code: Array.from({ length: 10 }, (_, i) => `savefig("out/fit.png?${i}")`).join("\n"), output: Array.from({ length: 10 }, (_, i) => `/f${i}.png`).join("\n") }], dir,
+		{ statFile: async () => ({ isFile: () => true, mtimeMs: 1_700_000_000_501 }) });
+	assert.equal(many.get("e1").length, REPL_FILES_PER_ENTRY, "A bounded number per entry.");
 	const card = renderReplEntryCard({ ...entry(1), version: "v" }, 1, "Python", undefined, [
 		{ written: "out/<fit>.png", url: "/__pi_markdown_preview_absolute_image__/abc?v=1", image: true }, { written: "/tmp/<fit>.pdf", url: "/p", image: false }, { written: "reports/2026/q3.pdf", url: "/r", image: false }]);
 	assert.match(card, /<h3>Files<\/h3><div class="repl-files"><a class="repl-file" href="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" target="_blank" rel="noopener noreferrer" title="out\/&lt;fit&gt;.png"><img src="\/__pi_markdown_preview_absolute_image__\/abc\?v=1" alt="out\/&lt;fit&gt;.png" loading="lazy"><span class="repl-file-name">&lt;fit&gt;.png<\/span><\/a><a class="repl-file repl-file-other" href="\/p" target="_blank" rel="noopener noreferrer" title="\/tmp\/&lt;fit&gt;.pdf"><span class="repl-file-format">PDF<\/span><span class="repl-file-name">&lt;fit&gt;.pdf<\/span><\/a><a class="repl-file repl-file-other" href="\/r"[^>]*title="reports\/2026\/q3.pdf"><span class="repl-file-format">PDF<\/span><span class="repl-file-name">q3.pdf<\/span><\/a><\/div>/,
@@ -871,6 +886,7 @@ test("REPL page in a browser: a file an entry saves shows as a thumbnail, throug
 	const dir = await mkdtemp(join(tmpdir(), "repl-page-files-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	await writeFile(join(dir, "fit.png"), PNG);
+	await writtenBy(join(dir, "fit.png"));
 	const s = source();
 	s.cwd(dir);
 	s.set(record([entry(1, { code: 'plt.savefig("fit.png")\nprint("and missing.png")', output: "and missing.png\n" })]));
