@@ -528,6 +528,15 @@ test("REPL files: image and PDF paths an entry names, resolved against the sessi
 	assert.deepEqual(replFilePaths({ code: `plt.savefig("out/fit.png")\npng('plot.PNG'); x = "notes.txt"`, output: "Saved to /tmp/ab/c.png and ~/figs/d.pdf.\nalso out/fit.png" }),
 		["/tmp/ab/c.png", "~/figs/d.pdf", "out/fit.png", "plot.PNG"], "Output first; quoted and bare; a full stop isn't part of a path; repeats once; other files never.");
 	assert.deepEqual(replFilePaths({ code: `f = "a.png.bak"; g = 'x.svg'`, output: "" }), ["x.svg"]);
+	// Never a path the entry didn't name: none is found inside quoted text, whatever quote it holds.
+	const paths = code => replFilePaths({ code });
+	assert.deepEqual(paths(`savefig("fit 2.png")`), ["fit 2.png"], "Not 2.png, the tail after the space.");
+	assert.deepEqual(paths(`open("O'Brien tail.svg"); g = 'say"hi tail2.svg'`), ["O'Brien tail.svg", `say"hi tail2.svg`], "Only the opening quote closes its text.");
+	assert.deepEqual(paths("f = `out/fit.png`"), ["out/fit.png"]);
+	assert.deepEqual(paths(`x = 'O''Brien tail.png'; y = "a\\"b 2.png"`), [], "An escaped or doubled quote doesn't end the text, which names nothing.");
+	assert.deepEqual(paths(`# don't save to fit.png, it's broken`), [], "Apostrophes that pair up are read as quotes: a file missed, not another shown.");
+	assert.deepEqual(paths(`# don't overwrite\nplt.savefig("fit.png"); print('')`), ["fit.png"], "A quote with no close on its line opens nothing.");
+	assert.deepEqual(replFilePaths({ output: "Saved to fit 2.png" }), ["2.png"], "Unquoted, a name with a space still loses its head (accepted).");
 	const dir = await mkdtemp(join(tmpdir(), "repl-files-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	await mkdir(join(dir, "out"));
@@ -539,6 +548,8 @@ test("REPL files: image and PDF paths an entry names, resolved against the sessi
 	assert.deepEqual(found.get("e1").map(file => [file.written, file.path, file.contentType]), [["out/fit.png", join(dir, "out", "fit.png"), "image/png"]],
 		"Only regular files that exist, each path once, however it was written.");
 	assert.equal((await resolveReplFiles(entries, undefined)).get("e1")?.length, 1, "Without a directory, only absolute paths resolve.");
+	await writeFile(join(dir, "2.png"), PNG);
+	assert.equal((await resolveReplFiles([{ id: "e", code: `savefig("fit 2.png")`, output: "" }], dir)).size, 0, "An unrelated 2.png beside it isn't shown for fit 2.png.");
 	const many = await resolveReplFiles([{ id: "e", code: Array.from({ length: 10 }, (_, i) => `savefig("out/fit.png?${i}")`).join("\n"), output: Array.from({ length: 10 }, (_, i) => `/f${i}.png`).join("\n") }], dir,
 		{ statFile: async () => ({ isFile: () => true, mtimeMs: 1 }) });
 	assert.equal(many.get("e").length, REPL_FILES_PER_ENTRY, "A bounded number per entry.");

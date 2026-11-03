@@ -7,19 +7,55 @@ import { extname, isAbsolute, resolve } from "node:path";
 import { IMAGE_CONTENT_TYPES } from "./image-page-preview.js";
 
 const EXTENSIONS = "png|jpe?g|gif|webp|svg|pdf";
-// A quoted path, as code writes one: savefig("out/fit.png"), png('plot.png').
-const QUOTED = new RegExp(`(["'])([^"'\\r\\n\\0]{1,1024}?\\.(?:${EXTENSIONS}))\\1`, "gi");
+const QUOTES = "\"'`";
+// A quoted path, as code writes one: savefig("out/fit.png"), png('plot.png'). The whole of the quoted text.
+const QUOTED = new RegExp(`^[^\\0]{1,1024}\\.(?:${EXTENSIONS})$`, "i");
 // A bare path, as output prints one: "Saved to /tmp/fit.png." (a sentence's full stop isn't part of it).
 const BARE = new RegExp(`(?:^|[\\s(=:,\\[])((?:~|\\.{1,2})?\\/?(?:[\\w@%+.,~-]+\\/)*[\\w@%+.,~-]+\\.(?:${EXTENSIONS}))(?=$|[\\s)\\]:;,'"]|\\.(?:\\s|$))`, "gim");
 const CANDIDATES_PER_ENTRY = 20;
 export const REPL_FILES_PER_ENTRY = 6;
 
+/**
+ * The quoted text in `text`: a quote opens a span that only the same quote closes, on its line. A
+ * backslash escapes the next character and a doubled quote stands for one, so neither closes it; a
+ * span with either isn't `plain`. A quote with no close on its line, such as an apostrophe, opens
+ * none, nor does any later one of that quote on that line.
+ */
+function quotedSpans(text) {
+	const spans = [];
+	let unclosed = "";
+	for (let i = 0; i < text.length; i++) {
+		const quote = text[i];
+		if (quote === "\n" || quote === "\r") { unclosed = ""; continue; }
+		if (!QUOTES.includes(quote) || unclosed.includes(quote)) continue;
+		let plain = true, end = -1;
+		for (let j = i + 1; j < text.length && text[j] !== "\n" && text[j] !== "\r"; j++) {
+			if (text[j] === "\\") {
+				if (text[j + 1] === "\n" || text[j + 1] === "\r") break;
+				plain = false; j++;
+			} else if (text[j] === quote) {
+				if (text[j + 1] !== quote) { end = j; break; }
+				plain = false; j++;
+			}
+		}
+		if (end < 0) { unclosed += quote; continue; }
+		spans.push({ start: i, end: end + 1, text: text.slice(i + 1, end), plain });
+		i = end;
+	}
+	return spans;
+}
+
 /** The image and PDF paths an entry names, output first, as written, in order and without repeats. */
 export function replFilePaths(entry) {
 	const found = new Set();
 	for (const text of [entry.output ?? "", entry.code ?? ""]) {
-		for (const match of text.matchAll(QUOTED)) found.add(match[2]);
-		for (const match of text.matchAll(BARE)) found.add(match[1]);
+		const spans = quotedSpans(text);
+		for (const span of spans) if (span.plain && QUOTED.test(span.text)) found.add(span.text);
+		// Quoted text is blanked before bare paths are sought, so none is found inside it: the tail
+		// of "fit 2.png" isn't 2.png.
+		let bare = "", at = 0;
+		for (const span of spans) { bare += text.slice(at, span.start) + " ".repeat(span.end - span.start); at = span.end; }
+		for (const match of (bare + text.slice(at)).matchAll(BARE)) found.add(match[1]);
 	}
 	return [...found].slice(0, CANDIDATES_PER_ENTRY);
 }
