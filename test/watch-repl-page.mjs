@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, link, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord, replRecordRootKey, replRootKeyOf } from "../shared/repl-record-reader.js";
 import { createReplLiveSource, inspectReplSession, replWindow, REPL_FIELD_DISPLAY_CHARS } from "../shared/repl-live.js";
 import { createReplHighlighter } from "../shared/repl-highlight.js";
 import { buildReplSessionPage, renderReplEntryCard, replEntryCards, replSessionStatusHtml, REPL_RESPONSE_BYTES } from "../shared/turn-details-page.js";
-import { replFilePaths, resolveReplFiles, REPL_FILES_PER_ENTRY } from "../shared/repl-files.js";
+import { replFilePaths, replSessionTurns, resolveReplFiles, REPL_FILES_PER_ENTRY } from "../shared/repl-files.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
 const ID = "0123456789abcdef0123456789abcdef";
@@ -545,7 +545,7 @@ test("REPL files: image and PDF paths an entry names, resolved against the sessi
 	await writeFile(join(dir, "out", "fit.png"), PNG);
 	await writtenBy(join(dir, "out", "fit.png"));
 	await mkdir(join(dir, "folder.png"));
-	const entries = [{ ...entry(1), output: "", code: `savefig("out/fit.png"); savefig("missing.png"); savefig("folder.png"); savefig("${join(dir, "out", "fit.png")}")` }, { ...entry(2), code: "x = 1", output: "" }];
+	const entries = [{ ...entry(1), updatedAt: 1_700_000_001_000, output: "", code: `savefig("out/fit.png"); savefig("missing.png"); savefig("folder.png"); savefig("${join(dir, "out", "fit.png")}")` }, { ...entry(2), createdAt: 1_700_000_002_000, updatedAt: 1_700_000_002_000, code: "x = 1", output: "" }];
 	const found = await resolveReplFiles(entries, dir);
 	assert.deepEqual([...found.keys()], ["e1"]);
 	assert.deepEqual(found.get("e1").map(file => [file.written, file.path, file.contentType]), [["out/fit.png", join(dir, "out", "fit.png"), "image/png"]],
@@ -576,6 +576,55 @@ test("REPL files: image and PDF paths an entry names, resolved against the sessi
 	const cards = replEntryCards({ label: "Python", entries: [{ ...entry(1), version: "v1" }] }, new Map(), undefined, new Map([["e1", { items: [{ written: "a.png", url: "/a", image: true }], signature: "s1" }]]));
 	assert.equal(cards.cards[0].version, "v1.s1", "A card's version covers its files.");
 	assert.match(cards.cards[0].html, /data-entry-version="v1\.s1"/);
+});
+
+test("REPL files: each entry's turn bounds the files it shows, in the order entries finished (Pi Studio's candidate 116)", async t => {
+	const turn = (id, fields) => ({ ...entry(1), id, code: "x", ...fields });
+	const turns = entries => Object.fromEntries(replSessionTurns(entries));
+	assert.deepEqual(turns([
+		turn("b", { createdAt: 2_100, completedAt: 3_000 }),
+		turn("a", { createdAt: 1_000, completedAt: 2_000 }),
+		turn("c", { createdAt: 2_500, completedAt: 4_000 }),
+		turn("note", { createdAt: 2_600, status: "note", code: "", prose: "a note" }),
+	]), { a: { start: 1_000, before: 2_100 }, b: { start: 2_100, before: 3_000 }, c: { start: 3_000, before: Infinity } }, "Queued while b ran, c starts when b finished; notes don't count.");
+	// Sol's R5-Q1: an external send held the session; Pi Studio's send was recorded and waited; an
+	// agent's, recorded once it had its turn, ran first. Turns go in the order they finished.
+	const external = turn("external", { createdAt: 1793672173315, completedAt: 1793672175685 });
+	const page = turn("page", { createdAt: 1793672173495, completedAt: 1793672176627 });
+	const agent = turn("agent", { createdAt: 1793672175888, completedAt: 1793672176132 });
+	assert.deepEqual(turns([external, page, agent]), {
+		external: { start: 1793672173315, before: 1793672175888 }, agent: { start: 1793672175888, before: 1793672176132 }, page: { start: 1793672176132, before: Infinity } });
+	const shown = async (name, mtimeMs) => [...(await resolveReplFiles([external, { ...page, output: name.page ?? "" }, { ...agent, output: name.agent ?? "" }], "/tmp",
+		{ statFile: async () => ({ isFile: () => true, mtimeMs, ctimeMs: mtimeMs, size: 6, dev: 1, ino: 2 }), now: () => 1793672180000 })).keys()];
+	assert.deepEqual(await shown({ agent: "agent.svg", page: "agent.svg" }, 1793672175968.2085), ["agent"], "The agent's plot is the agent's…");
+	assert.deepEqual(await shown({ agent: "page.svg", page: "page.svg" }, 1793672176411.5242), ["page"], "…and Pi Studio's is Pi Studio's.");
+	assert.deepEqual(turns([turn("done", { createdAt: 1_000, completedAt: 2_000 }), turn("queued", { createdAt: 1_500, status: "sending" }), turn("later", { createdAt: 2_500, status: "sent" })]),
+		{ done: { start: 1_000, before: 2_000 }, queued: { start: 2_000, before: Infinity }, later: { start: 2_500, before: Infinity } }, "While others run, the last to finish keeps no grace.");
+	assert.deepEqual(turns([turn("a", { createdAt: 1_000, completedAt: null, updatedAt: 3_000, status: "timeout" }), turn("b", { createdAt: 2_000, completedAt: 2_500, status: "error" })]),
+		{ b: { start: 2_000, before: 2_500 }, a: { start: 2_500, before: Infinity } }, "Finished without a completion time: at its last update.");
+	// Astra's R4-1: the same path saved twice in a row; the second save is the second entry's only.
+	const T = 1_700_000_000_000, one = turn("one", { createdAt: T, completedAt: T + 100, output: "plot.svg" }), two = turn("two", { createdAt: T + 200, completedAt: T + 300, output: "plot.svg" });
+	const both = await resolveReplFiles([one, two], "/tmp", { statFile: async () => ({ isFile: () => true, mtimeMs: T + 250 }) });
+	assert.deepEqual([...both.keys()], ["two"]);
+	// A file's version changes when it's written or replaced, even keeping its modification time.
+	const dir = await mkdtemp(join(tmpdir(), "repl-file-version-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const version = async () => (await resolveReplFiles([{ ...entry(1), status: "sending", createdAt: 1, output: "fit.svg" }], dir)).get("e1")?.[0].version;
+	await writeFile(join(dir, "red.svg"), "<svg fill='red'/>");
+	await writeFile(join(dir, "blue.svg"), "<svg fill='blu'/>");
+	await copyFile(join(dir, "red.svg"), join(dir, "fit.svg"));
+	await utimes(join(dir, "fit.svg"), 1_700_000_000, 1_700_000_000);
+	const first = await version();
+	assert.match(first, /^[0-9a-f]{16}$/);
+	assert.equal(await version(), first);
+	await copyFile(join(dir, "blue.svg"), join(dir, "fit.svg"));
+	await utimes(join(dir, "fit.svg"), 1_700_000_000, 1_700_000_000);
+	const copied = await version();
+	assert.notEqual(copied, first, "cp -p: the same size and time, new contents, a new version.");
+	await copyFile(join(dir, "red.svg"), join(dir, "next.svg"));
+	await utimes(join(dir, "next.svg"), 1_700_000_000, 1_700_000_000);
+	await rename(join(dir, "next.svg"), join(dir, "fit.svg"));
+	assert.notEqual(await version(), copied, "Replaced, keeping the time: a new inode.");
 });
 
 test("REPL page in the watcher: only with the option, behind the cookie, linked from Preview", async t => {
@@ -908,6 +957,8 @@ test("REPL page in a browser: a file an entry saves shows as a thumbnail, throug
 	assert.deepEqual(await fetched(shown[0].href), [200, "image/png"]);
 	assert.equal((await fetched(`/__pi_markdown_preview_absolute_image__/${"0".repeat(64)}`))[0], 404, "Only a route a card has shown is served.");
 	assert.equal((await fetch(new URL(shown[0].href, server.url))).status, 403, "Not without the preview's cookie.");
+	await writeFile(join(dir, "fit.png"), Buffer.concat([PNG, Buffer.from("other")]));
+	assert.equal((await fetched(shown[0].href))[0], 404, "Replaced since a card showed it, by anything: not served.");
 });
 
 test("REPL page in a browser: notices stay, held numbers settle, Copy link and newer responses (R9, R13, R17)", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {

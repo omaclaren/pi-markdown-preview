@@ -2,6 +2,7 @@
 // saved, so the REPL page can show them: thumbnails for images, links for PDFs. Only paths that
 // appear in the recorded text and resolve to regular files written while the entry ran are shown;
 // nothing is read here but their stat.
+import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, resolve } from "node:path";
@@ -16,6 +17,7 @@ const BARE = new RegExp(`(?:^|[\\s(=:,\\[])((?:~|\\.{1,2})?\\/?(?:[\\w@%+.,~-]+\
 const CANDIDATES_PER_ENTRY = 20;
 export const REPL_FILES_PER_ENTRY = 6;
 const WRITE_SLACK_MS = 2_000;
+const PENDING = new Set(["sending", "sent"]);
 
 /**
  * The quoted text in `text`: a quote opens a span that only the same quote closes, on its line. A
@@ -62,6 +64,20 @@ export function replFilePaths(entry) {
 	return [...found].slice(0, CANDIDATES_PER_ENTRY);
 }
 
+/** The content type the page serves a file of this name as, if it shows that kind of file. */
+export function replFileContentType(path) {
+	const extension = extname(path).toLowerCase();
+	return extension === ".pdf" ? "application/pdf" : IMAGE_CONTENT_TYPES.get(extension);
+}
+
+/**
+ * A file's version: it changes when the file is written or replaced, even by a copy that keeps its
+ * modification time (cp -p), which changes its inode or change time.
+ */
+export function replFileVersion(info) {
+	return createHash("sha256").update([info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs].join(":")).digest("hex").slice(0, 16);
+}
+
 /** A written path made absolute: against home for `~/`, else against the session's directory, if it has one. */
 function resolveWritten(written, cwd) {
 	if (written.startsWith("~/")) return resolve(homedir(), written.slice(2));
@@ -74,31 +90,60 @@ function resolveWritten(written, cwd) {
  * was sent, to WRITE_SLACK_MS after it was done, or after now while it's pending.
  */
 function writeWindow(entry, now) {
-	const pending = entry.status === "sending" || entry.status === "sent";
-	return { from: entry.createdAt, to: (pending ? now : entry.completedAt ?? entry.updatedAt) + WRITE_SLACK_MS };
+	return { from: entry.createdAt, to: (PENDING.has(entry.status) ? now : entry.completedAt ?? entry.updatedAt) + WRITE_SLACK_MS };
+}
+
+/** When an entry finished: its completion, or for a finished status without one its last update; none while it's pending. */
+const finishOf = entry => entry.completedAt ?? (PENDING.has(entry.status) ? undefined : entry.updatedAt);
+
+/**
+ * When each entry with code had its session to itself, by entry ID: `{ start, before }`. Sends to a
+ * session take turns, but not in the order they were recorded (Pi Studio records a send before it
+ * waits for its turn, an agent's tool once it has it), so turns go in the order entries finished. A
+ * turn starts when its entry was recorded or when the one before finished, whichever is later, and a
+ * file written once the next turn has started is the next entry's. While entries are pending, the
+ * last to finish keeps no grace, as one of them may have started then. Notes don't count. (Pi
+ * Studio's studioReplSessionRunBounds, which Sol and Astra reviewed in its candidate 116.)
+ */
+export function replSessionTurns(entries) {
+	const finished = [], pending = [];
+	for (const entry of entries) {
+		if (entry.status === "note" || !entry.code?.trim()) continue;
+		const finish = finishOf(entry);
+		if (finish != null) finished.push({ entry, finish });
+		else pending.push(entry);
+	}
+	finished.sort((a, b) => a.finish - b.finish);
+	let last = -Infinity;
+	const starts = finished.map(({ entry, finish }) => { const start = Math.max(entry.createdAt, last); last = finish; return start; });
+	const turns = new Map(finished.map(({ entry, finish }, i) => [entry.id, { start: starts[i], before: i + 1 < finished.length ? starts[i + 1] : pending.length ? finish : Infinity }]));
+	for (const entry of pending) turns.set(entry.id, { start: Math.max(entry.createdAt, last), before: Infinity });
+	return turns;
 }
 
 /**
- * The files each entry names that it wrote, by entry ID: up to REPL_FILES_PER_ENTRY of
- * `{ written, path, contentType, mtimeMs }`. `cwd` is the session's working directory, for
+ * The files each of a session's entries names that it wrote, by entry ID: up to REPL_FILES_PER_ENTRY
+ * of `{ written, path, contentType, version }`. `cwd` is the session's working directory, for
  * relative paths; without it only absolute and `~/` paths resolve. A file shows only if it was last
- * written while the entry ran, so one that was already there never does, however its name was read
- * from the text, and a file a later entry rewrites shows under that entry instead.
+ * written while the entry ran, within its turn (replSessionTurns), so one that was already there
+ * never does, however its name was read from the text, and a file a later entry rewrites shows
+ * under that entry instead. Modification times and inferred turns aren't proof of which code wrote
+ * a file: a copy that keeps its time (cp -p) shows under the entry whose time it carries.
  */
 export async function resolveReplFiles(entries, cwd, { statFile = stat, now = Date.now } = {}) {
 	const found = new Map();
-	const at = now();
+	const at = now(), turns = replSessionTurns(entries);
 	await Promise.all(entries.map(async entry => {
 		const files = [];
 		const { from, to } = writeWindow(entry, at);
+		const turn = turns.get(entry.id), start = Math.max(from, turn?.start ?? -Infinity), before = turn?.before ?? Infinity;
 		for (const written of replFilePaths(entry)) {
 			if (files.length >= REPL_FILES_PER_ENTRY) break;
-			const extension = extname(written).toLowerCase();
-			const contentType = extension === ".pdf" ? "application/pdf" : IMAGE_CONTENT_TYPES.get(extension);
+			const contentType = replFileContentType(written);
 			const path = resolveWritten(written, cwd);
 			if (!contentType || !path || files.some(file => file.path === path)) continue;
 			const info = await statFile(path).catch(() => undefined);
-			if (info?.isFile() && info.mtimeMs >= from && info.mtimeMs <= to) files.push({ written, path, contentType, mtimeMs: Math.trunc(info.mtimeMs) });
+			if (info?.isFile() && info.mtimeMs >= start && info.mtimeMs <= to && info.mtimeMs < before) files.push({ written, path, contentType, version: replFileVersion(info) });
 		}
 		if (files.length) found.set(entry.id, files);
 	}));

@@ -14,7 +14,7 @@ import { performNativePathAction } from "./native-path-action.js";
 import { buildTurnDetailsPage, buildLivePage, buildReplSessionPage, buildReplSessionsPage, liveCardVersion, liveStatusHtml, renderLiveCard, replEntryCards, replSessionStatusHtml, replWindowNoticesHtml } from "./turn-details-page.js";
 import { isReplResultLabel, replSendCalls } from "./repl-calls.js";
 import { createReplHighlighter } from "./repl-highlight.js";
-import { resolveReplFiles } from "./repl-files.js";
+import { replFileContentType, replFileVersion, resolveReplFiles } from "./repl-files.js";
 import { buildWatchRecoveryPage } from "./watch-recovery-page.js";
 import { previewAppearanceStyle, applyPreviewAppearance } from "./agent-page-style.js";
 
@@ -1048,18 +1048,22 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 	// One highlighter per watcher, so a REPL page's code is highlighted once and cached.
 	const replHighlight = options.repl ? (options.replHighlight ?? createReplHighlighter()) : undefined;
 	// Routes for the files REPL entries name, as for a document's absolute images: an opaque ID per
-	// path, served only once a card has shown it. The most recent REPL_FILE_ROUTES are kept.
+	// path, served only once a card has shown it, and only in a version a card has shown (the latest
+	// REPL_FILE_VERSIONS), so a file replaced since, by anything, isn't served until a card shows it.
+	// The most recent REPL_FILE_ROUTES are kept.
 	const replFileRoutes = new Map();
-	const REPL_FILE_ROUTES = 500;
+	const REPL_FILE_ROUTES = 500, REPL_FILE_VERSIONS = 8;
 	const replFiles = async view => {
 		const found = await resolveReplFiles(view.entries ?? [], view.cwd);
 		const shown = new Map();
 		for (const [entryId, files] of found) {
 			const items = files.map(file => {
 				const imageId = createHmac("sha256", token).update("absolute-image\0").update(file.path).digest("hex");
+				const known = replFileRoutes.get(imageId);
+				const versions = [...(known?.contentType === file.contentType ? known.versions.filter(version => version !== file.version) : []), file.version].slice(-REPL_FILE_VERSIONS);
 				replFileRoutes.delete(imageId);
-				replFileRoutes.set(imageId, { path: file.path, contentType: file.contentType });
-				return { written: file.written, url: `${ABSOLUTE_IMAGE_PREFIX}${imageId}?v=${file.mtimeMs}`, image: file.contentType !== "application/pdf" };
+				replFileRoutes.set(imageId, { path: file.path, contentType: file.contentType, versions });
+				return { written: file.written, url: `${ABSOLUTE_IMAGE_PREFIX}${imageId}?v=${file.version}`, image: file.contentType !== "application/pdf" };
 			});
 			shown.set(entryId, { items, signature: createHash("sha256").update(items.map(item => item.url).join("\n")).digest("hex").slice(0, 12) });
 		}
@@ -1783,6 +1787,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 
 		let resourcePath;
 		let contentType;
+		let replRoute;
 		if (requestUrl.pathname.startsWith(ABSOLUTE_IMAGE_PREFIX)) {
 			const imageId = requestUrl.pathname.slice(ABSOLUTE_IMAGE_PREFIX.length);
 			let allowedImage;
@@ -1792,7 +1797,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 					allowedImage = retained[index].absoluteImages.get(imageId);
 					if (allowedImage) break;
 				}
-				allowedImage ??= replFileRoutes.get(imageId);
+				if (!allowedImage) allowedImage = replRoute = replFileRoutes.get(imageId);
 			}
 			resourcePath = allowedImage ? await realpath(allowedImage.path).catch(() => undefined) : undefined;
 			contentType = allowedImage?.contentType;
@@ -1814,6 +1819,11 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 		const resourceStat = await stat(resourcePath).catch(() => undefined);
 		if (!resourceStat?.isFile()) {
 			respondText(res, 404, "Preview resource not found.");
+			return;
+		}
+		// A REPL file only as a card showed it: the same kind of file, in a version shown.
+		if (replRoute && (replFileContentType(resourcePath) !== contentType || !replRoute.versions.includes(replFileVersion(resourceStat)))) {
+			respondText(res, 404, "This file is no longer the file that was shown.");
 			return;
 		}
 		if (req.aborted || res.destroyed || res.writableEnded) return;
