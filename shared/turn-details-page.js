@@ -471,7 +471,7 @@ export function replSessionStatusHtml(view, { sessionsHref = "" } = {}) {
 	if (view.readError) parts.push(`<span class="live-notice">${escape(`The record couldn't be read just now: ${view.readError}`)}</span>`);
 	// P0 (repl-live.js). Released clients set the key before they write, so a record without one was
 	// written only by older clients: shown, but said to be unverified.
-	if (view.directory === "unverified" && view.record === "v1") parts.push(escape(`${view.sessionName}'s record directory isn't verified yet; it will be once a current pi-repl, agent-repl or Pi Studio sends to it.`));
+	if (view.directory === "unverified" && view.record === "v1") parts.push(`<span class="live-notice">${escape(`${view.sessionName}'s record directory isn't verified yet; it will be once a current pi-repl, agent-repl or Pi Studio sends to it.`)}</span>`);
 	else if (view.directory === "different") parts.push(`<span class="live-notice">${escape(`${view.sessionName}'s shared record is in a different or replaced record directory, not this preview's, so it isn't shown.`)}</span>`);
 	else if (view.directory === "malformed") parts.push(`<span class="live-notice">${escape(`${view.sessionName}'s record-directory key isn't one this page reads, so its record isn't shown.`)}</span>`);
 	return parts.join(" ");
