@@ -38,6 +38,7 @@ const WORKING_IMAGES_SOURCE = readFileSync(new URL("../client/working-images.js"
 const LIVE_VIEW_SOURCE = readFileSync(new URL("../client/live-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const REPL_VIEW_SOURCE = readFileSync(new URL("../client/repl-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const FOLLOW_ACTIVITY_SOURCE = readFileSync(new URL("../client/follow-activity.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const PAGE_WIDTH_SOURCE = readFileSync(new URL("../client/page-width.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_HISTORY_BYTE_LIMIT = 32 * 1024 * 1024;
@@ -362,6 +363,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	watchedHtml = /<\/head>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/head>/i, `${watchStyle}\n</head>`)
 		: `${watchStyle}\n${watchedHtml}`;
+	// The remembered width applies before the page is laid out, so it never draws narrow first.
+	if (working) watchedHtml = watchedHtml.replace(/<body\b[^>]*>/i, body => `${body}<script>${PAGE_WIDTH_SOURCE}</script>`);
 
 	const sourceControl = sourceLabel
 		? `<span id="pi-markdown-preview-watch-source" data-watch-control="source" title="${escapeBrowserWatchHtmlAttribute(sourceLabel)}">${escapeBrowserWatchHtmlText(sourceLabel)}</span>`
@@ -413,6 +416,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   window.PiMarkdownPreviewRepl?.install(document.getElementById('preview-root'));
   window.PiMarkdownPreviewFollowActivity?.install();
   window.PiMarkdownPreviewWorkingImages?.install(document.getElementById('preview-root'));
+  window.PiMarkdownPreviewPageWidth?.install(document.getElementById('preview-root'));
   try {
     const prefix = 'pi-markdown-preview:reading-position:' + ${JSON.stringify(positionBase)} + ':revision:';
     const retained = ${JSON.stringify(revisions)}.map(String);

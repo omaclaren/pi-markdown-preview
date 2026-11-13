@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { readReplRecord, replEntryVersion, ReplRecordError, validateReplRecord, replRecordRootKey, replRootKeyOf } from "../shared/repl-record-reader.js";
 import { createReplLiveSource, inspectReplSession, replWindow, REPL_FIELD_DISPLAY_CHARS } from "../shared/repl-live.js";
 import { createReplHighlighter } from "../shared/repl-highlight.js";
-import { buildReplSessionPage, renderReplEntryCard, replEntryCards, replSessionStatusHtml, REPL_RESPONSE_BYTES } from "../shared/turn-details-page.js";
+import { buildLivePage, buildReplSessionPage, buildReplSessionsPage, buildTurnDetailsPage, renderReplEntryCard, replEntryCards, replSessionStatusHtml, REPL_RESPONSE_BYTES } from "../shared/turn-details-page.js";
 import { replFilePaths, replSessionTurns, resolveReplFiles, REPL_FILES_PER_ENTRY } from "../shared/repl-files.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
 
@@ -510,6 +510,17 @@ test("REPL page: record text stays inert, and the page says what it shows", () =
 	assert.match(page, /No submissions recorded yet\./);
 });
 
+test("Page width: Working, Live and a REPL session each carry one width switch, hidden until its script labels it", () => {
+	const button = '<button type="button" class="page-width" aria-pressed="false" hidden>Width: Narrow</button>';
+	const count = html => html.split(button).length - 1;
+	const view = { sessionName: "pi-repl-python", label: "Python", state: "running", record: "v1", checkedAt: 1, readAt: 1, now: 2, version: "g:1", entries: [] };
+	assert.equal(count(buildReplSessionPage(view, { updatesHref: "/u", sessionsHref: "/s" })), 1);
+	assert.equal(count(buildTurnDetailsPage({ events: [{ kind: "prompt", label: "Prompt", text: "Synthetic prompt" }] }, "/")), 1);
+	assert.equal(count(buildTurnDetailsPage({ events: [] }, "/")), 1, "Without cards too, though there is no Expand all.");
+	assert.equal(count(buildLivePage({ events: [], omitted: 0, generation: 1, sequence: 1, updatedAt: 1, loaded: true })), 1);
+	assert.equal(count(buildReplSessionsPage({ sessions: [], checkedAt: 1 })), 0, "The list follows the width chosen elsewhere.");
+});
+
 test("REPL page: who sent each entry, an agent by its label and a person by a name a prefix vouches for", () => {
 	const who = fields => renderReplEntryCard({ ...entry(1, fields), version: "v" }, 1, "Python").match(/<span class="number">1<\/span> (.*?) · <span class="repl-status/)[1];
 	assert.equal(who({ mode: "agent", label: "Claude Code", requestId: "tool:mcp-1" }), "Claude Code");
@@ -1007,6 +1018,68 @@ test("REPL page in a browser: notices stay, held numbers settle, Copy link and n
 	server.updateDocument(answer("Second answer"));
 	await page.waitForFunction(() => document.querySelector('[data-watch-control="count"]')?.textContent === "2/2", { timeout: 10_000 });
 	assert.deepEqual(await page.evaluate(() => [document.querySelector('[data-watch-control="new"]').hidden, document.querySelector('[data-watch-control="next"]').getAttribute("aria-disabled")]), [true, "true"]);
+});
+
+test("Page width in a browser: Narrow or Wide, remembered in this browser for Working and the REPL pages, across restarts", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "repl-page-width-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	// A plot wider than a narrow column.
+	await writeFile(join(dir, "wide.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="400"><rect width="1600" height="400" fill="#4a90d9"/></svg>');
+	await writtenBy(join(dir, "wide.svg"));
+	const s = source();
+	s.cwd(dir);
+	s.set(record([entry(1, { code: 'plt.savefig("wide.svg")', output: "" })]));
+	const server = await createBrowserWatchServer("<!doctype html><html><head><title>R</title></head><body><main id='preview-root'><p>Answer</p></main></body></html>", dir,
+		{ repl: s.live, initialTurnDetails: async () => ({ events: [{ kind: "prompt", label: "Prompt", text: "Synthetic prompt" }] }), initialResponseKey: "initial" });
+	t.after(() => server.close());
+	const { default: puppeteer } = await import("puppeteer-core");
+	const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, headless: true, args: ["--no-sandbox"] });
+	t.after(() => browser.close());
+	const page = await browser.newPage();
+	await page.setViewport({ width: 1400, height: 900 });
+	const go = action => Promise.all([page.waitForNavigation(), action()]);
+	const state = () => page.evaluate(() => {
+		const button = document.querySelector(".page-width");
+		const img = document.querySelector(".repl-file img");
+		return { main: Math.round(document.querySelector("main").getBoundingClientRect().width), shown: Boolean(button) && getComputedStyle(button).display !== "none",
+			label: button?.textContent ?? null, pressed: button?.getAttribute("aria-pressed") ?? null, img: img ? Math.round(img.getBoundingClientRect().width) : null };
+	});
+	await page.goto(server.url);
+	await go(() => page.click('[data-watch-control="repl"]'));
+	await go(() => page.click(".repl-session-name a"));
+	await page.waitForFunction(() => document.querySelector(".repl-file img")?.complete);
+	assert.deepEqual(await state(), { main: 720, shown: true, label: "Width: Narrow", pressed: "false", img: 622 }, "Narrow by default; a plot fits its tile.");
+	await page.click(".page-width");
+	assert.deepEqual(await state(), { main: 1100, shown: true, label: "Width: Wide", pressed: "true", img: 1020 }, "Wide: up to 1100 pixels, and a plot takes the room.");
+	// Remembered: the next page starts wide, set at the top of <body> before anything is laid out.
+	await page.reload();
+	await page.waitForSelector(".repl-entry");
+	assert.equal(await page.evaluate(() => document.body.firstElementChild.tagName === "SCRIPT" && document.documentElement.classList.contains("pi-preview-wide")), true);
+	assert.equal((await state()).label, "Width: Wide");
+	// A restarted watcher has a new address, and the choice holds there too.
+	const again = await createBrowserWatchServer("<!doctype html><html><head><title>R</title></head><body><main id='preview-root'><p>Answer</p></main></body></html>", dir, { repl: s.live });
+	t.after(() => again.close());
+	assert.notEqual(new URL(again.url).port, new URL(server.url).port);
+	const other = await browser.newPage();
+	await other.setViewport({ width: 1400, height: 900 });
+	await other.goto(again.url);
+	await Promise.all([other.waitForNavigation(), other.click('[data-watch-control="repl"]')]);
+	assert.equal(await other.evaluate(() => Math.round(document.querySelector("main").getBoundingClientRect().width)), 1100);
+	await other.close();
+	await go(() => page.click("main > nav a"));
+	assert.deepEqual(await state(), { main: 1100, shown: false, label: null, pressed: null, img: null }, "The sessions list follows, with no switch of its own.");
+	await go(() => page.click('[data-watch-control="preview"]'));
+	assert.equal(await page.evaluate(() => document.documentElement.classList.contains("pi-preview-wide")), false, "Preview is untouched.");
+	await go(() => page.click('[data-watch-control="turn-details"]'));
+	assert.deepEqual(await state(), { main: 1100, shown: true, label: "Width: Wide", pressed: "true", img: null }, "Working shares the choice.");
+	assert.equal(await page.$eval(".working-bulk", button => button.textContent), "Collapse all", "Expand all still works beside it.");
+	await page.click(".page-width");
+	assert.deepEqual(await state(), { main: 720, shown: true, label: "Width: Narrow", pressed: "false", img: null });
+	await go(() => page.click('[data-watch-control="repl"]'));
+	assert.equal((await state()).main, 720, "Narrow again everywhere.");
+	// In a window no wider than the column, there is nothing to switch.
+	await page.setViewport({ width: 700, height: 900 });
+	assert.equal((await state()).shown, false);
 });
 
 test("REPL page in a browser: the REPL link and Ctrl+Alt+R return to the REPL page this tab was last on", { skip: !process.env.PUPPETEER_EXECUTABLE_PATH && "no test browser", timeout: 60_000 }, async t => {
