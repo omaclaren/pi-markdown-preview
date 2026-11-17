@@ -529,6 +529,9 @@ test("REPL page: who sent each entry, an agent by its label and a person by a na
 	assert.equal(who({ mode: "raw", origin: "pi-studio", label: "selection", requestId: "r1" }), "User · via Pi Studio", "Studio's older labels describe the selection.");
 	assert.equal(who({ mode: "raw", label: "Sam", requestId: "pi:send:1" }), "Sam · via Pi");
 	assert.equal(who({ mode: "raw", label: "Sam", requestId: "cli:env:1" }), "Sam · via terminal");
+	const prompt = `lfortran:prompt:${"0123456789abcdef".repeat(2)}`;
+	assert.equal(who({ mode: "raw", label: "Sam", requestId: prompt }), "Sam · via LFortran prompt", "A cell typed at LFortran's prompt, recorded by its helper.");
+	assert.equal(who({ mode: "raw", origin: "pi-studio", label: "Sam", requestId: prompt }), "User · via Pi Studio", "Only pi-repl's entries carry the prompt's route.");
 	assert.equal(who({ mode: "literate", origin: "pi-studio", label: "Ana", requestId: "studio:note:1" }), "Ana · via Pi Studio");
 	assert.equal(who({ mode: "raw", origin: "pi-studio", label: "Ana", requestId: "studio:send:1" }), "Ana · via Pi Studio");
 	assert.equal(who({ mode: "raw", label: "Ana", requestId: "studio:send:1" }), "User", "A prefix from another client's route vouches for nothing.");

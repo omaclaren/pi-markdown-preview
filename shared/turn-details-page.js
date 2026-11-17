@@ -412,8 +412,9 @@ const clockTime = ms => Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([]
 const omittedNote = (what, chars) => chars > 0 ? `<p class="empty-text">${escape(`${chars.toLocaleString("en")} more characters of ${what} not shown`)}</p>` : "";
 
 // A person's request-ID prefixes, with the origin each belongs to and how the person sent it.
+// `lfortran:prompt:` is a cell typed at LFortran's own prompt, recorded by pi-repl's LFortran helper.
 const REPL_PERSON_ROUTES = [["pi:send:", "pi-repl", "Pi"], ["pi:env:", "pi-repl", "Pi"], ["cli:send:", "pi-repl", "terminal"], ["cli:env:", "pi-repl", "terminal"],
-	["studio:send:", "pi-studio", "Pi Studio"], ["studio:note:", "pi-studio", "Pi Studio"]];
+	["lfortran:prompt:", "pi-repl", "LFortran prompt"], ["studio:send:", "pi-studio", "Pi Studio"], ["studio:note:", "pi-studio", "Pi Studio"]];
 /**
  * Who sent an entry (design-person-sends.md, P3). An agent's entry, by its label. A person's,
  * by the name in its label when a person's prefix vouches for it, with how they sent it.
