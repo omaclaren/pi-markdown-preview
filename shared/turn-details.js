@@ -264,15 +264,17 @@ function agyDetails(rows, target, t) {
 
 /** One agy step; `final` marks the retained answer, which Preview shows. */
 function agyItem(t, e, final = false) {
+	// agy's thinking, text and outputs can end (or start) with blank lines, which a card would show.
+	const lines = value => text(value).replace(/^(?:[ \t]*\n)+/, "").trimEnd();
 	if (e.type === "USER_INPUT" || e.type === "SYSTEM_MESSAGE") {
 		const prompt = agyPrompt(e);
 		if (prompt === undefined) t.note("Known harness-injected context is omitted; it is not labelled as a user prompt.");
 		else t.add("prompt", "Prompt / input", prompt);
 	} else if (e.type === "PLANNER_RESPONSE") {
-		t.add("reasoning", "Recorded thinking / reasoning", e.thinking);
-		if (!final) t.add("progress", "Assistant progress", e.content);
+		t.add("reasoning", "Recorded thinking / reasoning", lines(e.thinking));
+		if (!final) t.add("progress", "Assistant progress", lines(e.content));
 		for (const call of agyToolCalls(e)) t.add("tool", `Tool: ${text(call.name)}`, json(call.args));
-	} else if (e.type === "GENERIC") t.add("result", "Tool result", agyOutput(e.content));
+	} else if (e.type === "GENERIC") t.add("result", "Tool result", lines(agyOutput(e.content)));
 }
 
 // ---- Live: recorded activity of one in-progress turn (Claude Code, Pi, Codex and agy) ----

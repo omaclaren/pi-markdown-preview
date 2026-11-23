@@ -684,8 +684,8 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
  assert.equal(live.push(first, 1), true);
  assert.equal(live.current(), "s1", "the prompt's step names the turn");
  live.push(agNotice("SECRET-NOTICE"), 2);
- live.push(agModel({ thinking: "Plan", tool_calls: [{ name: "invoke_subagent", args: { Prompt: "Reply ok" } }] }), 2);
- live.push(agOutput("Created the following subagent"), 3);
+ live.push(agModel({ thinking: "\nPlan\n\n\n", tool_calls: [{ name: "invoke_subagent", args: { Prompt: "Reply ok" } }] }), 2);
+ live.push(agOutput("Created the following subagent\n\n"), 3);
  assert.equal(live.snapshot("s1").status, "running");
  live.push(agModel({ content: "Waiting for the helper." }), 4);
  let snapshot = live.snapshot("s1");
@@ -693,7 +693,7 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
  assert.equal(snapshot.finalKey, `agy:${AGY_CONVERSATION}:5`, "the key the session reader gives the answer");
  assert.deepEqual(labels(snapshot), [["s1:0", "prompt", "Prompt / input"], ["s3:0", "reasoning", "Recorded thinking / reasoning"], ["s3:1", "tool", "Tool: invoke_subagent"],
   ["s4:0", "result", "Tool result"], ["s5:0", "progress", "Assistant progress"]]);
- assert.deepEqual([snapshot.events[0].text, snapshot.events[3].text], ["Start a helper", "Created the following subagent"], "without agy's metadata and timing lines");
+ assert.deepEqual(snapshot.events.map(e => e.text).filter((_, i) => i !== 2), ["Start a helper", "Plan", "Created the following subagent", "Waiting for the helper."], "without agy's metadata, timing lines and surrounding blank lines");
  assert.match(snapshot.notices.join(" "), /harness-injected context is omitted/);
  // The helper's reply wakes the model: the turn goes on, and ends with the next answer.
  assert.equal(live.push(agNotice("[Message] sender=helper content=SECRET-REPLY"), 5), false);
