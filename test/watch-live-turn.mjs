@@ -666,6 +666,63 @@ test("Live rendering: Claude-only presentation applies to Claude snapshots only,
  assert.match(claudeCards, /Slash command/); assert.match(claudeCards, /Task notification/);
 });
 
+// agy steps (agy-transcript.js), shaped as agy 1.3 records them: no links, no call ids, no recorded end.
+let agyIndex = 0;
+const ag = (type, source, fields = {}) => ({ step_index: agyIndex++, source, type, status: "DONE", created_at: "2026-11-23T04:18:16Z", ...fields });
+const agPrompt = text => ag("USER_INPUT", "USER_EXPLICIT", { content: `<USER_REQUEST>\n${text}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nSECRET-META\n</ADDITIONAL_METADATA>` });
+const agNotice = text => ag("SYSTEM_MESSAGE", "SYSTEM", { content: text });
+const agModel = fields => ag("PLANNER_RESPONSE", "MODEL", { model: "gemini-4-neon-high", ...fields });
+const agOutput = (text, status = "DONE") => ag("GENERIC", "MODEL", { status, content: `Created At: 2026-11-23T17:18:51+13:00\nCompleted At: 2026-11-23T17:18:52+13:00\n${text}` });
+const AGY_CONVERSATION = "03201f23-61b2-411c-8ce0-b0341ef022f0";
+const AGY_PATH = `/h/.gemini/antigravity-cli/brain/${AGY_CONVERSATION}/.system_generated/logs/transcript_full.jsonl`;
+
+test("Live projection (agy): a turn from its typed prompt to its answer; a reply after the answer continues it; a prompt after a cut-off turn starts the next", () => {
+ agyIndex = 0;
+ const live = createLiveTurnProjector("agy", { sessionPath: AGY_PATH });
+ assert.equal(live.push(agNotice("SECRET-NOTICE"), 1), false, "agy's notices are not activity");
+ const first = agPrompt("Start a helper");
+ assert.equal(live.push(first, 1), true);
+ assert.equal(live.current(), "s1", "the prompt's step names the turn");
+ live.push(agNotice("SECRET-NOTICE"), 2);
+ live.push(agModel({ thinking: "Plan", tool_calls: [{ name: "invoke_subagent", args: { Prompt: "Reply ok" } }] }), 2);
+ live.push(agOutput("Created the following subagent"), 3);
+ assert.equal(live.snapshot("s1").status, "running");
+ live.push(agModel({ content: "Waiting for the helper." }), 4);
+ let snapshot = live.snapshot("s1");
+ assert.equal(snapshot.status, "completed", "a finished model step with text and no tool calls ends the turn");
+ assert.equal(snapshot.finalKey, `agy:${AGY_CONVERSATION}:5`, "the key the session reader gives the answer");
+ assert.deepEqual(labels(snapshot), [["s1:0", "prompt", "Prompt / input"], ["s3:0", "reasoning", "Recorded thinking / reasoning"], ["s3:1", "tool", "Tool: invoke_subagent"],
+  ["s4:0", "result", "Tool result"], ["s5:0", "progress", "Assistant progress"]]);
+ assert.deepEqual([snapshot.events[0].text, snapshot.events[3].text], ["Start a helper", "Created the following subagent"], "without agy's metadata and timing lines");
+ assert.match(snapshot.notices.join(" "), /harness-injected context is omitted/);
+ // The helper's reply wakes the model: the turn goes on, and ends with the next answer.
+ assert.equal(live.push(agNotice("[Message] sender=helper content=SECRET-REPLY"), 5), false);
+ assert.equal(live.push(agModel({ content: "The helper said ok." }), 6), true);
+ snapshot = live.snapshot("s1");
+ assert.equal(snapshot.status, "completed");
+ assert.equal(snapshot.finalKey, `agy:${AGY_CONVERSATION}:7`);
+ assert.deepEqual(labels(snapshot).at(-1), ["s7:0", "progress", "Assistant progress"]);
+ assert.equal(live.push(agOutput("A late result"), 7), false, "a late result alone never reopens a turn");
+ // A command that runs on is recorded again when it's done; a prompt after a turn that was cut off starts the next turn.
+ const second = agPrompt("Run the long job");
+ live.push(second, 8);
+ assert.equal(live.current(), "s9");
+ live.push(agModel({ tool_calls: [{ name: "run_command", args: { CommandLine: "sleep 40" } }] }), 8);
+ const running = agOutput("Tool is running as a background task", "RUNNING");
+ live.push(running, 9);
+ live.push({ ...running, status: "DONE", content: "Created At: x\nfinished" }, 10);
+ snapshot = live.snapshot("s9");
+ assert.deepEqual(labels(snapshot).slice(-2), [["s11-RUNNING:0", "result", "Tool result"], ["s11:0", "result", "Tool result"]]);
+ assert.equal(snapshot.events.at(-1).text, "finished");
+ assert.equal(snapshot.status, "running");
+ live.push(agPrompt("Try again"), 11);
+ assert.equal(live.current(), "s12", "a prompt never steers a turn that recorded no end");
+ assert.equal(live.snapshot("s9").status, "running", "silence means nothing");
+ assert.equal(live.push(structuredClone(first), 12), false, "a repeated line is ignored");
+ for (const anchor of ["s9", "s12"]) assert.doesNotMatch(JSON.stringify(live.snapshot(anchor)), /SECRET/);
+ assert.equal(live.snapshot("s1"), undefined, "two turns are kept");
+});
+
 test("Live updates (Codex): completion links to the exact response; a task without a final answer returns to Preview; another task's end links nothing", async t => {
  ordinal = 0;
  const dir = await temp(t);
@@ -706,7 +763,7 @@ test("Live updates (Codex): completion links to the exact response; a task witho
 });
 
 test("Live projection: OpenCode is not supported yet", () => {
- assert.throws(() => createLiveTurnProjector("opencode"), /Claude Code, Pi and Codex sessions only/);
+ assert.throws(() => createLiveTurnProjector("opencode"), /Claude Code, Pi, Codex and agy sessions only/);
 });
 
 const html = "<!doctype html><html><head><title>Response</title></head><body><main id='preview-root'><p>Answer</p></main></body></html>";

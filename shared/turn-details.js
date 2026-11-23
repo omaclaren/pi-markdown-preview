@@ -4,6 +4,7 @@
 import { createRecordedImageBudget, recordedImage } from "./recorded-images.js";
 import { questionAnswers, recordedQuestionAnswers } from "./ask-user-question.js";
 import { createClaudeResponseAssembler, isClaudeFinal } from "./claude-response.js";
+import { agyConversation, agyOutput, agyPrompt, agyResponseKey, agyStep, agyToolCalls, isAgyFinal } from "./agy-transcript.js";
 export const TURN_EVENT_LIMIT = 250;
 export const TURN_TEXT_LIMIT = 16_384;
 export const TURN_TOTAL_LIMIT = 256 * 1024;
@@ -122,8 +123,9 @@ function claudeContent(t, value, role, final, answerMetadata) {
 export function turnDetailsFromRecords(agent, records, target, incomplete = false) {
 	const t = createTurnDetails(incomplete ? ["Only a bounded portion of the session was read; earlier or oversized records may be missing."] : []);
 	// Presentation hints come from the selected reader, never from prompt text.
-	if (["pi", "claude", "codex"].includes(agent)) t.result.sourceAgent = agent;
+	if (["pi", "claude", "codex", "agy"].includes(agent)) t.result.sourceAgent = agent;
 	if (agent === "codex") return codexDetails(records, target, t);
+	if (agent === "agy") return agyDetails(records, target, t);
 	if (!["pi", "claude"].includes(agent)) { t.note("Turn details are unavailable for this session format."); return t.result; }
 	const rows = records.filter(e => e && typeof e === "object" && e.isSidechain !== true);
 	let end = -1;
@@ -232,7 +234,38 @@ function codexItem(t, p, final = false) {
 	else if (["function_call_output", "custom_tool_call_output"].includes(p.type)) t.toolResult("Tool result", p.output, p.call_id);
 }
 
-// ---- Live: recorded activity of one in-progress turn (Claude Code, Pi and Codex) ----
+// agy (agy-transcript.js): a turn runs from a typed prompt to the answer. Steps that
+// were recorded again with a later status are shown as last recorded.
+function agyDetails(rows, target, t) {
+	const step = /:(\d+)$/.exec(target.key)?.[1];
+	let end = -1;
+	for (let i = 0; i < rows.length; i++) if (step !== undefined && agyStep(rows[i]) && String(rows[i].step_index) === step) end = i;
+	if (end < 0 || !isAgyFinal(rows[end]) || text(rows[end].content).trim() !== target.markdown.trim()) {
+		t.note("The completed turn cannot be matched to this preview snapshot in the bounded history."); return t.result;
+	}
+	let start = end;
+	while (start > 0 && agyPrompt(rows[start]) === undefined) start--;
+	const last = new Map();
+	for (let i = start; i <= end; i++) if (agyStep(rows[i])) last.set(rows[i].step_index, i);
+	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && last.get(rows[i].step_index) === i) agyItem(t, rows[i], i === end);
+	if (!t.result.events.some(e => e.kind === "prompt")) t.note("The input prompt is not available in this recorded portion of the turn.");
+	return t.result;
+}
+
+/** One agy step; `final` marks the retained answer, which Preview shows. */
+function agyItem(t, e, final = false) {
+	if (e.type === "USER_INPUT" || e.type === "SYSTEM_MESSAGE") {
+		const prompt = agyPrompt(e);
+		if (prompt === undefined) t.note("Known harness-injected context is omitted; it is not labelled as a user prompt.");
+		else t.add("prompt", "Prompt / input", prompt);
+	} else if (e.type === "PLANNER_RESPONSE") {
+		t.add("reasoning", "Recorded thinking / reasoning", e.thinking);
+		if (!final) t.add("progress", "Assistant progress", e.content);
+		for (const call of agyToolCalls(e)) t.add("tool", `Tool: ${text(call.name)}`, json(call.args));
+	} else if (e.type === "GENERIC") t.add("result", "Tool result", agyOutput(e.content));
+}
+
+// ---- Live: recorded activity of one in-progress turn (Claude Code, Pi, Codex and agy) ----
 // Records are pushed in file order as they become readable. These agents append
 // records and never rewrite one: an id names one record's content for good, so a
 // repeated id (backfill and subscription overlap) is ignored. A Claude message's
@@ -352,6 +385,14 @@ function codexLiveRole(e) {
 	return CODEX_ITEMS.has(p?.type) ? "activity" : "skip";
 }
 
+// agy: steps without links. A typed prompt starts a turn; agy's notices are not shown.
+function agyLiveRole(e) {
+	if (!agyStep(e)) return "skip";
+	if (e.type === "USER_INPUT") return agyPrompt(e) === undefined ? "meta" : "start";
+	if (e.type === "SYSTEM_MESSAGE") return "meta";
+	return ["PLANNER_RESPONSE", "GENERIC"].includes(e.type) ? "activity" : "skip";
+}
+
 // How each format names, links, projects and ends its records. The turn logic is shared.
 // `task`, where a format records one, is the task a record names: it is kept on the
 // turn, so placement by name never depends on the bounded record memory.
@@ -414,17 +455,35 @@ const LIVE_FORMATS = {
 			return typeof p?.last_agent_message === "string" && p.last_agent_message.trim() && turn !== undefined ? `codex:${turn}` : undefined;
 		},
 	},
+	agy: {
+		// A step recorded again with a later status is another record.
+		id: e => agyStep(e) ? `s${e.step_index}${e.status === "DONE" ? "" : `-${text(e.status).replace(/[^A-Za-z_]/g, "").slice(0, 24)}`}` : undefined,
+		parent: () => undefined,
+		// A prompt never steers a running turn: agy records no end for a turn that was cut off.
+		linked: e => agyPrompt(e) !== undefined,
+		role: agyLiveRole,
+		results: () => [],
+		project(details, e) { agyItem(details, e); },
+		// The model can answer again in the same turn, woken by a subagent's reply: a reply after
+		// an answer continues the latest turn, which ends again with the next answer.
+		reply: e => e.type === "PLANNER_RESPONSE",
+		resumes: new Set(["completed"]),
+		ending: e => isAgyFinal(e) ? "completed" : undefined,
+		finalKey: (e, { conversation }) => conversation ? agyResponseKey(conversation, e) : undefined,
+	},
 };
 
 /**
- * Incremental, bounded projection of the latest turns of one Claude Code, Pi or Codex session.
+ * Incremental, bounded projection of the latest turns of one Claude Code, Pi, Codex or agy session.
  * `partialStart`: the records begin partway through the session (a bounded
  * backfill), so activity before the first retained prompt forms a turn whose
  * prompt is not retained. Otherwise unlinked activity never starts a turn.
+ * `sessionPath`: the log being read, which names an agy answer's conversation.
  */
-export function createLiveTurnProjector(agent = "claude", { partialStart = false } = {}) {
+export function createLiveTurnProjector(agent = "claude", { partialStart = false, sessionPath = "" } = {}) {
 	const format = LIVE_FORMATS[agent];
-	if (!format) throw new Error("Live recorded activity currently supports Claude Code, Pi and Codex sessions only.");
+	if (!format) throw new Error("Live recorded activity currently supports Claude Code, Pi, Codex and agy sessions only.");
+	const context = { conversation: agent === "agy" ? agyConversation(sessionPath) : undefined };
 	const generation = Math.random().toString(36).slice(2, 10);
 	const turns = [];
 	// Owner links: a turn's `owner` object (resolved among retained turns, so a
@@ -567,7 +626,8 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 			if (running) {
 				target = { turn: running };
 				if (linked(e) && !["skip", "meta"].includes(role)) running.details.note("Some recorded activity is not linked to retained records; it is shown in file order.");
-			} else if (held && !linked(e)) target = { held: held.links[0] };
+			} else if (latest && role === "activity" && format.reply(e) && format.resumes?.has(latest.status)) target = { turn: latest };
+			else if (held && !linked(e)) target = { held: held.links[0] };
 			else if (partialStart && !started && role !== "skip" && role !== "meta") {
 				if (!fallback || !turns.includes(fallback)) {
 					fallback = newTurn(id, partialTask);
@@ -593,7 +653,7 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		if (!turn || role === "skip") return false;
 		// A recorded reply after a recoverable ending continues the latest turn (a
 		// retry); the failed attempt stays shown. A late result alone never reopens it.
-		if (role === "activity" && format.reply(e) && LIVE_RECOVERABLE.has(turn.status) && turn === turns.at(-1)) {
+		if (role === "activity" && format.reply(e) && (LIVE_RECOVERABLE.has(turn.status) || format.resumes?.has(turn.status)) && turn === turns.at(-1)) {
 			turn.status = "running"; turn.finalKey = undefined; touch(turn, at);
 		}
 		const active = turn.status === "running";
@@ -605,7 +665,7 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		const ending = active ? format.ending(e) : undefined;
 		if (!ending) return changed;
 		turn.status = ending;
-		if (ending === "completed") turn.finalKey = format.finalKey(e);
+		if (ending === "completed") turn.finalKey = format.finalKey(e, context);
 		touch(turn, at);
 		return true;
 	};
