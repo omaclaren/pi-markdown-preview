@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deflateSync } from "node:zlib";
+import { crc32, deflateSync } from "node:zlib";
 import { createLiveTurnProjector, LIVE_EVENT_WINDOW, LIVE_TURN_BYTES } from "../shared/turn-details.js";
 import { buildLivePage, liveStatusHtml, renderLiveCard } from "../shared/turn-details-page.js";
 import { createBrowserWatchServer } from "../shared/browser-watch-server.js";
@@ -675,8 +675,8 @@ const agNotice = text => ag("SYSTEM_MESSAGE", "SYSTEM", { content: text });
 const agModel = fields => ag("PLANNER_RESPONSE", "MODEL", { model: "gemini-4-neon-high", ...fields });
 const agOutput = (text, status = "DONE") => ag("GENERIC", "MODEL", { status, content: `Created At: 2026-11-23T17:18:51+13:00\nCompleted At: 2026-11-23T17:18:52+13:00\n${text}` });
 const AGY_CONVERSATION = "03201f23-61b2-411c-8ce0-b0341ef022f0";
-// A 2×2 PNG (chunk checksums aren't checked).
-const pngChunk = (type, data) => { const b = Buffer.alloc(12 + data.length); b.writeUInt32BE(data.length, 0); b.write(type, 4, "ascii"); data.copy(b, 8); return b; };
+// A complete 2×2 PNG.
+const pngChunk = (type, data) => { const b = Buffer.alloc(12 + data.length); b.writeUInt32BE(data.length, 0); b.write(type, 4, "ascii"); data.copy(b, 8); b.writeUInt32BE(crc32(b.subarray(4, 8 + data.length)), 8 + data.length); return b; };
 const TINY_PNG = (() => { const head = Buffer.alloc(13); head.writeUInt32BE(2, 0); head.writeUInt32BE(2, 4); head[8] = 8; head[9] = 2;
  return Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), pngChunk("IHDR", head), pngChunk("IDAT", deflateSync(Buffer.alloc(14))), pngChunk("IEND", Buffer.alloc(0))]).toString("base64"); })();
 const AGY_PATH = `/h/.gemini/antigravity-cli/brain/${AGY_CONVERSATION}/.system_generated/logs/transcript_full.jsonl`;
@@ -691,7 +691,7 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
  live.push(agNotice("SECRET-NOTICE"), 2);
  live.push(agModel({ thinking: "\nPlan\n\n\n", tool_calls: [{ name: "invoke_subagent", args: { Prompt: "Reply ok" } }] }), 2);
  const saved = n => ({ mime_type: "image/png", uri: `file:///h/.gemini/antigravity-cli/brain/x/.system_generated/logs/media/step_3_media_${n}.png` });
- live.push({ ...agOutput("Created the following subagent\n\n"), media: [saved(0), { ...saved(1), data: TINY_PNG }, { ...saved(2), unavailable: "size" }, { ...saved(3), unavailable: "other" }] }, 3);
+ live.push({ ...agOutput("Created the following subagent\n\n"), media: [saved(0), { ...saved(1), data: TINY_PNG }, { ...saved(2), unavailable: "size" }, { ...saved(3), unavailable: "other" }, { ...saved(4), unavailable: JSON.parse('{"toString":1}') }] }, 3);
  assert.equal(live.snapshot("s1").status, "running");
  live.push(agModel({ content: "Waiting for the helper." }), 4);
  let snapshot = live.snapshot("s1");
@@ -701,7 +701,7 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
   ["s4:0", "result", "Tool result"], ["s5:0", "progress", "Assistant progress"]]);
  assert.deepEqual(snapshot.events.map(e => e.text).filter((_, i) => i !== 2), ["Start a helper", "Plan", "Created the following subagent", "Waiting for the helper."], "without agy's metadata, timing lines and surrounding blank lines");
  const images = snapshot.events[3].images;
- assert.deepEqual([images[0], images[2], images[3]], [{ unavailable: "missing" }, { unavailable: "size" }, { unavailable: "missing" }], "an image agy saved beside the transcript shows only with the bytes a reader added");
+ assert.deepEqual([images[0], images[2], images[3], images[4]], [{ unavailable: "missing" }, { unavailable: "size" }, { unavailable: "missing" }, { unavailable: "missing" }], "an image agy saved beside the transcript shows only with the bytes a reader added");
  assert.deepEqual([images[1].mimeType, images[1].data], ["image/png", TINY_PNG]);
  assert.match(snapshot.notices.join(" "), /harness-injected context is omitted/);
  // The helper's reply wakes the model: the turn goes on, and ends with the next answer.

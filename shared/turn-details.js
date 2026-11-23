@@ -240,9 +240,10 @@ function codexItem(t, p, final = false) {
 // that wakes the model): any other step there follows a step that could not be read, which
 // may be the next prompt, so the turn starts after the answer.
 /**
- * The rows of the agy turn that ends with `target`'s answer: `start` to `end`, showing
- * steps numbered from `first`; undefined when the answer can't be matched. A reader that
- * adds what agy saved beside the transcript (images) needs only these rows.
+ * The rows of the agy turn that ends with `target`'s answer, or undefined when the answer
+ * can't be matched: `shown`, the rows its cards come from (the last record of each step from
+ * `first` on), between `start` and `end`. A reader that adds what agy saved beside the
+ * transcript (images) needs only the shown rows.
  */
 export function agyTurnRows(rows, target) {
 	const step = /:(\d+)$/.exec(target.key)?.[1];
@@ -258,16 +259,17 @@ export function agyTurnRows(rows, target) {
 		start--;
 	}
 	if (agyPrompt(rows[start]) !== undefined) first = rows[start].step_index;
-	return { start, end, first };
+	const last = new Map();
+	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && rows[i].step_index >= first) last.set(rows[i].step_index, i);
+	const shown = [];
+	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && last.get(rows[i].step_index) === i) shown.push(i);
+	return { start, end, first, shown };
 }
 
 function agyDetails(rows, target, t) {
 	const turn = agyTurnRows(rows, target);
 	if (!turn) { t.note("The completed turn cannot be matched to this preview snapshot in the bounded history."); return t.result; }
-	const { start, end, first } = turn;
-	const last = new Map();
-	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && rows[i].step_index >= first) last.set(rows[i].step_index, i);
-	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && last.get(rows[i].step_index) === i) agyItem(t, rows[i], i === end);
+	for (const i of turn.shown) agyItem(t, rows[i], i === turn.end);
 	if (!t.result.events.some(e => e.kind === "prompt")) t.note("The input prompt is not available in this recorded portion of the turn.");
 	return t.result;
 }
@@ -290,7 +292,7 @@ function agyItem(t, e, final = false) {
 		const media = (Array.isArray(e.media) ? e.media : []).filter(m => m && typeof m === "object");
 		const image = m => typeof m.mime_type !== "string" || m.mime_type.toLowerCase().startsWith("image/");
 		if (!media.every(image)) t.note("Non-image file attachments are omitted.");
-		const images = media.filter(image).slice(0, 9).flatMap(m => Object.hasOwn(IMAGE_UNAVAILABLE, m.unavailable) ? [{ unavailable: m.unavailable }]
+		const images = media.filter(image).slice(0, 9).flatMap(m => typeof m.unavailable === "string" && Object.hasOwn(IMAGE_UNAVAILABLE, m.unavailable) ? [{ unavailable: m.unavailable }]
 			: recordedImage({ type: "image", mimeType: m.mime_type, data: m.data, uri: m.uri }) ?? []);
 		t.add("result", "Tool result", lines(agyOutput(e.content)), undefined, images);
 	}
