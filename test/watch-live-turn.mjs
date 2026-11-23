@@ -723,6 +723,37 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
  assert.equal(live.snapshot("s1"), undefined, "two turns are kept");
 });
 
+test("Live projection (agy): a step recorded again stays in its first record's turn; a reply after an answer without agy's notice starts a turn; a transcript without a conversation id keys answers by its path", () => {
+ agyIndex = 0;
+ const live = createLiveTurnProjector("agy", { sessionPath: AGY_PATH });
+ live.push(agPrompt("Start the server"), 1);
+ live.push(agModel({ tool_calls: [{ name: "run_command", args: { CommandLine: "serve" } }] }), 1);
+ const server = agOutput("Tool is running as a background task", "RUNNING");
+ live.push(server, 2);
+ live.push(agModel({ content: "Started." }), 3);
+ live.push(agPrompt("Check the logs"), 4);
+ assert.equal(live.current(), "s4");
+ // The server stops during the next turn: its step is recorded again, as done.
+ assert.equal(live.push({ ...server, status: "DONE", content: "server stopped" }, 5), true);
+ assert.deepEqual(labels(live.snapshot("s4")), [["s4:0", "prompt", "Prompt / input"]], "not the running turn's");
+ assert.deepEqual([live.snapshot("s0").status, live.snapshot("s0").events.at(-1).text], ["completed", "server stopped"], "the turn of its first record");
+ live.push(agModel({ content: "Logs are clean." }), 6);
+ assert.equal(live.snapshot("s4").finalKey, `agy:${AGY_CONVERSATION}:5`);
+ // The next prompt was too large to read: the reply after the answer is not that turn's.
+ agyIndex++;
+ assert.equal(live.push(agModel({ content: "Summarised the paste." }), 7), true);
+ assert.equal(live.current(), "s7");
+ const pasted = live.snapshot("s7");
+ assert.deepEqual([pasted.status, pasted.finalKey], ["completed", `agy:${AGY_CONVERSATION}:7`]);
+ assert.match(pasted.notices.join(" "), /prompt is not in the retained recorded activity/);
+ assert.deepEqual([live.snapshot("s4").status, live.snapshot("s4").finalKey], ["completed", `agy:${AGY_CONVERSATION}:5`], "the earlier turn keeps its answer");
+ agyIndex = 0;
+ const renamed = createLiveTurnProjector("agy", { sessionPath: "/p/transcript.jsonl" });
+ renamed.push(agPrompt("Hi"), 1);
+ renamed.push(agModel({ content: "Hello" }), 2);
+ assert.equal(renamed.snapshot("s0").finalKey, "agy:/p/transcript.jsonl:1", "the session reader's key");
+});
+
 test("Live updates (Codex): completion links to the exact response; a task without a final answer returns to Preview; another task's end links nothing", async t => {
  ordinal = 0;
  const dir = await temp(t);

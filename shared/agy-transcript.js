@@ -20,6 +20,9 @@ export function agyConversation(path) {
 	return (folder?.[1] ?? text(path).match(UUID)?.at(-1))?.toLowerCase();
 }
 
+/** What an answer's response key names its conversation by: the conversation, else the transcript's path. */
+export const agyConversationKey = path => agyConversation(path) ?? text(path);
+
 /**
  * What the person typed, for a prompt step: the text inside agy's <USER_REQUEST>, without the
  * metadata agy adds after it (local time, settings changes). Undefined for any other step.
@@ -35,19 +38,14 @@ export function agyPrompt(e) {
 /** A model step's tool calls: `{ name, args }`. */
 export const agyToolCalls = e => Array.isArray(e?.tool_calls) ? e.tool_calls.filter(call => call && typeof call === "object" && !Array.isArray(call)) : [];
 
+/** A step that gives the model input: a prompt, agy's own context, or a notice (a subagent's reply). */
+export const isAgyInput = e => Boolean(agyStep(e)) && ["USER_INPUT", "SYSTEM_MESSAGE"].includes(e.type);
+
 /** A finished model step with text and no tool calls: an answer that ends the turn, for now. */
 export const isAgyFinal = e => Boolean(agyStep(e)) && e.type === "PLANNER_RESPONSE" && e.status === "DONE" && !agyToolCalls(e).length && text(e.content).trim() !== "";
 
 /** The response key the session reader gives an answer: unique across conversations, as step indexes aren't. */
 export const agyResponseKey = (conversation, e) => `agy:${conversation}:${e.step_index}`;
 
-/** A tool step's output, without agy's leading "Created At: …" / "Completed At: …" lines. */
-export function agyOutput(content) {
-	const source = text(content);
-	let at = 0;
-	while (/^(?:Created|Completed) At: [^\n]*(?:\n|$)/.test(source.slice(at, at + 200))) {
-		const newline = source.indexOf("\n", at);
-		at = newline < 0 ? source.length : newline + 1;
-	}
-	return source.slice(at);
-}
+/** A tool step's output, without agy's leading "Created At: …" and "Completed At: …" lines (one of each). */
+export const agyOutput = content => text(content).replace(/^Created At: [^\n]*(?:\n|$)/, "").replace(/^Completed At: [^\n]*(?:\n|$)/, "");

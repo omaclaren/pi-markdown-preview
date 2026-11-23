@@ -4,7 +4,7 @@
 import { createRecordedImageBudget, recordedImage } from "./recorded-images.js";
 import { questionAnswers, recordedQuestionAnswers } from "./ask-user-question.js";
 import { createClaudeResponseAssembler, isClaudeFinal } from "./claude-response.js";
-import { agyConversation, agyOutput, agyPrompt, agyResponseKey, agyStep, agyToolCalls, isAgyFinal } from "./agy-transcript.js";
+import { agyConversationKey, agyOutput, agyPrompt, agyResponseKey, agyStep, agyToolCalls, isAgyFinal, isAgyInput } from "./agy-transcript.js";
 export const TURN_EVENT_LIMIT = 250;
 export const TURN_TEXT_LIMIT = 16_384;
 export const TURN_TOTAL_LIMIT = 256 * 1024;
@@ -234,8 +234,11 @@ function codexItem(t, p, final = false) {
 	else if (["function_call_output", "custom_tool_call_output"].includes(p.type)) t.toolResult("Tool result", p.output, p.call_id);
 }
 
-// agy (agy-transcript.js): a turn runs from a typed prompt to the answer. Steps that
-// were recorded again with a later status are shown as last recorded.
+// agy (agy-transcript.js): a turn runs from a typed prompt to the answer. A step recorded
+// again with a later status is shown as last recorded, and only in the turn it was first
+// recorded in. After an answer the turn goes on only through an input step (agy's notice
+// that wakes the model): any other step there follows a step that could not be read, which
+// may be the next prompt, so the turn starts after the answer.
 function agyDetails(rows, target, t) {
 	const step = /:(\d+)$/.exec(target.key)?.[1];
 	let end = -1;
@@ -243,10 +246,17 @@ function agyDetails(rows, target, t) {
 	if (end < 0 || !isAgyFinal(rows[end]) || text(rows[end].content).trim() !== target.markdown.trim()) {
 		t.note("The completed turn cannot be matched to this preview snapshot in the bounded history."); return t.result;
 	}
-	let start = end;
-	while (start > 0 && agyPrompt(rows[start]) === undefined) start--;
+	const at = new Map();
+	for (let i = 0; i <= end; i++) if (agyStep(rows[i])) at.set(rows[i].step_index, i);
+	let start = end, first = -Infinity;
+	while (start > 0 && agyPrompt(rows[start]) === undefined) {
+		const before = rows[start - 1];
+		if (isAgyFinal(before) && before.step_index < rows[end].step_index && !isAgyInput(rows[at.get(before.step_index + 1)])) { first = before.step_index + 1; break; }
+		start--;
+	}
+	if (agyPrompt(rows[start]) !== undefined) first = rows[start].step_index;
 	const last = new Map();
-	for (let i = start; i <= end; i++) if (agyStep(rows[i])) last.set(rows[i].step_index, i);
+	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && rows[i].step_index >= first) last.set(rows[i].step_index, i);
 	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && last.get(rows[i].step_index) === i) agyItem(t, rows[i], i === end);
 	if (!t.result.events.some(e => e.kind === "prompt")) t.note("The input prompt is not available in this recorded portion of the turn.");
 	return t.result;
@@ -385,7 +395,10 @@ function codexLiveRole(e) {
 	return CODEX_ITEMS.has(p?.type) ? "activity" : "skip";
 }
 
-// agy: steps without links. A typed prompt starts a turn; agy's notices are not shown.
+const agyStatus = e => text(e.status).replace(/[^A-Za-z_]/g, "").slice(0, 24);
+
+// agy: steps record no links, except that a step recorded again follows its RUNNING record.
+// A typed prompt starts a turn; agy's notices are not shown.
 function agyLiveRole(e) {
 	if (!agyStep(e)) return "skip";
 	if (e.type === "USER_INPUT") return agyPrompt(e) === undefined ? "meta" : "start";
@@ -456,16 +469,17 @@ const LIVE_FORMATS = {
 		},
 	},
 	agy: {
-		// A step recorded again with a later status is another record.
-		id: e => agyStep(e) ? `s${e.step_index}${e.status === "DONE" ? "" : `-${text(e.status).replace(/[^A-Za-z_]/g, "").slice(0, 24)}`}` : undefined,
-		parent: () => undefined,
+		// A step recorded again with a later status is another record, in the turn of its first.
+		id: e => agyStep(e) ? `s${e.step_index}${e.status === "DONE" ? "" : `-${agyStatus(e)}`}` : undefined,
+		parent: e => agyStep(e) && e.status !== "RUNNING" ? `s${e.step_index}-RUNNING` : undefined,
 		// A prompt never steers a running turn: agy records no end for a turn that was cut off.
 		linked: e => agyPrompt(e) !== undefined,
 		role: agyLiveRole,
 		results: () => [],
 		project(details, e) { agyItem(details, e); },
-		// The model can answer again in the same turn, woken by a subagent's reply: a reply after
-		// an answer continues the latest turn, which ends again with the next answer.
+		// The model can answer again in the same turn, woken by agy's notice (a subagent's
+		// reply): a reply after an answer and a notice continues the turn, which ends again
+		// with the next answer.
 		reply: e => e.type === "PLANNER_RESPONSE",
 		resumes: new Set(["completed"]),
 		ending: e => isAgyFinal(e) ? "completed" : undefined,
@@ -483,7 +497,7 @@ const LIVE_FORMATS = {
 export function createLiveTurnProjector(agent = "claude", { partialStart = false, sessionPath = "" } = {}) {
 	const format = LIVE_FORMATS[agent];
 	if (!format) throw new Error("Live recorded activity currently supports Claude Code, Pi, Codex and agy sessions only.");
-	const context = { conversation: agent === "agy" ? agyConversation(sessionPath) : undefined };
+	const context = { conversation: agent === "agy" ? agyConversationKey(sessionPath) || undefined : undefined };
 	const generation = Math.random().toString(36).slice(2, 10);
 	const turns = [];
 	// Owner links: a turn's `owner` object (resolved among retained turns, so a
@@ -623,11 +637,20 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		}
 		if (!target && task === undefined) {
 			// No link to anything retained: a gap in what was read, or a format without links.
+			// A notice after the latest turn's answer lets a reply resume that turn (resumes).
+			if (!running && latest && role === "meta" && format.resumes?.has(latest.status)) latest.woken = true;
 			if (running) {
 				target = { turn: running };
 				if (linked(e) && !["skip", "meta"].includes(role)) running.details.note("Some recorded activity is not linked to retained records; it is shown in file order.");
-			} else if (latest && role === "activity" && format.reply(e) && format.resumes?.has(latest.status)) target = { turn: latest };
-			else if (held && !linked(e)) target = { held: held.links[0] };
+			} else if (latest && role === "activity" && format.reply(e) && format.resumes?.has(latest.status)) {
+				// A reply resumes the latest turn after a notice. Without one, it follows a record
+				// that could not be read (a prompt too large to read): it starts a turn of its own.
+				if (latest.woken) target = { turn: latest };
+				else {
+					target = { turn: open(id, at) };
+					target.turn.details.note("This turn's prompt is not in the retained recorded activity.");
+				}
+			} else if (held && !linked(e)) target = { held: held.links[0] };
 			else if (partialStart && !started && role !== "skip" && role !== "meta") {
 				if (!fallback || !turns.includes(fallback)) {
 					fallback = newTurn(id, partialTask);
@@ -653,8 +676,8 @@ export function createLiveTurnProjector(agent = "claude", { partialStart = false
 		if (!turn || role === "skip") return false;
 		// A recorded reply after a recoverable ending continues the latest turn (a
 		// retry); the failed attempt stays shown. A late result alone never reopens it.
-		if (role === "activity" && format.reply(e) && (LIVE_RECOVERABLE.has(turn.status) || format.resumes?.has(turn.status)) && turn === turns.at(-1)) {
-			turn.status = "running"; turn.finalKey = undefined; touch(turn, at);
+		if (role === "activity" && format.reply(e) && (LIVE_RECOVERABLE.has(turn.status) || (format.resumes?.has(turn.status) && turn.woken)) && turn === turns.at(-1)) {
+			turn.status = "running"; turn.finalKey = undefined; turn.woken = false; touch(turn, at);
 		}
 		const active = turn.status === "running";
 		if (role === "meta") { if (active) turn.details.note("Known harness-injected context is omitted; it is not labelled as a user prompt."); return false; }
