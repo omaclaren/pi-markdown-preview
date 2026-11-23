@@ -274,7 +274,11 @@ function agyItem(t, e, final = false) {
 		t.add("reasoning", "Recorded thinking / reasoning", lines(e.thinking));
 		if (!final) t.add("progress", "Assistant progress", lines(e.content));
 		for (const call of agyToolCalls(e)) t.add("tool", `Tool: ${text(call.name)}`, json(call.args));
-	} else if (e.type === "GENERIC") t.add("result", "Tool result", lines(agyOutput(e.content)));
+	} else if (e.type === "GENERIC") {
+		// An image a tool read is saved beside the transcript and referenced, not recorded inline.
+		const images = (Array.isArray(e.media) ? e.media : []).slice(0, 9).flatMap(m => recordedImage({ type: "image", mimeType: m?.mime_type, uri: m?.uri }) ?? []);
+		t.add("result", "Tool result", lines(agyOutput(e.content)), undefined, images);
+	}
 }
 
 // ---- Live: recorded activity of one in-progress turn (Claude Code, Pi, Codex and agy) ----

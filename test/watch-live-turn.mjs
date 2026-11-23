@@ -685,7 +685,7 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
  assert.equal(live.current(), "s1", "the prompt's step names the turn");
  live.push(agNotice("SECRET-NOTICE"), 2);
  live.push(agModel({ thinking: "\nPlan\n\n\n", tool_calls: [{ name: "invoke_subagent", args: { Prompt: "Reply ok" } }] }), 2);
- live.push(agOutput("Created the following subagent\n\n"), 3);
+ live.push({ ...agOutput("Created the following subagent\n\n"), media: [{ mime_type: "image/png", uri: "file:///h/.gemini/antigravity-cli/brain/x/.system_generated/logs/media/step_3_media_0.png" }] }, 3);
  assert.equal(live.snapshot("s1").status, "running");
  live.push(agModel({ content: "Waiting for the helper." }), 4);
  let snapshot = live.snapshot("s1");
@@ -694,6 +694,7 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
  assert.deepEqual(labels(snapshot), [["s1:0", "prompt", "Prompt / input"], ["s3:0", "reasoning", "Recorded thinking / reasoning"], ["s3:1", "tool", "Tool: invoke_subagent"],
   ["s4:0", "result", "Tool result"], ["s5:0", "progress", "Assistant progress"]]);
  assert.deepEqual(snapshot.events.map(e => e.text).filter((_, i) => i !== 2), ["Start a helper", "Plan", "Created the following subagent", "Waiting for the helper."], "without agy's metadata, timing lines and surrounding blank lines");
+ assert.deepEqual(snapshot.events[3].images, [{ unavailable: "missing" }], "an image agy saved beside the transcript is not fetched");
  assert.match(snapshot.notices.join(" "), /harness-injected context is omitted/);
  // The helper's reply wakes the model: the turn goes on, and ends with the next answer.
  assert.equal(live.push(agNotice("[Message] sender=helper content=SECRET-REPLY"), 5), false);
@@ -710,7 +711,7 @@ test("Live projection (agy): a turn from its typed prompt to its answer; a reply
  live.push(agModel({ tool_calls: [{ name: "run_command", args: { CommandLine: "sleep 40" } }] }), 8);
  const running = agOutput("Tool is running as a background task", "RUNNING");
  live.push(running, 9);
- live.push({ ...running, status: "DONE", content: "Created At: x\nfinished" }, 10);
+ live.push({ ...running, status: "DONE", content: "Created At: 2026-11-23T22:02:53+13:00\nCompleted At: 2026-11-23T22:02:53+13:00\nCreated At: 2026-11-23T22:02:53+13:00\nCompleted At: 2026-11-23T22:03:33.25Z\nfinished" }, 10);
  snapshot = live.snapshot("s9");
  assert.deepEqual(labels(snapshot).slice(-2), [["s11-RUNNING:0", "result", "Tool result"], ["s11:0", "result", "Tool result"]]);
  assert.equal(snapshot.events.at(-1).text, "finished");

@@ -47,5 +47,8 @@ export const isAgyFinal = e => Boolean(agyStep(e)) && e.type === "PLANNER_RESPON
 /** The response key the session reader gives an answer: unique across conversations, as step indexes aren't. */
 export const agyResponseKey = (conversation, e) => `agy:${conversation}:${e.step_index}`;
 
-/** A tool step's output, without agy's leading "Created At: …" and "Completed At: …" lines (one of each). */
-export const agyOutput = content => text(content).replace(/^Created At: [^\n]*(?:\n|$)/, "").replace(/^Completed At: [^\n]*(?:\n|$)/, "");
+/**
+ * A tool step's output, without agy's leading timing lines ("Created At: <time>", "Completed At:
+ * <time>"), which can be recorded more than once. Only lines with agy's timestamp are removed.
+ */
+export const agyOutput = content => text(content).replace(/^(?:(?:Created|Completed) At: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)(?:\r?\n|$))+/, "");
