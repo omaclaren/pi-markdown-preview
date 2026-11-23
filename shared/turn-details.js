@@ -1,7 +1,7 @@
 // Read-only projections of recorded turns, not reconstructions of model context.
 // Never expose system/developer messages or opaque signatures. Only bounded,
 // inline raster images from explicit tool results are admitted.
-import { createRecordedImageBudget, recordedImage } from "./recorded-images.js";
+import { createRecordedImageBudget, IMAGE_UNAVAILABLE, recordedImage } from "./recorded-images.js";
 import { questionAnswers, recordedQuestionAnswers } from "./ask-user-question.js";
 import { createClaudeResponseAssembler, isClaudeFinal } from "./claude-response.js";
 import { agyConversationKey, agyOutput, agyPrompt, agyResponseKey, agyStep, agyToolCalls, isAgyFinal, isAgyInput } from "./agy-transcript.js";
@@ -239,13 +239,16 @@ function codexItem(t, p, final = false) {
 // recorded in. After an answer the turn goes on only through an input step (agy's notice
 // that wakes the model): any other step there follows a step that could not be read, which
 // may be the next prompt, so the turn starts after the answer.
-function agyDetails(rows, target, t) {
+/**
+ * The rows of the agy turn that ends with `target`'s answer: `start` to `end`, showing
+ * steps numbered from `first`; undefined when the answer can't be matched. A reader that
+ * adds what agy saved beside the transcript (images) needs only these rows.
+ */
+export function agyTurnRows(rows, target) {
 	const step = /:(\d+)$/.exec(target.key)?.[1];
 	let end = -1;
 	for (let i = 0; i < rows.length; i++) if (step !== undefined && agyStep(rows[i]) && String(rows[i].step_index) === step) end = i;
-	if (end < 0 || !isAgyFinal(rows[end]) || text(rows[end].content).trim() !== target.markdown.trim()) {
-		t.note("The completed turn cannot be matched to this preview snapshot in the bounded history."); return t.result;
-	}
+	if (end < 0 || !isAgyFinal(rows[end]) || text(rows[end].content).trim() !== text(target.markdown).trim()) return undefined;
 	const at = new Map();
 	for (let i = 0; i <= end; i++) if (agyStep(rows[i])) at.set(rows[i].step_index, i);
 	let start = end, first = -Infinity;
@@ -255,6 +258,13 @@ function agyDetails(rows, target, t) {
 		start--;
 	}
 	if (agyPrompt(rows[start]) !== undefined) first = rows[start].step_index;
+	return { start, end, first };
+}
+
+function agyDetails(rows, target, t) {
+	const turn = agyTurnRows(rows, target);
+	if (!turn) { t.note("The completed turn cannot be matched to this preview snapshot in the bounded history."); return t.result; }
+	const { start, end, first } = turn;
 	const last = new Map();
 	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && rows[i].step_index >= first) last.set(rows[i].step_index, i);
 	for (let i = start; i <= end; i++) if (agyStep(rows[i]) && last.get(rows[i].step_index) === i) agyItem(t, rows[i], i === end);
@@ -275,8 +285,13 @@ function agyItem(t, e, final = false) {
 		if (!final) t.add("progress", "Assistant progress", lines(e.content));
 		for (const call of agyToolCalls(e)) t.add("tool", `Tool: ${text(call.name)}`, json(call.args));
 	} else if (e.type === "GENERIC") {
-		// An image a tool read is saved beside the transcript and referenced, not recorded inline.
-		const images = (Array.isArray(e.media) ? e.media : []).slice(0, 9).flatMap(m => recordedImage({ type: "image", mimeType: m?.mime_type, uri: m?.uri }) ?? []);
+		// An image a tool read is saved beside the transcript and referenced; a reader that can
+		// load it adds its bytes (`data`), or why it can't be shown (`unavailable`).
+		const media = (Array.isArray(e.media) ? e.media : []).filter(m => m && typeof m === "object");
+		const image = m => typeof m.mime_type !== "string" || m.mime_type.toLowerCase().startsWith("image/");
+		if (!media.every(image)) t.note("Non-image file attachments are omitted.");
+		const images = media.filter(image).slice(0, 9).flatMap(m => Object.hasOwn(IMAGE_UNAVAILABLE, m.unavailable) ? [{ unavailable: m.unavailable }]
+			: recordedImage({ type: "image", mimeType: m.mime_type, data: m.data, uri: m.uri }) ?? []);
 		t.add("result", "Tool result", lines(agyOutput(e.content)), undefined, images);
 	}
 }
