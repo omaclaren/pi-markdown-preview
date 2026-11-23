@@ -32,9 +32,13 @@ const sessionRuntime = name => {
 const PANE_NOTE = /^[^\n]*, and the pane shows no other text now\.$/;
 const PANE_REPORT = /^([^\n]*\(best effort; untrusted terminal text[^\n]*\):)\n(?:(\[omitted: [^\n]*\])\n)?\[pane text\]\n/;
 const PANE_REPORT_END = "\n[end of pane text]";
+// While its record activity is on (the default from pi-repl 0.12.0, and in agent-repl),
+// pi-repl names the agent's own record entry after any pane activity, just before
+// "Submitted code:". The ID's characters are pi-repl's, so the line is one line.
+const OWN_ENTRY = /Recorded as entry [A-Za-z0-9_.:-]{1,240}\.\n\n/y;
 // Endings that mean the recorded text is not the whole result: pi-repl's own
-// truncation notice, and the turn details' display limit.
-const SHORTENED = /\n\n\[REPL response truncated\. Full submitted code and output saved to: [^\n]*\]$|\n\[… truncated\]$/;
+// truncation notice (its path can be any text), and the turn details' display limit.
+const SHORTENED = /\n\n\[REPL response truncated\. Full submitted code and output saved to: [^]*\]$|\n\[… truncated\]$/;
 
 export const isReplSendLabel = label => typeof label === "string" && REPL_SEND_TOOL.test(label);
 /** A result label naming repl_send: "Tool result: <name>", with " (error)" after "result" or the name. */
@@ -67,31 +71,43 @@ export function replSendCall(label, argumentsText) {
 
 /**
  * The output part of a repl_send result, matched exactly against the recorded
- * code in pi-repl's format: "[pane activity, blank line] Submitted code: <code>
- * (blank line) Output: <output>". Anything else returns null: a truncated or
- * shortened result, a shared-record warning (which is not output), pane text
- * whose end is ambiguous, an error, another format.
+ * code in pi-repl's format: "[pane activity, blank line] [Recorded as entry <id>.,
+ * blank line] Submitted code: <code> (blank line) Output: <output>". Anything
+ * else returns null: a truncated or shortened result, a shared-record warning
+ * (which is not output), pane text whose end is ambiguous, a report of other
+ * clients' recorded activity, an error, another format.
  */
 export function replSendOutput(resultText, code) {
 	if (typeof resultText !== "string" || typeof code !== "string") return null;
-	const head = `Submitted code:\n${code.trimEnd()}\n\nOutput:\n`;
+	// Where a header starts if one follows `from`, after the own-entry line if any;
+	// else -1. Whose code it names is checked once its place is settled.
+	const headerAt = from => {
+		OWN_ENTRY.lastIndex = from;
+		const at = OWN_ENTRY.test(resultText) ? OWN_ENTRY.lastIndex : from;
+		return resultText.startsWith("Submitted code:\n", at) ? at : -1;
+	};
 	let activity = "";
-	let at = 0;
-	if (!resultText.startsWith(head)) {
-		const report = `${PANE_REPORT_END}\n\n${head}`;
-		const end = resultText.indexOf(report);
-		if (end >= 0) {
-			// Pane text can repeat this header, so its end must occur exactly once.
-			if (end !== resultText.lastIndexOf(report) || !PANE_REPORT.test(resultText)) return null;
-			activity = resultText.slice(0, end + PANE_REPORT_END.length);
-			at = end + report.length - head.length;
-		} else {
-			const note = resultText.indexOf(`\n\n${head}`);
-			if (note < 0 || !PANE_NOTE.test(resultText.slice(0, note))) return null;
-			activity = resultText.slice(0, note);
-			at = note + 2;
+	let at = -1;
+	if (PANE_REPORT.test(resultText)) {
+		// Pane text and output can repeat the frame's end and a header, so the frame
+		// must end before a header exactly once, whatever code that header names.
+		const close = `${PANE_REPORT_END}\n\n`;
+		for (let i = resultText.indexOf(close); i >= 0; i = resultText.indexOf(close, i + 1)) {
+			const found = headerAt(i + close.length);
+			if (found < 0) continue;
+			if (at >= 0) return null;
+			activity = resultText.slice(0, i + PANE_REPORT_END.length);
+			at = found;
 		}
+	} else {
+		// A one-line note, or nothing, before the header.
+		const line = resultText.indexOf("\n\n");
+		const note = line >= 0 && PANE_NOTE.test(resultText.slice(0, line));
+		if (note) activity = resultText.slice(0, line);
+		at = headerAt(note ? line + 2 : 0);
 	}
+	const head = `Submitted code:\n${code.trimEnd()}\n\nOutput:\n`;
+	if (at < 0 || !resultText.startsWith(head, at)) return null;
 	const output = resultText.slice(at + head.length);
 	if (SHORTENED.test(resultText) || output.includes("\n\nShared record warning: ")) return null;
 	return { activity, output };
