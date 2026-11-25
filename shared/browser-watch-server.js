@@ -367,8 +367,9 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	// The remembered width applies before the page is laid out, so it never draws narrow first.
 	if (working) watchedHtml = watchedHtml.replace(/<body\b[^>]*>/i, body => `${body}<script>${PAGE_WIDTH_SOURCE}</script>`);
 
-	// A response preview can be saved as shown: a standalone HTML file, or printed.
-	const exportable = !working && !isWaiting;
+	// A rendered preview can be saved as shown: a standalone HTML file, or printed. An HTML
+	// file's page is the file itself, shown isolated, so there is nothing to export.
+	const exportable = !working && !isWaiting && navigation.exportable !== false;
 	const sourceControl = sourceLabel
 		? `<span id="pi-markdown-preview-watch-source" data-watch-control="source" title="${escapeBrowserWatchHtmlAttribute(sourceLabel)}">${escapeBrowserWatchHtmlText(sourceLabel)}</span>`
 		: "";
@@ -698,6 +699,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
   const printButton = navigation?.querySelector('[data-watch-control="print"]');
   let exporting = false;
   let exportFeedbackTimer;
+  // While an export copies the page, following a newer response would leave it.
+  let deferredRevisionState;
   exportButton?.addEventListener('click', async () => {
     if (exporting) return;
     exporting = true;
@@ -710,17 +713,23 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       exportButton.textContent = 'Exported';
     } catch (error) {
       console.error('Export failed:', error);
-      exportButton.textContent = 'Export failed';
+      exportButton.textContent = error?.name === 'StillRendering' ? 'Still rendering' : 'Export failed';
     } finally {
       exporting = false;
       exportButton.removeAttribute('aria-disabled');
       exportButton.removeAttribute('aria-busy');
       exportFeedbackTimer = window.setTimeout(() => { exportButton.textContent = 'Export HTML'; }, 1400);
+      // A newer response that arrived meanwhile is followed now.
+      if (deferredRevisionState) { const state = deferredRevisionState; deferredRevisionState = undefined; onRevisionState(state); }
     }
   });
-  printButton?.addEventListener('click', () => {
+  printButton?.addEventListener('click', async () => {
     dismissPanels(true);
-    window.PiMarkdownPreviewExport?.print();
+    try {
+      await window.PiMarkdownPreviewExport?.print();
+    } catch (error) {
+      console.error('Print failed:', error);
+    }
   });
   const canonicalTarget = new URL(revisionUrl(revision), window.location.href);
   if (previewLink && workingLink) { canonicalTarget.searchParams.set('identity', identity); canonicalTarget.searchParams.set('instance', instance); }
@@ -943,6 +952,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     navigateToLink(event.key === 'ArrowLeft' ? previousLink : nextLink, true);
   });
   function onRevisionState(state) {
+    if (exporting) { deferredRevisionState = state; return; }
     if (state.instance && instance && state.instance !== instance) {
       // The same watcher restarted: revision numbers belong to the old run.
       if (working) {
@@ -1327,6 +1337,7 @@ export async function createBrowserWatchServer(initialHtml, resourceRoot, option
 				replUrl: options.repl ? `${REPL_PREFIX}?identity=${identity}&instance=${instance}` : undefined,
 				sourceLabel: options.sourceLabel,
 				titleSuffix: options.titleSuffix,
+				exportable: !selectedDocument.htmlFile,
 				wrapScope,
 				preserveReadingPosition: options.preserveReadingPosition,
 				reconnectAfterStop: fixedPort !== 0,
