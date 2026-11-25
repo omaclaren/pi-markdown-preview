@@ -38,6 +38,7 @@ const WORKING_IMAGES_SOURCE = readFileSync(new URL("../client/working-images.js"
 const LIVE_VIEW_SOURCE = readFileSync(new URL("../client/live-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const REPL_VIEW_SOURCE = readFileSync(new URL("../client/repl-view.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const FOLLOW_ACTIVITY_SOURCE = readFileSync(new URL("../client/follow-activity.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
+const PREVIEW_EXPORT_SOURCE = readFileSync(new URL("../client/preview-export.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const PAGE_WIDTH_SOURCE = readFileSync(new URL("../client/page-width.js", import.meta.url), "utf8").replace(/<\/script/gi, "<\\/script");
 const WATCH_CONTROLS_STYLE = readFileSync(new URL("../client/watch-controls.css", import.meta.url), "utf8");
 const DEFAULT_HISTORY_LIMIT = 20;
@@ -366,6 +367,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	// The remembered width applies before the page is laid out, so it never draws narrow first.
 	if (working) watchedHtml = watchedHtml.replace(/<body\b[^>]*>/i, body => `${body}<script>${PAGE_WIDTH_SOURCE}</script>`);
 
+	// A response preview can be saved as shown: a standalone HTML file, or printed.
+	const exportable = !working && !isWaiting;
 	const sourceControl = sourceLabel
 		? `<span id="pi-markdown-preview-watch-source" data-watch-control="source" title="${escapeBrowserWatchHtmlAttribute(sourceLabel)}">${escapeBrowserWatchHtmlText(sourceLabel)}</span>`
 		: "";
@@ -385,6 +388,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
       <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" title="Latest revision (Option/Alt+Shift+Right)" aria-keyshortcuts="Alt+Shift+ArrowRight" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
       <button data-watch-control="wrap-code" type="button" hidden></button>
+      ${exportable ? `<button data-watch-control="export-html" type="button" data-export-name="${escapeBrowserWatchHtmlAttribute(sourceLabel || "")}" title="Download this response as one HTML file, as shown here" aria-live="polite">Export HTML</button>
+      <button data-watch-control="print" type="button" title="Print this response, or save it as PDF from the print dialog">Print / PDF</button>` : ""}
       <button id="pi-markdown-preview-watch-shortcuts-button" data-watch-control="shortcuts" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="pi-markdown-preview-watch-shortcuts" title="Keyboard shortcuts (?)">Keyboard shortcuts</button>
     </div>
   </div>
@@ -689,6 +694,34 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       copyFeedbackTimer = window.setTimeout(() => { copyLinkButton.textContent = 'Copy link'; }, 1400);
     }
   });
+  const exportButton = navigation?.querySelector('[data-watch-control="export-html"]');
+  const printButton = navigation?.querySelector('[data-watch-control="print"]');
+  let exporting = false;
+  let exportFeedbackTimer;
+  exportButton?.addEventListener('click', async () => {
+    if (exporting) return;
+    exporting = true;
+    clearTimeout(exportFeedbackTimer);
+    exportButton.textContent = 'Exporting…';
+    exportButton.setAttribute('aria-disabled', 'true');
+    exportButton.setAttribute('aria-busy', 'true');
+    try {
+      await window.PiMarkdownPreviewExport.downloadHtml(exportButton.getAttribute('data-export-name') || '');
+      exportButton.textContent = 'Exported';
+    } catch (error) {
+      console.error('Export failed:', error);
+      exportButton.textContent = 'Export failed';
+    } finally {
+      exporting = false;
+      exportButton.removeAttribute('aria-disabled');
+      exportButton.removeAttribute('aria-busy');
+      exportFeedbackTimer = window.setTimeout(() => { exportButton.textContent = 'Export HTML'; }, 1400);
+    }
+  });
+  printButton?.addEventListener('click', () => {
+    dismissPanels(true);
+    window.PiMarkdownPreviewExport?.print();
+  });
   const canonicalTarget = new URL(revisionUrl(revision), window.location.href);
   if (previewLink && workingLink) { canonicalTarget.searchParams.set('identity', identity); canonicalTarget.searchParams.set('instance', instance); }
   const canonicalUrl = canonicalTarget.pathname + canonicalTarget.search + window.location.hash;
@@ -961,12 +994,13 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     window.removeEventListener('keydown', onPanelEscape);
     window.removeEventListener('keydown', clearRestoredPointerFocus, true);
     clearTimeout(copyFeedbackTimer);
+    clearTimeout(exportFeedbackTimer);
   }, { once: true });
   window.addEventListener('pageshow', (event) => { if (event.persisted) window.location.reload(); });
 })();
 </script>`;
 
-	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}${live ? `<script>${LIVE_VIEW_SOURCE}</script>\n` : ""}${repl ? `<script>${REPL_VIEW_SOURCE}</script>\n` : ""}${navigation.liveUrl ? `<script>${FOLLOW_ACTIVITY_SOURCE}</script>\n` : ""}`;
+	const readingPositionScript = `<script>${READING_POSITION_SOURCE}</script>\n${working ? `<script>${WORKING_STATE_SOURCE}</script>\n<script>${WORKING_IMAGES_SOURCE}</script>\n` : ""}${live ? `<script>${LIVE_VIEW_SOURCE}</script>\n` : ""}${repl ? `<script>${REPL_VIEW_SOURCE}</script>\n` : ""}${exportable ? `<script>${PREVIEW_EXPORT_SOURCE}</script>\n` : ""}${navigation.liveUrl ? `<script>${FOLLOW_ACTIVITY_SOURCE}</script>\n` : ""}`;
 	const watchUi = `${readingPositionScript}${watchNavigation}\n${watchScript}`;
 	const completeHtml = /<\/body>/i.test(watchedHtml)
 		? watchedHtml.replace(/<\/body>/i, `${watchUi}\n</body>`)
