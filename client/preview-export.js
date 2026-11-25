@@ -1,6 +1,5 @@
-// Export of a watched response preview: a standalone HTML file of the response as
-// the page shows it, and printing (which the browser can save as PDF). Everything
-// happens in this page: the file is built from what is already rendered, so the
+// Export of a watched preview: a standalone HTML file of the response or file as the
+// page shows it. Everything happens in this page: the file is built from what is already rendered, so the
 // server gains no route, and the file carries no script and no link to the preview.
 (() => {
 	// Same-origin images and drawn figures are copied into the file, within these limits.
@@ -206,10 +205,5 @@
 		return link.download;
 	}
 
-	async function print() {
-		if (!await ready()) throw stillRendering();
-		window.print();
-	}
-
-	window.PiMarkdownPreviewExport = { standaloneHtml, downloadHtml, print, fileName };
+	window.PiMarkdownPreviewExport = { standaloneHtml, downloadHtml, fileName };
 })();

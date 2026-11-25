@@ -8,12 +8,12 @@ import { createBrowserWatchServer, prepareBrowserWatchHtml } from "../shared/bro
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT1kAAAAASUVORK5CYII=", "base64");
 const shell = "<!doctype html><html><head></head><body><article id=\"preview-root\"><p>Response</p></article></body></html>";
-const offers = html => /<button data-watch-control="(?:export-html|print)"|window\.PiMarkdownPreviewExport = /.test(html);
+const offers = html => /<button data-watch-control="export-html"|window\.PiMarkdownPreviewExport = /.test(html);
 
-test("Export: only a rendered preview offers Export HTML and Print, and its file name comes from the source", async t => {
+test("Export: only a rendered preview offers Export HTML, and its file name comes from the source", async t => {
 	const preview = prepareBrowserWatchHtml(shell, { revision: 2, revisions: [1, 2], sourceLabel: 'notes/<unsafe>&".md' });
 	assert.match(preview, /data-watch-control="export-html" type="button" data-export-name="notes\/&lt;unsafe&gt;&amp;&quot;\.md"/);
-	assert.match(preview, /<button data-watch-control="print"/);
+	assert.doesNotMatch(preview, /data-watch-control="print"/, "Printing is the browser's own.");
 	assert.match(preview, /window\.PiMarkdownPreviewExport = /, "The export script is on the page.");
 	for (const [name, navigation] of [
 		["waiting", { revision: 1, revisions: [1], isWaiting: true }],
@@ -36,7 +36,7 @@ test("Export: only a rendered preview offers Export HTML and Print, and its file
 });
 
 const browserPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-test("Export: the file is the response as shown, standalone and inert; Print waits for rendering", {
+test("Export: the file is the response as shown once rendered, standalone and inert", {
 	skip: !browserPath && "set PUPPETEER_EXECUTABLE_PATH to a dedicated test browser", timeout: 60_000,
 }, async t => {
 	const root = await mkdtemp(join(tmpdir(), "preview-export-"));
@@ -78,19 +78,10 @@ test("Export: the file is the response as shown, standalone and inert; Print wai
 	page.on("request", request => new URL(request.url()).hostname === "127.0.0.1" || request.url().startsWith("data:") || request.url().startsWith("blob:") ? request.continue() : request.abort());
 	await page.goto(server.url, { waitUntil: "domcontentloaded" });
 
-	// Print, chosen while the page is still rendering, closes the menu and prints once it's done.
-	await page.evaluate(() => {
-		window.__printed = [];
-		window.print = () => { window.__printed.push(window.__mermaidDone === true); };
-	});
-	await page.click('[data-watch-control="toggle"]');
+	// Asked while the page is still rendering, the export waits for it: the figures have their pixels.
 	assert.equal(await page.evaluate(() => window.__mermaidDone === true), false, "Still rendering.");
-	await page.click('[data-watch-control="print"]');
-	assert.equal(await page.$eval('[data-watch-control="controls"]', panel => panel.hidden), true);
-	await page.waitForFunction(() => window.__printed.length === 1);
-	assert.deepEqual(await page.evaluate(() => window.__printed), [true], "It printed once, after rendering.");
-
 	const file = await page.evaluate(() => window.PiMarkdownPreviewExport.standaloneHtml());
+	assert.equal(await page.evaluate(() => window.__mermaidDone === true), true);
 	assert.match(file, /^<!doctype html>\n<html/);
 	assert.match(file, /<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: http: https:;/);
 	assert.doesNotMatch(file, /<script|<button|preview-code-block-controls"|pdf-page-preview-badge|pi-markdown-preview-watch-nav|127\.0\.0\.1|__pi_markdown_preview|token=|identity=|revision=/);

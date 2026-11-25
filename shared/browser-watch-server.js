@@ -367,8 +367,8 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
 	// The remembered width applies before the page is laid out, so it never draws narrow first.
 	if (working) watchedHtml = watchedHtml.replace(/<body\b[^>]*>/i, body => `${body}<script>${PAGE_WIDTH_SOURCE}</script>`);
 
-	// A rendered preview can be saved as shown: a standalone HTML file, or printed. An HTML
-	// file's page is the file itself, shown isolated, so there is nothing to export.
+	// A rendered preview can be saved as shown, as a standalone HTML file. An HTML file's
+	// page is the file itself, shown isolated, so there is nothing to export.
 	const exportable = !working && !isWaiting && navigation.exportable !== false;
 	const sourceControl = sourceLabel
 		? `<span id="pi-markdown-preview-watch-source" data-watch-control="source" title="${escapeBrowserWatchHtmlAttribute(sourceLabel)}">${escapeBrowserWatchHtmlText(sourceLabel)}</span>`
@@ -389,8 +389,7 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       <a id="pi-markdown-preview-watch-next" data-watch-control="next" title="Next revision (Option/Alt+Right)" aria-keyshortcuts="Alt+ArrowRight" ${linkAttributes(isWaiting ? undefined : nextRevision)}>Next →</a>
       <a id="pi-markdown-preview-watch-latest" data-watch-control="latest" title="Latest revision (Option/Alt+Shift+Right)" aria-keyshortcuts="Alt+Shift+ArrowRight" ${linkAttributes(isWaiting || revision === latestRevision ? undefined : latestRevision)}>Latest</a>
       <button data-watch-control="wrap-code" type="button" hidden></button>
-      ${exportable ? `<button data-watch-control="export-html" type="button" data-export-name="${escapeBrowserWatchHtmlAttribute(sourceLabel || "")}" title="Download this response as one HTML file, as shown here" aria-live="polite">Export HTML</button>
-      <button data-watch-control="print" type="button" title="Print this response, or save it as PDF from the print dialog">Print / PDF</button>` : ""}
+      ${exportable ? `<button data-watch-control="export-html" type="button" data-export-name="${escapeBrowserWatchHtmlAttribute(sourceLabel || "")}" title="Download what's shown here as one HTML file" aria-live="polite">Export HTML</button>` : ""}
       <button id="pi-markdown-preview-watch-shortcuts-button" data-watch-control="shortcuts" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="pi-markdown-preview-watch-shortcuts" title="Keyboard shortcuts (?)">Keyboard shortcuts</button>
     </div>
   </div>
@@ -696,7 +695,6 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
     }
   });
   const exportButton = navigation?.querySelector('[data-watch-control="export-html"]');
-  const printButton = navigation?.querySelector('[data-watch-control="print"]');
   let exporting = false;
   let exportFeedbackTimer;
   // While an export copies the page, following a newer response would leave it.
@@ -721,14 +719,6 @@ export function prepareBrowserWatchHtml(html, navigation, scriptNonce) {
       exportFeedbackTimer = window.setTimeout(() => { exportButton.textContent = 'Export HTML'; }, 1400);
       // A newer response that arrived meanwhile is followed now.
       if (deferredRevisionState) { const state = deferredRevisionState; deferredRevisionState = undefined; onRevisionState(state); }
-    }
-  });
-  printButton?.addEventListener('click', async () => {
-    dismissPanels(true);
-    try {
-      await window.PiMarkdownPreviewExport?.print();
-    } catch (error) {
-      console.error('Print failed:', error);
     }
   });
   const canonicalTarget = new URL(revisionUrl(revision), window.location.href);
