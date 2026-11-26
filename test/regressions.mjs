@@ -2240,6 +2240,27 @@ try {
 	assert.equal(Check(previewExportParameters, { format: "pdf", source: "other" }), false, "preview_export should reject invalid optional enum values.");
 	assert.equal(Check(previewExportParameters, { source: "file" }), false, "preview_export should continue requiring format.");
 	assert.equal(Check(previewExportParameters, { format: "pdf", unexpected: true }), false, "preview_export should continue rejecting additional properties.");
+	assert.deepEqual(
+		Object.keys(previewExportParameters.properties).sort(),
+		["fontSizePx", "format", "inputFormat", "markdown", "open", "outputPath", "path", "resourcePath", "source"],
+		"preview_export should keep every parameter.",
+	);
+	const modelFacingBytes = Buffer.byteLength(
+		[
+			defaultRegistrations.toolDefinitions[0].description,
+			defaultRegistrations.toolDefinitions[0].promptSnippet,
+			...defaultRegistrations.toolDefinitions[0].promptGuidelines,
+			...Object.values(previewExportParameters.properties).map((property) => property.description ?? ""),
+		].join(" "),
+		"utf8",
+	);
+	assert.ok(
+		modelFacingBytes <= 1200,
+		`preview_export model-facing prose should stay compact (now ${modelFacingBytes} bytes) rather than restating parameter names, enum values and defaults.`,
+	);
+	for (const guideline of defaultRegistrations.toolDefinitions[0].promptGuidelines) {
+		assert.match(guideline, /preview_export/, "Each preview_export guideline should name the tool, since Pi appends guidelines flat.");
+	}
 
 	for (const disabledValue of ["0", "false", "FALSE", " no ", "off"]) {
 		process.env[exportToolEnvName] = disabledValue;

@@ -287,32 +287,30 @@ const PREVIEW_EXPORT_SOURCES = ["last_assistant", "file", "markdown"] as const;
 const PREVIEW_INPUT_FORMATS = ["markdown", "latex"] as const;
 
 const previewExportSchema = Type.Object({
-	format: stringEnum(PREVIEW_EXPORT_FORMATS, {
-		description: "Artifact format to produce: pdf, html, or png image page(s).",
-	}),
+	format: stringEnum(PREVIEW_EXPORT_FORMATS),
 	source: Type.Optional(stringEnum(PREVIEW_EXPORT_SOURCES, {
-		description: "Where the input content comes from. Defaults to markdown when markdown is provided, file when path is provided, otherwise last_assistant.",
+		description: "Defaults to markdown if markdown is set, file if path is set, otherwise last_assistant.",
 	})),
 	path: Type.Optional(Type.String({
-		description: "Source file path when source is file. Relative paths resolve against pi's current working directory. A leading @ is ignored.",
+		description: "Read when source is file; relative to cwd, and a leading @ is ignored.",
 	})),
 	markdown: Type.Optional(Type.String({
-		description: "Markdown or LaTeX content to render when source is markdown. Prefer this for content composed in the same assistant turn.",
+		description: "Markdown/LaTeX content rendered when source is markdown.",
 	})),
 	inputFormat: Type.Optional(stringEnum(PREVIEW_INPUT_FORMATS, {
-		description: "Interpret direct markdown content as markdown or latex. File inputs auto-detect .tex.",
+		description: "Applies to markdown content; file inputs detect .tex automatically.",
 	})),
 	resourcePath: Type.Optional(Type.String({
-		description: "Base directory for resolving relative images/assets when source is markdown. Defaults to pi's current working directory.",
+		description: "Base directory for relative images/assets in markdown content. Defaults to cwd.",
 	})),
 	outputPath: Type.Optional(Type.String({
-		description: "Optional destination path. Relative paths resolve against pi's current working directory. PNG exports with multiple pages append -1-of-N, -2-of-N, etc.",
+		description: "Destination path, relative to cwd. Multi-page PNG exports append -1-of-N, -2-of-N.",
 	})),
 	open: Type.Optional(Type.Boolean({
-		description: "Open the generated artifact locally after writing it. Defaults to false for headless/remote sessions.",
+		description: "Open the artifact after writing. Defaults to false.",
 	})),
 	fontSizePx: Type.Optional(Type.Number({
-		description: `Font size for HTML/PNG preview output, ${MIN_PREVIEW_FONT_SIZE_PX}-${MAX_PREVIEW_FONT_SIZE_PX}px.`,
+		description: "Font size for HTML/PNG output.",
 		minimum: MIN_PREVIEW_FONT_SIZE_PX,
 		maximum: MAX_PREVIEW_FONT_SIZE_PX,
 	})),
@@ -6114,11 +6112,11 @@ export default function (pi: ExtensionAPI) {
 			name: "preview_export",
 			label: "Preview Export",
 			description: "Render Markdown/LaTeX, a local file, or the latest assistant response to PDF, HTML, or PNG artifact files. Use for remote/headless/Telegram-style sessions where slash-command previews cannot display interactively.",
-			promptSnippet: "Export rendered Markdown/LaTeX previews as PDF, HTML, or PNG artifact files",
+			promptSnippet: "Export rendered Markdown/LaTeX previews as artifact files",
 			promptGuidelines: [
-				"Use preview_export when the user asks to turn the latest response, provided Markdown/LaTeX, or a local Markdown/LaTeX/code file into a PDF, HTML page, or image file.",
-				"If exporting content composed in the same assistant turn, preview_export should receive that content in its markdown parameter instead of relying on last_assistant.",
-				"preview_export returns local artifact paths; use another available sending/uploading tool to deliver those files to the user when requested.",
+				"Use preview_export when the user asks for a PDF, HTML page, or image file of a response, supplied Markdown/LaTeX, or a local file.",
+				"When exporting content composed in the same turn, pass it via preview_export's markdown parameter, not last_assistant.",
+				"preview_export returns local artifact paths; send them with a sending/uploading tool when the user asks.",
 			],
 			parameters: previewExportSchema,
 			async execute(_toolCallId, params, signal, onUpdate, ctx) {
